@@ -246,102 +246,86 @@ jobs:
           }
           Write-Output "Checksum verified: $hash1"
 
-      - name: Generate chocolateyinstall.ps1
+      - name: Build and push Chocolatey package
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $ver = "${{ steps.version.outputs.VERSION }}"
           $tag = "${{ steps.version.outputs.TAG }}"
           $hash = "${{ steps.checksum.outputs.SHA256 }}"
           $url = "https://github.com/${{ github.repository }}/releases/download/$tag/psmux-$tag-windows-x64.zip"
-
-          $script = @"
-          `$ErrorActionPreference = 'Stop'
-
-          `$toolsDir = "`$(Split-Path -Parent `$MyInvocation.MyCommand.Definition)"
-          `$url64 = '$url'
-
-          `$packageArgs = @{
-            packageName    = `$env:ChocolateyPackageName
-            unzipLocation  = `$toolsDir
-            url64bit       = `$url64
-            checksum64     = '$hash'
-            checksumType64 = 'sha256'
-          }
-
-          Install-ChocolateyZipPackage @packageArgs
-
-          # Create shims for psmux, pmux, and tmux
-          `$psmuxPath = Join-Path `$toolsDir "psmux.exe"
-          `$pmuxPath = Join-Path `$toolsDir "pmux.exe"
-          `$tmuxPath = Join-Path `$toolsDir "tmux.exe"
-
-          Install-BinFile -Name "psmux" -Path `$psmuxPath
-          Install-BinFile -Name "pmux" -Path `$pmuxPath
-          Install-BinFile -Name "tmux" -Path `$tmuxPath
-          "@
-
-          # Remove leading whitespace from here-string indentation
-          $script = ($script -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
+          $utf8 = New-Object System.Text.UTF8Encoding $false
 
           New-Item -ItemType Directory -Path "choco-pkg/tools" -Force | Out-Null
-          Set-Content -Path "choco-pkg/tools/chocolateyinstall.ps1" -Value $script -NoNewline
-          Write-Output "Generated chocolateyinstall.ps1 with checksum $hash"
 
-      - name: Generate chocolateyuninstall.ps1
-        shell: pwsh
-        run: |
-          $script = @"
-          Uninstall-BinFile -Name "psmux"
-          Uninstall-BinFile -Name "pmux"
-          Uninstall-BinFile -Name "tmux"
-          "@
-          $script = ($script -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
-          Set-Content -Path "choco-pkg/tools/chocolateyuninstall.ps1" -Value $script -NoNewline
+          # --- chocolateyinstall.ps1 ---
+          $install = @(
+            '$ErrorActionPreference = ''Stop'''
+            ''
+            '$toolsDir = "$(Split-Path -Parent $MyInvocation.MyCommand.Definition)"'
+            ('$url64 = ''{0}''' -f $url)
+            ''
+            '$packageArgs = @{'
+            '  packageName    = $env:ChocolateyPackageName'
+            '  unzipLocation  = $toolsDir'
+            '  url64bit       = $url64'
+            ('  checksum64     = ''{0}''' -f $hash)
+            '  checksumType64 = ''sha256'''
+            '}'
+            ''
+            'Install-ChocolateyZipPackage @packageArgs'
+            ''
+            '$psmuxPath = Join-Path $toolsDir "psmux.exe"'
+            '$pmuxPath = Join-Path $toolsDir "pmux.exe"'
+            '$tmuxPath = Join-Path $toolsDir "tmux.exe"'
+            ''
+            'Install-BinFile -Name "psmux" -Path $psmuxPath'
+            'Install-BinFile -Name "pmux" -Path $pmuxPath'
+            'Install-BinFile -Name "tmux" -Path $tmuxPath'
+          ) -join "`n"
+          [IO.File]::WriteAllText("$PWD/choco-pkg/tools/chocolateyinstall.ps1", $install, $utf8)
 
-      - name: Generate nuspec
-        shell: pwsh
-        run: |
-          $ver = "${{ steps.version.outputs.VERSION }}"
-          $nuspec = @"
-          <?xml version="1.0" encoding="utf-8"?>
-          <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
-            <metadata>
-              <id>psmux</id>
-              <version>$ver</version>
-              <title>psmux - Terminal Multiplexer for Windows</title>
-              <authors>marlocarlo</authors>
-              <owners>marlocarlo</owners>
-              <licenseUrl>https://github.com/marlocarlo/psmux/blob/master/LICENSE</licenseUrl>
-              <projectUrl>https://github.com/marlocarlo/psmux</projectUrl>
-              <requireLicenseAcceptance>false</requireLicenseAcceptance>
-              <description>Terminal multiplexer for Windows - tmux alternative for PowerShell and Windows Terminal. Includes psmux, pmux, and tmux commands.</description>
-              <summary>Terminal multiplexer for Windows (tmux alternative)</summary>
-              <releaseNotes>https://github.com/marlocarlo/psmux/releases</releaseNotes>
-              <tags>terminal multiplexer tmux powershell cli windows psmux pmux</tags>
-              <packageSourceUrl>https://github.com/marlocarlo/psmux</packageSourceUrl>
-              <docsUrl>https://github.com/marlocarlo/psmux#readme</docsUrl>
-              <bugTrackerUrl>https://github.com/marlocarlo/psmux/issues</bugTrackerUrl>
-            </metadata>
-            <files>
-              <file src="tools\**" target="tools" />
-            </files>
-          </package>
-          "@
-          $nuspec = ($nuspec -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
-          Set-Content -Path "choco-pkg/psmux.nuspec" -Value $nuspec -NoNewline
+          # --- chocolateyuninstall.ps1 ---
+          $uninstall = @(
+            'Uninstall-BinFile -Name "psmux"'
+            'Uninstall-BinFile -Name "pmux"'
+            'Uninstall-BinFile -Name "tmux"'
+          ) -join "`n"
+          [IO.File]::WriteAllText("$PWD/choco-pkg/tools/chocolateyuninstall.ps1", $uninstall, $utf8)
 
-      - name: Pack Chocolatey package
-        shell: pwsh
-        run: |
+          # --- nuspec ---
+          $nuspec = @(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">'
+            '  <metadata>'
+            '    <id>psmux</id>'
+            ('    <version>{0}</version>' -f $ver)
+            '    <title>psmux - Terminal Multiplexer for Windows</title>'
+            '    <authors>marlocarlo</authors>'
+            '    <owners>marlocarlo</owners>'
+            '    <licenseUrl>https://github.com/marlocarlo/psmux/blob/master/LICENSE</licenseUrl>'
+            '    <projectUrl>https://github.com/marlocarlo/psmux</projectUrl>'
+            '    <requireLicenseAcceptance>false</requireLicenseAcceptance>'
+            '    <description>Terminal multiplexer for Windows - tmux alternative for PowerShell and Windows Terminal. Includes psmux, pmux, and tmux commands.</description>'
+            '    <summary>Terminal multiplexer for Windows (tmux alternative)</summary>'
+            '    <releaseNotes>https://github.com/marlocarlo/psmux/releases</releaseNotes>'
+            '    <tags>terminal multiplexer tmux powershell cli windows psmux pmux</tags>'
+            '    <packageSourceUrl>https://github.com/marlocarlo/psmux</packageSourceUrl>'
+            '    <docsUrl>https://github.com/marlocarlo/psmux#readme</docsUrl>'
+            '    <bugTrackerUrl>https://github.com/marlocarlo/psmux/issues</bugTrackerUrl>'
+            '  </metadata>'
+            '  <files>'
+            '    <file src="tools\**" target="tools" />'
+            '  </files>'
+            '</package>'
+          ) -join "`n"
+          [IO.File]::WriteAllText("$PWD/choco-pkg/psmux.nuspec", $nuspec, $utf8)
+
+          # --- Pack and push ---
           cd choco-pkg
           choco pack psmux.nuspec
-          Get-ChildItem *.nupkg
-
-      - name: Push to Chocolatey
-        shell: pwsh
-        run: |
-          cd choco-pkg
           $nupkg = (Get-ChildItem *.nupkg)[0].Name
+          Write-Output "Packed: $nupkg"
           choco push $nupkg --source https://push.chocolatey.org/ --api-key ${{ secrets.CHOCOLATEY_API_KEY }}
           Write-Output "Successfully pushed $nupkg to Chocolatey"
 

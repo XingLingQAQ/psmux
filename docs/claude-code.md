@@ -62,6 +62,56 @@ set -g claude-code-fix-tty off
 
 The `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var is always set (not gated by any option) since it's required for the feature to work at all.
 
+## Two Agent Systems in Claude Code
+
+Claude Code has **two completely separate agent systems**. Understanding both is critical because psmux can only control one of them.
+
+### 1. Teammate Agents (tmux panes) ✅
+
+The **teammate system** spawns agents in visible tmux panes. This is the system psmux fully supports.
+
+- Triggered when the model passes `team_name` + `name` to the subagent tool
+- Gated by `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (psmux sets this)
+- Controlled by `--teammate-mode tmux` (psmux injects this)
+- Each agent gets its own pane with full terminal visibility
+- Lower-tier models (Haiku, Sonnet) tend to prefer this path
+
+### 2. Worktree Agents (in-process, invisible) ⚠️
+
+The **worktree system** creates isolated git worktrees and runs agents in-process — **invisible to the user**.
+
+- Triggered when the model passes `isolation: "worktree"` to the subagent tool
+- Creates git worktrees at `.claude/worktrees/agent-<id>/` via `git worktree add`
+- Each agent works on a separate branch in an isolated repo copy
+- Runs entirely in-process (no pane, no terminal output visible)
+- Higher-tier models (Opus) tend to prefer this path for git-level isolation
+- **On Windows, worktree tmux integration is hardcoded disabled** (`"--tmux is not supported on Windows"`)
+- There is **no env var or setting** to force worktree agents into tmux panes
+
+### Why Opus says "Let me launch agents in worktrees"
+
+Both systems are exposed through the **same subagent tool**. The model chooses which to use:
+
+| Parameter | System | Visibility | Model preference |
+|-----------|--------|------------|-----------------|
+| `team_name` + `name` | Teammate | Visible tmux pane | Haiku, Sonnet |
+| `isolation: "worktree"` | Worktree | Invisible in-process | Opus |
+
+Opus prefers worktree agents because they provide **git-level isolation** — each agent works on its own branch and can't cause merge conflicts with other agents. The tradeoff is zero visibility.
+
+### Workaround: Project Instructions
+
+Since the model decides which system to use, you can influence its choice via `CLAUDE.md` project instructions:
+
+```markdown
+# Agent Configuration
+When spawning subagents, always use the teammate system (team_name + name parameters)
+instead of worktree isolation. This ensures agents are visible in tmux panes.
+Do NOT use isolation: "worktree" — use teammates instead.
+```
+
+Place this in your project's `CLAUDE.md` or `~/.claude/CLAUDE.md` for global effect. This is a **best-effort** approach — the model may still choose worktree isolation for complex parallel tasks.
+
 ## Important: Interactive Mode Required
 
 Agent teams spawn in separate tmux panes only when Claude Code is running **interactively** (the default when you type `claude` in a pane). When using `-p` (pipe/print mode), Claude intentionally runs agents in-process since there's no interactive terminal to split.
@@ -110,6 +160,14 @@ If the wrapper is active, this shows a `Function` (not an `Application`). The wr
    - `[TeammateModeSnapshot] Captured from CLI override: tmux` — teammate mode is set
    - `[BackendRegistry] isInProcessEnabled: false` — tmux panes will be used
    - `[BackendRegistry] isInProcessEnabled: true (non-interactive session)` — you're in pipe mode
+
+### Opus using "worktree agents" instead of tmux panes
+
+This is expected behavior. Opus prefers `isolation: "worktree"` over the teammate system. These are two completely different agent systems — see [Two Agent Systems](#two-agent-systems-in-claude-code) above.
+
+**What you'll see:** Claude says "Let me launch 3 implementation agents in worktrees" — agents run invisibly, no panes appear.
+
+**Workaround:** Add a `CLAUDE.md` instruction telling the model to prefer teammates over worktree isolation. This is best-effort — the model ultimately decides.
 
 ### Claude command not found
 

@@ -1928,58 +1928,53 @@ pub fn send_paste_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     };
     crate::debug_log::input_log("paste", &format!("use_bracket={} text_len={} text_preview={:?}", use_bracket, text.len(), &text.chars().take(100).collect::<String>()));
 
-    // On Windows, ConPTY strips bracketed paste VT sequences (\x1b[200~/201~)
-    // from the input pipe.  To deliver them to the child, we must inject
-    // directly into the child's console input buffer via WriteConsoleInputW.
-    // This bypasses ConPTY's VT input parser entirely.
+    // On Windows, bracketed paste delivery is tricky:
+    //
+    // - ConPTY may strip \x1b[200~/201~ from the PTY input pipe (older Windows).
+    // - WriteConsoleInputW can bypass ConPTY, but it sends each byte of the
+    //   bracket sequence as a separate KEY_EVENT record.  Apps that read via
+    //   ReadConsoleInputW (crossterm-based apps like Helix) cannot reassemble
+    //   VT sequences from individual key events, so \x1b[200~ appears as the
+    //   literal characters Esc [ 2 0 0 ~ in the editor (issue #98).
+    // - Apps that read raw bytes via ReadFile (nvim via libuv) CAN parse the
+    //   bracket sequences from console-injected KEY_EVENTs.
+    //
+    // Strategy: try the PTY pipe first with bracket markers.  This works on
+    // newer Windows where ConPTY passes VT input through, and also works for
+    // byte-stream readers (nvim).  If the child uses ReadConsoleInputW
+    // (crossterm), ConPTY converts the VT bytes to KEY_EVENTs anyway, so the
+    // brackets may still not be parsed -- but at least the text content
+    // arrives correctly without stray visible bracket characters.
+    //
+    // For apps where PTY-pipe brackets get stripped by ConPTY, fall back to
+    // console injection for the TEXT ONLY (no bracket markers) so the content
+    // still arrives reliably.
     #[cfg(windows)]
     {
-        use crate::platform::mouse_inject;
-
-        // Helper: resolve child_pid and inject paste via console API
-        fn inject_paste_console(p: &mut crate::types::Pane, text: &str, bracket: bool) -> bool {
-            if p.child_pid.is_none() {
-                p.child_pid = mouse_inject::get_child_pid(&*p.child);
-            }
-            if let Some(pid) = p.child_pid {
-                crate::debug_log::input_log("paste", &format!(
-                    "console inject: pid={} bracket={} text_len={}", pid, bracket, text.len()));
-                mouse_inject::send_bracketed_paste(pid, text, bracket)
-            } else {
-                crate::debug_log::input_log("paste", "console inject: no child_pid, falling back to PTY write");
-                false
-            }
+        fn write_paste_pty(p: &mut crate::types::Pane, text: &str, bracket: bool) {
+            if bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
+            let _ = p.writer.write_all(text.as_bytes());
+            if bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
+            let _ = p.writer.flush();
         }
 
         if app.sync_input {
             let win = &mut app.windows[app.active_idx];
-            fn inject_all(node: &mut crate::types::Node, text: &str, bracket: bool) {
+            fn write_all_panes(node: &mut crate::types::Node, text: &str, bracket: bool) {
                 match node {
                     crate::types::Node::Leaf(p) => {
-                        if !inject_paste_console(p, text, bracket) {
-                            // Fallback: write to PTY pipe (brackets may be stripped)
-                            if bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
-                            let _ = p.writer.write_all(text.as_bytes());
-                            if bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
-                            let _ = p.writer.flush();
-                        }
+                        write_paste_pty(p, text, bracket);
                     }
                     crate::types::Node::Split { children, .. } => {
-                        for c in children { inject_all(c, text, bracket); }
+                        for c in children { write_all_panes(c, text, bracket); }
                     }
                 }
             }
-            inject_all(&mut win.root, text, use_bracket);
+            write_all_panes(&mut win.root, text, use_bracket);
         } else {
             let win = &mut app.windows[app.active_idx];
             if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-                if !inject_paste_console(p, text, use_bracket) {
-                    // Fallback: write to PTY pipe
-                    if use_bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
-                    let _ = p.writer.write_all(text.as_bytes());
-                    if use_bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
-                    let _ = p.writer.flush();
-                }
+                write_paste_pty(p, text, use_bracket);
             }
         }
     }

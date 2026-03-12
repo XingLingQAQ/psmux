@@ -512,7 +512,7 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 let active_idx = rects.iter().position(|(path, _)| *path == win.active_path);
                 let has_neighbor = if let Some(ai) = active_idx {
                     let (_, arect) = &rects[ai];
-                    crate::input::find_best_pane_in_direction(&rects, ai, arect, dir).is_some()
+                    crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &[], &[]).is_some()
                 } else { false };
                 if has_neighbor {
                     // Cancel zoom (already unzoomed) and navigate

@@ -101,6 +101,11 @@ pub struct Window {
     pub manual_rename: bool,
     /// Current position in the named layout cycle (0..4)
     pub layout_index: usize,
+    /// Per-pane MRU (most-recently-used) order: pane IDs ordered by recency.
+    /// Front = most recently focused.  Used for:
+    ///  - Directional navigation tie-breaking (issue #70)
+    ///  - Focus selection after kill-pane (issue #71)
+    pub pane_mru: Vec<usize>,
 }
 
 /// A menu item for display-menu

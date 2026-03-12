@@ -221,6 +221,10 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                             let win = &mut app.windows[app.active_idx];
                             app.last_pane_path = win.active_path.clone();
                             win.active_path = new_path;
+                            // Update MRU
+                            if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                                crate::tree::touch_mru(&mut win.pane_mru, pid);
+                            }
                         }
                     });
                     true
@@ -233,6 +237,10 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                             let tmp = win.active_path.clone();
                             win.active_path = app.last_pane_path.clone();
                             app.last_pane_path = tmp;
+                            // Update MRU
+                            if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                                crate::tree::touch_mru(&mut win.pane_mru, pid);
+                            }
                         }
                     });
                     true
@@ -1015,23 +1023,33 @@ pub fn move_focus(app: &mut AppState, dir: FocusDir) {
     for (i, (path, _)) in rects.iter().enumerate() { if *path == win.active_path { active_idx = Some(i); break; } }
     let Some(ai) = active_idx else { return; };
     let (_, arect) = &rects[ai];
+    // Collect pane IDs for MRU-based tie-breaking (issue #70)
+    let pane_ids: Vec<usize> = rects.iter().map(|(path, _)| {
+        crate::tree::get_active_pane_id(&win.root, path).unwrap_or(usize::MAX)
+    }).collect();
     // Try direct neighbour first, then wrap to opposite edge (tmux parity #61)
-    let target = find_best_pane_in_direction(&rects, ai, arect, dir)
-        .or_else(|| find_wrap_target(&rects, ai, arect, dir));
+    let target = find_best_pane_in_direction(&rects, ai, arect, dir, &pane_ids, &win.pane_mru)
+        .or_else(|| find_wrap_target(&rects, ai, arect, dir, &pane_ids, &win.pane_mru));
     if let Some(ni) = target {
+        // Update MRU: push the newly focused pane to front
+        if let Some(new_pane_id) = pane_ids.get(ni) {
+            crate::tree::touch_mru(&mut win.pane_mru, *new_pane_id);
+        }
         win.active_path = rects[ni].0.clone();
     }
 }
 
 /// Spatial pane navigation: find the best pane in the given direction.
 /// Prefers panes that overlap on the perpendicular axis (visually adjacent),
-/// then picks the closest by primary-axis gap, tie-broken by perpendicular
-/// center-distance for intuitive navigation in asymmetric layouts.
+/// then picks the closest by primary-axis gap, tie-broken by MRU recency
+/// when multiple candidates have the same geometry (tmux parity #70).
 pub fn find_best_pane_in_direction(
     rects: &[(Vec<usize>, Rect)],
     ai: usize,
     arect: &Rect,
     dir: FocusDir,
+    pane_ids: &[usize],
+    pane_mru: &[usize],
 ) -> Option<usize> {
     // Center of the active pane (scaled by 2 to avoid fractional math)
     let acx = arect.x as i32 * 2 + arect.width as i32;
@@ -1044,8 +1062,8 @@ pub fn find_best_pane_in_direction(
         a_start < b_end && b_start < a_end
     };
 
-    // (index, primary_gap, perp_center_dist, has_perp_overlap)
-    let mut best: Option<(usize, u32, i32, bool)> = None;
+    // (index, primary_gap, perp_center_dist, has_perp_overlap, mru_rank)
+    let mut best: Option<(usize, u32, i32, bool, usize)> = None;
 
     for (i, (_, r)) in rects.iter().enumerate() {
         if i == ai { continue; }
@@ -1085,9 +1103,15 @@ pub fn find_best_pane_in_direction(
             FocusDir::Up | FocusDir::Down => (rcx - acx).abs(),
         };
 
-        let dominated = if let Some((_, bg, bd, bo)) = best {
+        // MRU rank: lower = more recently used (tmux parity #70)
+        let rank = pane_ids.get(i)
+            .map(|id| crate::tree::mru_rank(pane_mru, *id))
+            .unwrap_or(usize::MAX);
+
+        let dominated = if let Some((_, bg, bd, bo, br)) = best {
             // Prefer: (1) perp-overlapping over non-overlapping,
-            //         (2) smaller primary gap, (3) smaller perp distance
+            //         (2) smaller primary gap,
+            //         (3) MRU recency when geometrically tied (tmux parity #70)
             if perp_overlap && !bo {
                 false  // new candidate has overlap, current best doesn't → new wins
             } else if !perp_overlap && bo {
@@ -1096,19 +1120,23 @@ pub fn find_best_pane_in_direction(
                 false  // closer on primary axis
             } else if primary_gap > bg {
                 true   // farther on primary axis
+            } else if perp_dist < bd {
+                false  // closer perpendicular center
+            } else if perp_dist > bd {
+                true   // farther perpendicular center
             } else {
-                perp_dist >= bd  // same gap → pick closer center
+                rank >= br  // same geometry → MRU tie-break
             }
         } else {
             false  // no best yet
         };
 
         if !dominated {
-            best = Some((i, primary_gap, perp_dist, perp_overlap));
+            best = Some((i, primary_gap, perp_dist, perp_overlap, rank));
         }
     }
 
-    best.map(|(idx, _, _, _)| idx)
+    best.map(|(idx, _, _, _, _)| idx)
 }
 
 /// Wrap-around pane navigation (tmux parity #61): when no pane exists in the
@@ -1120,6 +1148,8 @@ pub fn find_wrap_target(
     ai: usize,
     arect: &Rect,
     dir: FocusDir,
+    pane_ids: &[usize],
+    pane_mru: &[usize],
 ) -> Option<usize> {
     let acx = arect.x as i32 * 2 + arect.width as i32;
     let acy = arect.y as i32 * 2 + arect.height as i32;
@@ -1130,9 +1160,9 @@ pub fn find_wrap_target(
         a_start < b_end && b_start < a_end
     };
 
-    // (index, edge_score, perp_center_dist, has_perp_overlap)
+    // (index, edge_score, perp_center_dist, has_perp_overlap, mru_rank)
     // edge_score: lower = better (closer to the target edge after wrapping)
-    let mut best: Option<(usize, i32, i32, bool)> = None;
+    let mut best: Option<(usize, i32, i32, bool, usize)> = None;
 
     for (i, (_, r)) in rects.iter().enumerate() {
         if i == ai { continue; }
@@ -1163,7 +1193,11 @@ pub fn find_wrap_target(
             FocusDir::Up | FocusDir::Down => (rcx - acx).abs(),
         };
 
-        let dominated = if let Some((_, be, bd, bo)) = best {
+        let rank = pane_ids.get(i)
+            .map(|id| crate::tree::mru_rank(pane_mru, *id))
+            .unwrap_or(usize::MAX);
+
+        let dominated = if let Some((_, be, bd, bo, br)) = best {
             if perp_overlap && !bo {
                 false
             } else if !perp_overlap && bo {
@@ -1172,19 +1206,23 @@ pub fn find_wrap_target(
                 false
             } else if edge_score > be {
                 true
+            } else if perp_dist < bd {
+                false
+            } else if perp_dist > bd {
+                true
             } else {
-                perp_dist >= bd
+                rank >= br  // same geometry → MRU tie-break
             }
         } else {
             false
         };
 
         if !dominated {
-            best = Some((i, edge_score, perp_dist, perp_overlap));
+            best = Some((i, edge_score, perp_dist, perp_overlap, rank));
         }
     }
 
-    best.map(|(idx, _, _, _)| idx)
+    best.map(|(idx, _, _, _, _)| idx)
 }
 
 /// Encode a crossterm `KeyEvent` into the byte sequence that should be
@@ -1613,6 +1651,10 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             for (path, area) in rects.iter() {
                 if area.contains(ratatui::layout::Position { x: me.column, y: me.row }) {
                     win.active_path = path.clone();
+                    // Update MRU for clicked pane
+                    if let Some(pid) = crate::tree::get_active_pane_id(&win.root, path) {
+                        crate::tree::touch_mru(&mut win.pane_mru, pid);
+                    }
                     active_area = Some(*area);
                 }
             }

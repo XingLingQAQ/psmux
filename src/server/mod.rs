@@ -1388,7 +1388,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 let active_idx = rects.iter().position(|(path, _)| *path == win.active_path);
                                 let has_neighbor = if let Some(ai) = active_idx {
                                     let (_, arect) = &rects[ai];
-                                    find_best_pane_in_direction(&rects, ai, arect, focus_dir).is_some()
+                                    find_best_pane_in_direction(&rects, ai, arect, focus_dir, &[], &[]).is_some()
                                 } else { false };
                                 if has_neighbor {
                                     let old_path = app.windows[app.active_idx].active_path.clone();
@@ -1422,6 +1422,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                             });
                             if app.windows[app.active_idx].active_path != old_path {
+                                // Update MRU for the newly focused pane
+                                let win = &mut app.windows[app.active_idx];
+                                if let Some(pid) = get_active_pane_id(&win.root, &win.active_path) {
+                                    crate::tree::touch_mru(&mut win.pane_mru, pid);
+                                }
                                 unzoom_if_zoomed(&mut app);
                             }
                         }
@@ -1449,6 +1454,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                             });
                             if app.windows[app.active_idx].active_path != old_path {
+                                let win = &mut app.windows[app.active_idx];
+                                if let Some(pid) = get_active_pane_id(&win.root, &win.active_path) {
+                                    crate::tree::touch_mru(&mut win.pane_mru, pid);
+                                }
                                 unzoom_if_zoomed(&mut app);
                             }
                         }
@@ -1469,6 +1478,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                             });
                             if app.windows[app.active_idx].active_path != old_path {
+                                let win = &mut app.windows[app.active_idx];
+                                if let Some(pid) = get_active_pane_id(&win.root, &win.active_path) {
+                                    crate::tree::touch_mru(&mut win.pane_mru, pid);
+                                }
                                 unzoom_if_zoomed(&mut app);
                             }
                         }

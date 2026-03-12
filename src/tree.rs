@@ -475,6 +475,40 @@ fn collect_leaf_paths(node: &Node, path: &mut Vec<usize>, out: &mut Vec<(usize, 
     }
 }
 
+/// Move `pane_id` to the front of the MRU list.
+/// If not present, inserts at front.
+pub fn touch_mru(mru: &mut Vec<usize>, pane_id: usize) {
+    if let Some(pos) = mru.iter().position(|&id| id == pane_id) {
+        mru.remove(pos);
+    }
+    mru.insert(0, pane_id);
+}
+
+/// Remove a pane ID from the MRU list.
+pub fn remove_from_mru(mru: &mut Vec<usize>, pane_id: usize) {
+    mru.retain(|&id| id != pane_id);
+}
+
+/// Get the MRU rank of a pane ID (0 = most recent). Returns usize::MAX if not found.
+pub fn mru_rank(mru: &[usize], pane_id: usize) -> usize {
+    mru.iter().position(|&id| id == pane_id).unwrap_or(usize::MAX)
+}
+
+/// Collect all pane IDs from a tree node (DFS order).
+pub fn collect_pane_ids(node: &Node) -> Vec<usize> {
+    let mut ids = Vec::new();
+    fn rec(node: &Node, ids: &mut Vec<usize>) {
+        match node {
+            Node::Leaf(p) => ids.push(p.id),
+            Node::Split { children, .. } => {
+                for c in children { rec(c, ids); }
+            }
+        }
+    }
+    rec(node, &mut ids);
+    ids
+}
+
 /// Find the next pane path after `active_path` in DFS order (wraps around).
 /// Returns the path of the next pane, or None if there's only one pane.
 pub fn next_leaf_path(node: &Node, active_path: &[usize]) -> Option<Vec<usize>> {
@@ -655,12 +689,19 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
                 let leaves_after = count_panes(&new_root);
                 if leaves_after < leaves_before {
                     any_pruned = true;
+                    // Clean up MRU: remove IDs of panes that no longer exist
+                    let surviving_ids = collect_pane_ids(&new_root);
+                    app.windows[i].pane_mru.retain(|id| surviving_ids.contains(id));
                 }
                 app.windows[i].root = new_root;
                 if !path_exists(&app.windows[i].root, &app.windows[i].active_path) {
                     // The active pane's path shifted due to tree restructuring.
-                    // Try to find it by ID to preserve focus on the same pane.
-                    let found = active_pane_id.and_then(|id| find_path_by_id(&app.windows[i].root, id));
+                    // Try to find it by ID first, then by MRU order (issue #71).
+                    let found = active_pane_id.and_then(|id| find_path_by_id(&app.windows[i].root, id))
+                        .or_else(|| {
+                            app.windows[i].pane_mru.iter()
+                                .find_map(|&id| find_path_by_id(&app.windows[i].root, id))
+                        });
                     app.windows[i].active_path = found.unwrap_or_else(|| first_leaf_path(&app.windows[i].root));
                 }
             }

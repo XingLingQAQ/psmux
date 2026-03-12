@@ -93,7 +93,8 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
         let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
         let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: format!("pane %{}", wp.pane_id), child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, copy_state: None, pane_style: None };
         let win_name = default_shell_name(None, configured_shell);
-        app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0 });
+        let initial_pane_id = wp.pane_id;
+        app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id] });
         app.next_win_id += 1;
         app.active_idx = app.windows.len() - 1;
         return Ok(());
@@ -148,10 +149,11 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None };
+    let pane_id = app.next_pane_id;
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: format!("pane %{}", pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0 });
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id] });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     Ok(())
@@ -244,10 +246,11 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None };
+    let raw_pane_id = app.next_pane_id;
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: format!("pane %{}", raw_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0 });
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id] });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     Ok(())
@@ -339,12 +342,15 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
             }
         }
         let epoch = std::time::Instant::now() - Duration::from_secs(2);
-        let new_leaf = Node::Leaf(Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: format!("pane %{}", wp.pane_id), child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, copy_state: None, pane_style: None });
+        let new_pane_id = wp.pane_id;
+        let new_leaf = Node::Leaf(Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: format!("pane %{}", new_pane_id), child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, copy_state: None, pane_style: None });
         let win = &mut app.windows[app.active_idx];
         replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
         let mut new_path = win.active_path.clone();
         new_path.push(1);
         win.active_path = new_path;
+        // Add new pane to MRU (most recent)
+        crate::tree::touch_mru(&mut win.pane_mru, new_pane_id);
         return Ok(());
     }
 
@@ -376,19 +382,22 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None });
+    let split_pane_id = app.next_pane_id;
+    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: format!("pane %{}", split_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None });
     app.next_pane_id += 1;
     let win = &mut app.windows[app.active_idx];
     replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
     let mut new_path = win.active_path.clone();
     new_path.push(1);
     win.active_path = new_path;
+    // Add new pane to MRU (most recent)
+    crate::tree::touch_mru(&mut win.pane_mru, split_pane_id);
     Ok(())
 }
 
 fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
-    let neighbor_id = crate::tree::next_leaf_path(&win.root, path)
-        .and_then(|p| crate::tree::get_active_pane_id(&win.root, &p));
+    // Get the ID of the pane being killed (for MRU removal)
+    let killed_id = crate::tree::get_active_pane_id(&win.root, path);
     // Explicitly kill the target pane's process tree FIRST.
     // remove_node() doesn't call kill_node() when the root is a single Leaf,
     // so we must do it here to ensure no orphaned processes.
@@ -396,9 +405,15 @@ fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
         crate::platform::process_kill::kill_process_tree(&mut p.child);
     }
     kill_leaf(&mut win.root, path);
-    // Focus the neighbor by ID (tree structure may have shifted).
-    win.active_path = neighbor_id
-        .and_then(|id| crate::tree::find_path_by_id(&win.root, id))
+    // Remove killed pane from MRU
+    if let Some(kid) = killed_id {
+        crate::tree::remove_from_mru(&mut win.pane_mru, kid);
+    }
+    // Focus the most recently used remaining pane (tmux parity #71).
+    // Walk the MRU list and pick the first pane that still exists.
+    let mru_target = win.pane_mru.iter()
+        .find_map(|&id| crate::tree::find_path_by_id(&win.root, id));
+    win.active_path = mru_target
         .unwrap_or_else(|| crate::tree::first_leaf_path(&win.root));
 }
 

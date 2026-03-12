@@ -770,10 +770,17 @@ pub fn swap_pane(app: &mut AppState, dir: FocusDir) {
     let Some(ai) = active_idx else { return; };
     let (_, arect) = &rects[ai];
     
+    // Collect pane IDs for MRU-based tie-breaking (issue #70)
+    let pane_ids: Vec<usize> = rects.iter().map(|(path, _)| {
+        crate::tree::get_active_pane_id(&win.root, path).unwrap_or(usize::MAX)
+    }).collect();
     // Try direct neighbour first, then wrap to opposite edge (tmux parity #61)
-    let target = crate::input::find_best_pane_in_direction(&rects, ai, arect, dir)
-        .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir));
+    let target = crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &pane_ids, &win.pane_mru)
+        .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir, &pane_ids, &win.pane_mru));
     if let Some(ni) = target {
+        if let Some(new_pane_id) = pane_ids.get(ni) {
+            crate::tree::touch_mru(&mut win.pane_mru, *new_pane_id);
+        }
         win.active_path = rects[ni].0.clone();
     }
 }
@@ -898,6 +905,7 @@ pub fn break_pane_to_window(app: &mut AppState) {
         };
         
         // Create new window containing the extracted pane
+        let initial_mru = crate::tree::collect_pane_ids(&pane_node);
         app.windows.push(Window {
             root: pane_node,
             active_path: vec![],
@@ -910,6 +918,7 @@ pub fn break_pane_to_window(app: &mut AppState) {
             last_seen_version: 0,
             manual_rename: false,
             layout_index: 0,
+            pane_mru: initial_mru,
         });
         app.next_win_id += 1;
         

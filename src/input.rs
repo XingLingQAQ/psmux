@@ -2487,12 +2487,33 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('a');
-                let _ = write!(p.writer, "\x1b{}", c);
+                // Try native console injection (WriteConsoleInputW with LEFT_ALT_PRESSED)
+                // first.  ConPTY does NOT reassemble ESC+char into Alt+key events, so
+                // PSReadLine Alt+f/Alt+b/etc. won't work via the VT path.
+                let injected = if let Some(pid) = p.child_pid {
+                    crate::platform::mouse_inject::send_alt_key_event(pid, c)
+                } else {
+                    false
+                };
+                if !injected {
+                    // Fallback: VT encoding (ESC + char) — works for VT-native apps
+                    let _ = write!(p.writer, "\x1b{}", c);
+                }
             }
             s if (s.starts_with("C-M-") || s.starts_with("c-m-")) && s.len() == 5 => {
                 let c = s.chars().nth(4).unwrap_or('c');
-                let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
-                let _ = p.writer.write_all(&[0x1b, ctrl_char]);
+                // Try native console injection (WriteConsoleInputW with
+                // LEFT_CTRL_PRESSED | LEFT_ALT_PRESSED).  ConPTY does NOT
+                // reassemble ESC + ctrl-char into Ctrl+Alt+key.
+                let injected = if let Some(pid) = p.child_pid {
+                    crate::platform::mouse_inject::send_modified_key_event(pid, c, true, true, false)
+                } else {
+                    false
+                };
+                if !injected {
+                    let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
+                    let _ = p.writer.write_all(&[0x1b, ctrl_char]);
+                }
             }
             // Modifier + special key combos: C-Left, S-Right, C-S-Up, C-M-Home, etc.
             s if parse_modified_special_key(s).is_some() => {

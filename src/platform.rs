@@ -1014,6 +1014,173 @@ pub mod mouse_inject {
             ok != 0
         }
     }
+
+    /// Inject a modified key event into a child process's console input buffer.
+    ///
+    /// Uses WriteConsoleInputW with the appropriate control_key_state flags
+    /// (LEFT_CTRL_PRESSED, LEFT_ALT_PRESSED, SHIFT_PRESSED) matching how
+    /// Windows Terminal synthesises input events.
+    ///
+    /// This is necessary because ConPTY does NOT reassemble ESC+char into
+    /// native Alt+key events — PSReadLine and other console apps receive
+    /// them as separate key events.  Similarly, Ctrl+Alt+key written as
+    /// ESC + control-char is not reassembled.
+    ///
+    /// For Ctrl+key: `u_char` = control character (ch & 0x1F), matching the
+    /// Windows console convention.  For Alt+key: `u_char` = the plain char.
+    /// For Ctrl+Alt: `u_char` = control character.
+    ///
+    /// Sends both key-down and key-up events for proper event pairing.
+    ///
+    /// Convenience wrapper: `send_alt_key_event` calls this with ctrl=false, alt=true, shift=false.
+    pub fn send_modified_key_event(child_pid: u32, ch: char, ctrl: bool, alt: bool, shift: bool) -> bool {
+        unsafe {
+            let had_console = GetConsoleWindow() != 0;
+            FreeConsole();
+
+            if AttachConsole(child_pid) == 0 {
+                debug_log(&format!("send_modified_key_event: AttachConsole({}) FAILED", child_pid));
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            let conin: [u16; 7] = [
+                'C' as u16, 'O' as u16, 'N' as u16,
+                'I' as u16, 'N' as u16, '$' as u16, 0,
+            ];
+            let handle = CreateFileW(
+                conin.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null(),
+            );
+
+            if handle == INVALID_HANDLE || handle == 0 {
+                debug_log(&format!("send_modified_key_event: CreateFileW(CONIN$) FAILED"));
+                FreeConsole();
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            const KEY_EVENT: u16 = 0x0001;
+            const LEFT_ALT_PRESSED: u32 = 0x0002;
+            const LEFT_CTRL_PRESSED: u32 = 0x0008;
+            const SHIFT_PRESSED: u32 = 0x0010;
+
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct KEY_EVENT_RECORD {
+                key_down: i32,
+                repeat_count: u16,
+                virtual_key_code: u16,
+                virtual_scan_code: u16,
+                u_char: u16,
+                control_key_state: u32,
+            }
+
+            #[repr(C)]
+            struct KEY_INPUT_RECORD {
+                event_type: u16,
+                _padding: u16,
+                event: KEY_EVENT_RECORD,
+            }
+
+            #[link(name = "user32")]
+            extern "system" {
+                fn VkKeyScanW(ch: u16) -> i16;
+                fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
+            }
+
+            // Build control_key_state flags (matching Windows Terminal convention)
+            let mut flags: u32 = 0;
+            if ctrl { flags |= LEFT_CTRL_PRESSED; }
+            if alt  { flags |= LEFT_ALT_PRESSED; }
+            if shift { flags |= SHIFT_PRESSED; }
+
+            // Determine the character to send:
+            // - Ctrl+key: u_char = control character (ch & 0x1F)
+            // - Alt+key: u_char = plain character
+            // - Ctrl+Alt+key: u_char = control character
+            // - Shift+key: u_char = uppercase/shifted character
+            let base_char = if shift && !ctrl {
+                ch.to_ascii_uppercase()
+            } else {
+                ch
+            };
+
+            let u_char_value: u16 = if ctrl {
+                // Control character: letter & 0x1F
+                (base_char.to_ascii_lowercase() as u16) & 0x1F
+            } else {
+                let mut buf = [0u16; 2];
+                let encoded = base_char.encode_utf16(&mut buf);
+                encoded[0]
+            };
+
+            // VK code is always the unmodified letter key
+            let mut buf = [0u16; 2];
+            let plain_wch = ch.to_ascii_lowercase().encode_utf16(&mut buf)[0];
+            let vk_result = VkKeyScanW(plain_wch);
+            let vk = if vk_result == -1 { 0u16 } else { (vk_result & 0xFF) as u16 };
+
+            // MAPVK_VK_TO_VSC = 0
+            let scan = MapVirtualKeyW(vk as u32, 0) as u16;
+
+            let records = [
+                KEY_INPUT_RECORD {
+                    event_type: KEY_EVENT,
+                    _padding: 0,
+                    event: KEY_EVENT_RECORD {
+                        key_down: 1,
+                        repeat_count: 1,
+                        virtual_key_code: vk,
+                        virtual_scan_code: scan,
+                        u_char: u_char_value,
+                        control_key_state: flags,
+                    },
+                },
+                KEY_INPUT_RECORD {
+                    event_type: KEY_EVENT,
+                    _padding: 0,
+                    event: KEY_EVENT_RECORD {
+                        key_down: 0,
+                        repeat_count: 1,
+                        virtual_key_code: vk,
+                        virtual_scan_code: scan,
+                        u_char: u_char_value,
+                        control_key_state: flags,
+                    },
+                },
+            ];
+
+            let mut written: u32 = 0;
+            let result = WriteConsoleInputW(
+                handle,
+                records.as_ptr() as *const INPUT_RECORD,
+                2,
+                &mut written,
+            );
+
+            debug_log(&format!("send_modified_key_event: pid={} char='{}' ctrl={} alt={} shift={} vk=0x{:02X} scan=0x{:02X} u_char=0x{:04X} flags=0x{:04X} => ok={} written={}",
+                child_pid, ch, ctrl, alt, shift, vk, scan, u_char_value, flags, result != 0, written));
+
+            CloseHandle(handle);
+            FreeConsole();
+            if had_console {
+                AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+
+            result != 0 && written >= 1
+        }
+    }
+
+    /// Convenience: inject Alt+key event.
+    pub fn send_alt_key_event(child_pid: u32, ch: char) -> bool {
+        send_modified_key_event(child_pid, ch, false, true, false)
+    }
 }
 
 #[cfg(not(windows))]
@@ -1025,6 +1192,8 @@ pub mod mouse_inject {
     pub fn send_ctrl_c_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
+    pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
+    pub fn send_alt_key_event(_pid: u32, _ch: char) -> bool { false }
 }
 
 // ---------------------------------------------------------------------------

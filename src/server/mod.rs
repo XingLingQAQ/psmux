@@ -35,8 +35,8 @@ use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remot
     swap_pane, break_pane_to_window, unzoom_if_zoomed, resize_pane_vertical,
     resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane};
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding,
-    parse_config_content, parse_config_line};
-use crate::commands::{parse_command_to_action, format_action, parse_menu_definition};
+    parse_config_content};
+use crate::commands::{parse_command_to_action, format_action, parse_menu_definition, execute_command_string};
 use crate::util::{list_windows_json, list_tree_json, list_windows_tmux, base64_encode};
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override};
 use crate::help;
@@ -369,6 +369,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         format!("{:016x}", h.finish())
     };
 
+    app.session_key = session_key.clone();
+
     let regpath = format!("{}\\{}.port", dir, app.port_file_base());
     let _ = std::fs::write(&regpath, port.to_string());
     let keypath = format!("{}\\{}.key", dir, app.port_file_base());
@@ -555,7 +557,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     {
         let cmds: Vec<String> = app.hooks.get("client-attached").cloned().unwrap_or_default();
         for cmd in cmds {
-            parse_config_line(&mut app, &cmd);
+            let _ = execute_command_string(&mut app, &cmd);
         }
     }
     // Spawn a warm server for the NEXT new-session when the current session
@@ -858,6 +860,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let old_path = app.windows[app.active_idx].active_path.clone();
                     switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, idx); });
                     if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
+                    // Update MRU so directional navigation remembers this focus change
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                        crate::tree::touch_mru(&mut win.pane_mru, pid);
+                    }
                     meta_dirty = true;
                 }
                 // ── Temporary focus variants for -t targeting ────────────
@@ -1786,6 +1793,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     app.session_name = name;
+                    // Update env so run-shell/hooks from this server target the new name
+                    env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     hook_event = Some("after-rename-session");
                 }
                 CtrlReq::ClaimSession(name, resp) => {
@@ -1810,6 +1819,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     app.session_name = name;
+                    // Update env so run-shell/hooks from this server target the new name
+                    env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     // Re-load user config so the claimed session reflects the
                     // current config file.  The warm server loaded config at
                     // its own startup, but the user may have changed their
@@ -2701,8 +2712,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::PopupInput(data) => {
                     if let Mode::PopupMode { ref mut popup_pty, .. } = app.mode {
                         if let Some(ref mut pty) = popup_pty {
-                            let _ = pty.writer.write_all(&data);
-                            let _ = pty.writer.flush();
+                            // If child has exited, 'q' closes the popup
+                            let child_exited = matches!(pty.child.try_wait(), Ok(Some(_)));
+                            if child_exited && data == b"q" {
+                                app.mode = Mode::Passthrough;
+                            } else if !child_exited {
+                                let _ = pty.writer.write_all(&data);
+                                let _ = pty.writer.flush();
+                            }
+                        } else {
+                            // No PTY means static popup — 'q' closes it
+                            if data == b"q" {
+                                app.mode = Mode::Passthrough;
+                            }
                         }
                     }
                     state_dirty = true;
@@ -2721,7 +2743,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let cmd = command.clone();
                         app.mode = Mode::Passthrough;
                         if yes {
-                            parse_config_line(&mut app, &cmd);
+                            let _ = execute_command_string(&mut app, &cmd);
                         }
                         state_dirty = true;
                     }
@@ -2732,7 +2754,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             if !item.is_separator && !item.command.is_empty() {
                                 let cmd = item.command.clone();
                                 app.mode = Mode::Passthrough;
-                                parse_config_line(&mut app, &cmd);
+                                let _ = execute_command_string(&mut app, &cmd);
                                 state_dirty = true;
                             }
                         }
@@ -2777,7 +2799,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 let _pre_hook_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
                 for cmd in cmds {
-                    parse_config_line(&mut app, &cmd);
+                    let _ = execute_command_string(&mut app, &cmd);
                 }
                 // Check if the hook itself changed active_idx
                 if app.active_idx != _pre_hook_idx && crate::debug_log::server_log_enabled() {
@@ -2906,7 +2928,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 let _pre_status_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get("status-interval").cloned().unwrap_or_default();
                 for cmd in cmds {
-                    parse_config_line(&mut app, &cmd);
+                    let _ = execute_command_string(&mut app, &cmd);
                 }
                 if app.active_idx != _pre_status_idx && crate::debug_log::server_log_enabled() {
                     crate::debug_log::server_log("switch", &format!(

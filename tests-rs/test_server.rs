@@ -128,3 +128,96 @@ fn set_option_silence_action() {
     super::options::apply_set_option(&mut app, "silence-action", "none", false);
     assert_eq!(app.silence_action, "none");
 }
+
+// ── Root table binding tests (discussion #130: vim-style C-hjkl nav) ────
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use crate::config::{parse_key_string, normalize_key_for_binding, parse_bind_key};
+use crate::types::{Action, FocusDir};
+
+#[test]
+fn bind_key_n_creates_root_binding() {
+    let mut app = AppState::new("test".to_string());
+    parse_bind_key(&mut app, "bind-key -n C-h select-pane -L");
+    let root = app.key_tables.get("root").expect("root table should exist");
+    assert_eq!(root.len(), 1, "root table should have one binding");
+    let bind = &root[0];
+    assert!(matches!(bind.action, Action::MoveFocus(FocusDir::Left)),
+        "C-h should be bound to select-pane -L");
+}
+
+#[test]
+fn bind_key_n_all_vim_directions() {
+    let mut app = AppState::new("test".to_string());
+    parse_bind_key(&mut app, "bind-key -n C-h select-pane -L");
+    parse_bind_key(&mut app, "bind-key -n C-j select-pane -D");
+    parse_bind_key(&mut app, "bind-key -n C-k select-pane -U");
+    parse_bind_key(&mut app, "bind-key -n C-l select-pane -R");
+    let root = app.key_tables.get("root").expect("root table should exist");
+    assert_eq!(root.len(), 4, "root table should have four bindings");
+
+    let expected = [
+        ('h', FocusDir::Left),
+        ('j', FocusDir::Down),
+        ('k', FocusDir::Up),
+        ('l', FocusDir::Right),
+    ];
+    for (ch, dir) in expected {
+        let key = normalize_key_for_binding((KeyCode::Char(ch), KeyModifiers::CONTROL));
+        let bind = root.iter().find(|b| b.key == key)
+            .unwrap_or_else(|| panic!("binding for C-{} should exist", ch));
+        assert!(matches!(&bind.action, Action::MoveFocus(d) if *d == dir),
+            "C-{} should be bound to {:?}", ch, dir);
+    }
+}
+
+#[test]
+fn ctrl_h_binding_matches_windows_key_event() {
+    // On Windows, Ctrl+H is reported as Char('h') + CONTROL by crossterm
+    let mut app = AppState::new("test".to_string());
+    parse_bind_key(&mut app, "bind-key -n C-h select-pane -L");
+    let root = app.key_tables.get("root").unwrap();
+
+    let win_key = normalize_key_for_binding((KeyCode::Char('h'), KeyModifiers::CONTROL));
+    assert!(root.iter().any(|b| b.key == win_key),
+        "C-h binding must match Char('h')+CONTROL key event");
+}
+
+#[test]
+fn backspace_and_ctrl_h_are_distinct_on_windows() {
+    // On Windows, Backspace and Ctrl+H are distinct keys — they must NOT alias
+    let backspace = normalize_key_for_binding((KeyCode::Backspace, KeyModifiers::empty()));
+    let ctrl_h = normalize_key_for_binding((KeyCode::Char('h'), KeyModifiers::CONTROL));
+    assert_ne!(backspace, ctrl_h,
+        "Backspace and C-h must be distinct on Windows (no Unix aliasing)");
+}
+
+#[test]
+fn tab_and_ctrl_i_are_distinct_on_windows() {
+    let tab = normalize_key_for_binding((KeyCode::Tab, KeyModifiers::empty()));
+    let ctrl_i = normalize_key_for_binding((KeyCode::Char('i'), KeyModifiers::CONTROL));
+    assert_ne!(tab, ctrl_i,
+        "Tab and C-i must be distinct on Windows");
+}
+
+#[test]
+fn enter_and_ctrl_m_are_distinct_on_windows() {
+    let enter = normalize_key_for_binding((KeyCode::Enter, KeyModifiers::empty()));
+    let ctrl_m = normalize_key_for_binding((KeyCode::Char('m'), KeyModifiers::CONTROL));
+    assert_ne!(enter, ctrl_m,
+        "Enter and C-m must be distinct on Windows");
+}
+
+#[test]
+fn normalize_only_strips_shift_from_char() {
+    // Regular keys: SHIFT stripped from Char events
+    let shifted = normalize_key_for_binding((KeyCode::Char('A'), KeyModifiers::SHIFT));
+    assert_eq!(shifted, (KeyCode::Char('A'), KeyModifiers::empty()));
+
+    // Non-Char keys: modifiers preserved
+    let ctrl_l = normalize_key_for_binding((KeyCode::Char('l'), KeyModifiers::CONTROL));
+    assert_eq!(ctrl_l, (KeyCode::Char('l'), KeyModifiers::CONTROL));
+
+    let shift_bs = normalize_key_for_binding((KeyCode::Backspace, KeyModifiers::SHIFT));
+    assert_eq!(shift_bs, (KeyCode::Backspace, KeyModifiers::SHIFT));
+}

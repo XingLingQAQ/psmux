@@ -228,7 +228,7 @@ pub struct CopyModeState {
     pub search_input_forward: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusDir { Left, Right, Up, Down }
 
 pub struct AppState {

@@ -137,7 +137,7 @@ pub(crate) fn render_window_options(app: &AppState) -> String {
 }
 
 /// Apply a set-option command. If `quiet` is true, unknown options are silently ignored.
-pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, quiet: bool) {
+pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _quiet: bool) {
     match option {
         "status-left" => { app.status_left = value.to_string(); }
         "status-right" => { app.status_right = value.to_string(); }
@@ -338,12 +338,19 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, qu
             // leaking into child shell env vars (#105).
             if option.starts_with('@') {
                 app.user_options.insert(option.to_string(), value.to_string());
+            } else if option == "default-terminal" {
+                // tmux sets the TERM env var from this option (#137)
+                app.environment.insert("TERM".to_string(), value.to_string());
+            } else if option.contains('-') {
+                // Options with hyphens (e.g. terminal-overrides, allow-rename)
+                // are tmux config options, NOT environment variables.  Storing
+                // them in app.environment causes PowerShell ParserErrors when
+                // injected via $env:NAME syntax (#137).  Store in user_options.
+                app.user_options.insert(option.to_string(), value.to_string());
             } else {
-                // Store in environment as a generic option (e.g. default-terminal, terminal-overrides)
+                // Simple names without hyphens are likely real env vars
+                // (set via `set-environment` or plugin compat)
                 app.environment.insert(option.to_string(), value.to_string());
-                if !quiet {
-                    // Still warn for truly unknown options (but store them anyway for plugin compat)
-                }
             }
         }
     }

@@ -547,14 +547,17 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "synchronize-panes" => {
             app.sync_input = matches!(value, "on" | "true" | "1");
         }
-        "allow-rename" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "terminal-overrides" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "default-terminal" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "update-environment" => { app.environment.insert(key.to_string(), value.to_string()); }
+        "allow-rename" => { /* tmux option, not an env var — stored in automatic_rename */ }
+        "terminal-overrides" => { /* tmux option — accepted for compatibility, no-op */ }
+        "default-terminal" => {
+            // tmux sets the TERM env var from this option (#137)
+            app.environment.insert("TERM".to_string(), value.to_string());
+        }
+        "update-environment" => { /* tmux option — accepted for compatibility, no-op */ }
         "bell-action" => { app.bell_action = value.to_string(); }
         "visual-bell" => { app.visual_bell = matches!(value, "on" | "true" | "1"); }
-        "activity-action" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "silence-action" => { app.environment.insert(key.to_string(), value.to_string()); }
+        "activity-action" => { /* tmux option — accepted for compatibility, no-op */ }
+        "silence-action" => { /* tmux option — accepted for compatibility, no-op */ }
         "monitor-silence" => {
             if let Ok(n) = value.parse::<u64>() { app.monitor_silence = n; }
         }

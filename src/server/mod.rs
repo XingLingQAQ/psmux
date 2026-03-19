@@ -509,7 +509,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if key.starts_with("PSMUX_TARGET_SESSION") || key == "TMUX" || key == "TMUX_PANE" { continue; }
                     let escaped_val = value.replace('\'', "''");
                     if !env_cmd.is_empty() { env_cmd.push_str("; "); }
-                    env_cmd.push_str(&format!("$env:{}='{}'", key, escaped_val));
+                    env_cmd.push_str(&format!("${{env:{}}}='{}'", key, escaped_val));
                 }
                 if !env_cmd.is_empty() {
                     // Send silently: write the command, then clear the line so
@@ -2460,7 +2460,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // latest env when transplanted for split/new-window.
                     if let Some(ref mut wp) = app.warm_pane {
                         let escaped = value.replace('\'', "''");
-                        let cmd = format!("$env:{}='{}'\r\n", key, escaped);
+                        let cmd = format!("${{env:{}}}='{}'\r\n", key, escaped);
                         use std::io::Write as _;
                         let _ = wp.writer.write_all(cmd.as_bytes());
                     }

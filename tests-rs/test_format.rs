@@ -112,3 +112,145 @@ fn test_quote() {
     let val = apply_modifier(&Modifier::Quote, "(hello)", &app, 0);
     assert_eq!(val, "\\(hello\\)");
 }
+
+// ── Window flags tests ─────────────────────────────────────────
+
+fn mock_window(name: &str) -> crate::types::Window {
+    crate::types::Window {
+        root: Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] },
+        active_path: vec![],
+        name: name.to_string(),
+        id: 0,
+        activity_flag: false,
+        bell_flag: false,
+        silence_flag: false,
+        last_output_time: std::time::Instant::now(),
+        last_seen_version: 0,
+        manual_rename: false,
+        layout_index: 0,
+        pane_mru: vec![],
+    }
+}
+
+#[test]
+fn test_window_flags_active() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.active_idx = 0;
+    assert_eq!(expand_var("window_flags", &app, 0), "*");
+}
+
+#[test]
+fn test_window_flags_last() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.windows.push(mock_window("win1"));
+    app.active_idx = 1;
+    app.last_window_idx = 0;
+    assert_eq!(expand_var("window_flags", &app, 0), "-");
+}
+
+#[test]
+fn test_window_flags_bell() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.bell_flag = true;
+    app.windows.push(win);
+    app.windows.push(mock_window("win1"));
+    app.active_idx = 1;
+    app.last_window_idx = 1; // same as active so "-" won't appear
+    assert_eq!(expand_var("window_flags", &app, 0), "!");
+}
+
+#[test]
+fn test_window_flags_silence() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.silence_flag = true;
+    app.windows.push(win);
+    app.windows.push(mock_window("win1"));
+    app.active_idx = 1;
+    app.last_window_idx = 1;
+    assert_eq!(expand_var("window_flags", &app, 0), "~");
+}
+
+#[test]
+fn test_window_flags_activity() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.activity_flag = true;
+    app.windows.push(win);
+    app.windows.push(mock_window("win1"));
+    app.active_idx = 1;
+    app.last_window_idx = 1;
+    assert_eq!(expand_var("window_flags", &app, 0), "#");
+}
+
+#[test]
+fn test_window_flags_bell_and_activity() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.bell_flag = true;
+    win.activity_flag = true;
+    app.windows.push(win);
+    app.windows.push(mock_window("win1"));
+    app.active_idx = 1;
+    app.last_window_idx = 1;
+    assert_eq!(expand_var("window_flags", &app, 0), "#!");
+}
+
+#[test]
+fn test_window_activity_flag_var() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.activity_flag = true;
+    app.windows.push(win);
+    assert_eq!(expand_var("window_activity_flag", &app, 0), "1");
+}
+
+#[test]
+fn test_window_activity_flag_var_off() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("window_activity_flag", &app, 0), "0");
+}
+
+// ── AppState defaults tests ─────────────────────────────────────
+
+#[test]
+fn test_appstate_defaults_allow_rename() {
+    let app = mock_app();
+    assert!(app.allow_rename);
+}
+
+#[test]
+fn test_appstate_defaults_bell_action() {
+    let app = mock_app();
+    assert_eq!(app.bell_action, "any");
+}
+
+#[test]
+fn test_appstate_defaults_activity_action() {
+    let app = mock_app();
+    assert_eq!(app.activity_action, "other");
+}
+
+#[test]
+fn test_appstate_defaults_silence_action() {
+    let app = mock_app();
+    assert_eq!(app.silence_action, "other");
+}
+
+#[test]
+fn test_appstate_defaults_monitor_silence() {
+    let app = mock_app();
+    assert_eq!(app.monitor_silence, 0);
+}
+
+#[test]
+fn test_appstate_defaults_update_environment() {
+    let app = mock_app();
+    assert!(app.update_environment.contains(&"DISPLAY".to_string()));
+    assert!(app.update_environment.contains(&"SSH_AUTH_SOCK".to_string()));
+    assert!(app.update_environment.contains(&"SSH_AGENT_PID".to_string()));
+}

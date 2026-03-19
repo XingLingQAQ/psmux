@@ -49,6 +49,46 @@ fn osc7_file_no_slash_after_host() {
     assert_eq!(parse_osc7_uri("file://hostname-only"), "hostname-only");
 }
 
+// ── OSC title tests ──────────────────────────────────────────
+
+#[test]
+fn screen_title_initially_empty() {
+    let screen = Screen::new(crate::grid::Size { rows: 24, cols: 80 }, 0);
+    assert_eq!(screen.title(), "");
+}
+
+#[test]
+fn screen_set_title_from_utf8() {
+    let mut screen = Screen::new(crate::grid::Size { rows: 24, cols: 80 }, 0);
+    screen.set_title(b"my terminal");
+    assert_eq!(screen.title(), "my terminal");
+}
+
+#[test]
+fn screen_set_title_overwrites() {
+    let mut screen = Screen::new(crate::grid::Size { rows: 24, cols: 80 }, 0);
+    screen.set_title(b"first");
+    screen.set_title(b"second");
+    assert_eq!(screen.title(), "second");
+}
+
+#[test]
+fn screen_set_title_empty_string() {
+    let mut screen = Screen::new(crate::grid::Size { rows: 24, cols: 80 }, 0);
+    screen.set_title(b"something");
+    screen.set_title(b"");
+    assert_eq!(screen.title(), "");
+}
+
+#[test]
+fn screen_set_title_invalid_utf8_ignored() {
+    let mut screen = Screen::new(crate::grid::Size { rows: 24, cols: 80 }, 0);
+    screen.set_title(b"good");
+    screen.set_title(&[0xff, 0xfe, 0xfd]);
+    // Invalid UTF-8 should be ignored, old title preserved
+    assert_eq!(screen.title(), "good");
+}
+
 // ── percent_decode tests ──────────────────────────────────
 
 #[test]

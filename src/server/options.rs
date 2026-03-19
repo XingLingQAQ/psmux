@@ -57,6 +57,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "cursor-style" => std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string()),
         "cursor-blink" => if std::env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0" { "on".into() } else { "off".into() },
         "default-shell" | "default-command" => app.default_shell.clone(),
+        "default-terminal" => app.environment.get("TERM").cloned().unwrap_or_default(),
         "word-separators" => app.word_separators.clone(),
         "pane-border-style" => app.pane_border_style.clone(),
         "pane-active-border-style" => app.pane_active_border_style.clone(),

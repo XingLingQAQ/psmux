@@ -510,7 +510,7 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     }
                 }
                 crate::tree::resize_all_panes(app);
-                // Find direct neighbor or wrap target (tmux parity #134)
+                // Find direct neighbor only (no wrap when zoomed — tmux parity)
                 let win = &app.windows[app.active_idx];
                 let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
                 crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -518,7 +518,6 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 let has_target = if let Some(ai) = active_idx {
                     let (_, arect) = &rects[ai];
                     crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &[], &[])
-                        .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir, &[], &[]))
                         .is_some()
                 } else { false };
                 if has_target {

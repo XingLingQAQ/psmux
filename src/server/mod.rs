@@ -1637,8 +1637,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             };
                             let was_zoomed = unzoom_if_zoomed(&mut app);
                             if was_zoomed {
-                                // Zoom-aware: check for direct neighbor or wrap target (#134).
-                                // Navigate if there's any reachable pane in that direction.
+                                // Zoom-aware: check for direct neighbor only (no wrap when zoomed — tmux parity).
                                 let win = &app.windows[app.active_idx];
                                 let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
                                 crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -1646,7 +1645,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 let has_target = if let Some(ai) = active_idx {
                                     let (_, arect) = &rects[ai];
                                     find_best_pane_in_direction(&rects, ai, arect, focus_dir, &[], &[])
-                                        .or_else(|| find_wrap_target(&rects, ai, arect, focus_dir, &[], &[]))
                                         .is_some()
                                 } else { false };
                                 if has_target {
@@ -2291,6 +2289,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if !app.copy_command.is_empty() {
                         output.push_str(&format!("copy-command \"{}\"\n", app.copy_command));
                     }
+                    output.push_str(&format!("allow-rename {}\n", if app.allow_rename { "on" } else { "off" }));
+                    output.push_str(&format!("bell-action {}\n", app.bell_action));
+                    output.push_str(&format!("activity-action {}\n", app.activity_action));
+                    output.push_str(&format!("silence-action {}\n", app.silence_action));
+                    output.push_str(&format!("update-environment \"{}\"\n", app.update_environment.join(" ")));
                     for (alias, expansion) in &app.command_aliases {
                         output.push_str(&format!("command-alias \"{}={}\"\n", alias, expansion));
                     }

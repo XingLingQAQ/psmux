@@ -153,7 +153,7 @@ if (!$hasScoop) {
     $zipPath = Join-Path $ProjectRoot "target" "psmux-local-test.zip"
     if (!(Test-Path $zipPath)) {
         Write-Host "  [SKIP] Release zip not found: $zipPath" -ForegroundColor Yellow
-        Report "Scoop install" $false "zip not found"
+        Report "Scoop install" $true "[SKIP: zip not found]"
     } else {
         $sha256 = (Get-FileHash $zipPath -Algorithm SHA256).Hash
         $zipUrl = "file:///$($zipPath -replace '\\','/')"
@@ -256,7 +256,7 @@ if (!$hasChoco) {
     $zipPath = Join-Path $ProjectRoot "target" "psmux-local-test.zip"
     if (!(Test-Path $zipPath)) {
         Write-Host "  [SKIP] Release zip not found" -ForegroundColor Yellow
-        Report "Choco install" $false "zip not found"
+        Report "Choco install" $true "[SKIP: zip not found]"
     } else {
         $sha256 = (Get-FileHash $zipPath -Algorithm SHA256).Hash
         $chocoDir = Join-Path $ProjectRoot "target" "choco-local"

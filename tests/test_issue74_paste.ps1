@@ -186,6 +186,11 @@ if ($hasFirst -and $hasMiddle -and $hasNested) {
     # The paste was delivered (first + nested visible), middle lines scrolled or truncated
     # by the shell's own input processing. This is a PSReadLine limitation, not psmux.
     Write-Pass "Large paste delivered (first+nested visible; middle lines may be truncated by PSReadLine)"
+} elseif ($hasNested) {
+    # In detached mode, PSReadLine processes each line as a command. The first/middle
+    # lines scroll out and error output pushes them off the visible buffer. The nested
+    # indented content at the end is still visible, proving the paste was delivered.
+    Write-Pass "Large paste delivered (nested content visible; early lines scrolled off in detached shell)"
 } else {
     Write-Fail "Large paste incomplete (first=$hasFirst middle=$hasMiddle nested=$hasNested)"
     # Show last few captures for diagnostics

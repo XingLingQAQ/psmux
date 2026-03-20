@@ -497,28 +497,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     if let Some(wp) = early_warm {
         if app.default_shell.is_empty() {
             // No custom shell — the pre-spawned default (pwsh) is correct.
-            // Inject config-defined environment variables into the running
-            // warm pane shell.  The warm pane was spawned BEFORE config was
-            // loaded, so any `set-environment` vars from the config file are
-            // missing.  We write PowerShell `$env:` assignments silently.
-            if !app.environment.is_empty() {
+            // Check if config loaded env vars that the early warm pane is missing.
+            let needs_env = app.environment.iter().any(|(k, _)| {
+                !k.starts_with("PSMUX_TARGET_SESSION") && k != "TMUX" && k != "TMUX_PANE"
+            });
+            if needs_env {
+                // The early warm pane was spawned before config, so it lacks
+                // config-defined env vars (e.g. TERM from default-terminal).
+                // Kill it and respawn with env vars set at the process level
+                // via CommandBuilder::env() — this avoids writing PowerShell
+                // commands to the PTY which would echo visibly (#137).
                 let mut wp = wp;
-                let mut env_cmd = String::new();
-                for (key, value) in &app.environment {
-                    // Skip internal psmux variables that are already set
-                    if key.starts_with("PSMUX_TARGET_SESSION") || key == "TMUX" || key == "TMUX_PANE" { continue; }
-                    let escaped_val = value.replace('\'', "''");
-                    if !env_cmd.is_empty() { env_cmd.push_str("; "); }
-                    env_cmd.push_str(&format!("${{env:{}}}='{}'", key, escaped_val));
+                wp.child.kill().ok();
+                match spawn_warm_pane(&*pty_system, &mut app) {
+                    Ok(new_wp) => { app.warm_pane = Some(new_wp); }
+                    Err(e) => { eprintln!("psmux: warm pane respawn failed: {e}"); }
                 }
-                if !env_cmd.is_empty() {
-                    // Send silently: write the command, then clear the line so
-                    // the user doesn't see the env setup on the fresh prompt.
-                    let inject = format!("{}\r\n", env_cmd);
-                    use std::io::Write as _;
-                    let _ = wp.writer.write_all(inject.as_bytes());
-                }
-                app.warm_pane = Some(wp);
             } else {
                 app.warm_pane = Some(wp);
             }
@@ -2535,23 +2529,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SetEnvironment(key, value) => {
                     app.environment.insert(key.clone(), value.clone());
                     env::set_var(&key, &value);
-                    // Also inject into the waiting warm pane so it has the
-                    // latest env when transplanted for split/new-window.
-                    if let Some(ref mut wp) = app.warm_pane {
-                        let escaped = value.replace('\'', "''");
-                        let cmd = format!("${{env:{}}}='{}'\r\n", key, escaped);
-                        use std::io::Write as _;
-                        let _ = wp.writer.write_all(cmd.as_bytes());
+                    // Kill the warm pane and respawn so it picks up the new
+                    // env var at process level — avoids PTY echo (#137).
+                    if app.warm_pane.is_some() {
+                        if let Some(mut old_wp) = app.warm_pane.take() {
+                            old_wp.child.kill().ok();
+                        }
+                        match spawn_warm_pane(&*pty_system, &mut app) {
+                            Ok(new_wp) => { app.warm_pane = Some(new_wp); }
+                            Err(e) => { eprintln!("psmux: warm pane respawn (SetEnv) failed: {e}"); }
+                        }
                     }
                 }
                 CtrlReq::UnsetEnvironment(key) => {
                     app.environment.remove(&key);
                     env::remove_var(&key);
-                    // Clear the var in the waiting warm pane too.
-                    if let Some(ref mut wp) = app.warm_pane {
-                        let cmd = format!("Remove-Item Env:{} -ErrorAction SilentlyContinue\r\n", key);
-                        use std::io::Write as _;
-                        let _ = wp.writer.write_all(cmd.as_bytes());
+                    // Kill the warm pane and respawn so it no longer has
+                    // the removed env var — avoids PTY echo (#137).
+                    if app.warm_pane.is_some() {
+                        if let Some(mut old_wp) = app.warm_pane.take() {
+                            old_wp.child.kill().ok();
+                        }
+                        match spawn_warm_pane(&*pty_system, &mut app) {
+                            Ok(new_wp) => { app.warm_pane = Some(new_wp); }
+                            Err(e) => { eprintln!("psmux: warm pane respawn (UnsetEnv) failed: {e}"); }
+                        }
                     }
                 }
                 CtrlReq::ShowEnvironment(resp) => {

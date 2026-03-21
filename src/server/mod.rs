@@ -131,6 +131,7 @@ fn serialize_overlay_json(app: &AppState) -> String {
         }
         Mode::PaneChooser { .. } => {
             out.push_str(",\"display_panes\":true");
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!(",\"pane_base_index\":{}", app.pane_base_index));
         }
         _ => {}
     }
@@ -2050,6 +2051,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DisplayPanes => {
                     app.mode = Mode::PaneChooser { opened_at: std::time::Instant::now() };
                     state_dirty = true;
+                }
+                CtrlReq::DisplayPaneSelect(digit) => {
+                    // User pressed a digit during display-panes overlay: select the matching pane
+                    let win = &app.windows[app.active_idx];
+                    let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
+                    crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                    for (i, (path, _)) in rects.iter().enumerate() {
+                        if i >= 10 { break; }
+                        let mapped = (i + app.pane_base_index) % 10;
+                        if mapped == digit {
+                            let new_path = path.clone();
+                            let old_path = app.windows[app.active_idx].active_path.clone();
+                            app.windows[app.active_idx].active_path = new_path;
+                            if app.windows[app.active_idx].active_path != old_path {
+                                app.last_pane_path = old_path;
+                            }
+                            break;
+                        }
+                    }
+                    app.mode = Mode::Passthrough;
+                    state_dirty = true;
+                    meta_dirty = true;
                 }
                 CtrlReq::BreakPane => {
                     unzoom_if_zoomed(&mut app);

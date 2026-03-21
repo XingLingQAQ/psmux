@@ -404,6 +404,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     #[allow(unused_assignments)]
     let mut srv_display_panes = false;
     #[allow(unused_assignments)]
+    let mut srv_pane_base_index: usize = 0;
+    #[allow(unused_assignments)]
     let mut clock_active = false;
 
     #[derive(serde::Deserialize, Default)]
@@ -554,6 +556,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// Display-panes overlay active
         #[serde(default)]
         display_panes: bool,
+        /// Pane base index for display-panes numbering
+        #[serde(default)]
+        pane_base_index: usize,
         /// Status bar message from display-message (without -p)
         #[serde(default)]
         status_message: Option<String>,
@@ -991,9 +996,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         else if srv_display_panes {
                             match key.code {
                                 KeyCode::Char(d) if d.is_ascii_digit() => {
-                                    let idx = d.to_digit(10).unwrap() as usize;
-                                    cmd_batch.push(format!("select-pane -t {}\n", idx));
-                                    cmd_batch.push("overlay-close\n".into());
+                                    let digit = d.to_digit(10).unwrap() as usize;
+                                    cmd_batch.push(format!("display-panes-select {}\n", digit));
                                 }
                                 _ => { cmd_batch.push("overlay-close\n".into()); }
                             }
@@ -1942,6 +1946,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         srv_menu_selected = state.menu_selected;
         srv_menu_items = state.menu_items;
         srv_display_panes = state.display_panes;
+        srv_pane_base_index = state.pane_base_index;
 
         // ── Extract active pane's cursor state ──────────────────────
         // We collect cursor info here but DON'T use
@@ -2943,7 +2948,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         let pane_sel_style = Style::default().fg(Color::Yellow).bg(Color::Black).add_modifier(Modifier::BOLD);
                         let block = Block::default().borders(Borders::ALL).style(pane_sel_style);
                         let inner = block.inner(b);
-                        let disp = idx.to_string();
+                        let disp = ((idx + srv_pane_base_index) % 10).to_string();
                         let para = Paragraph::new(Line::from(Span::styled(
                             format!(" {} ", disp),
                             pane_sel_style,

@@ -1133,6 +1133,11 @@ match cmd {
         }
     }
     "overlay-close" => { let _ = tx.send(CtrlReq::OverlayClose); }
+    "display-panes-select" => {
+        if let Some(idx) = args.get(0).and_then(|s| s.parse::<usize>().ok()) {
+            let _ = tx.send(CtrlReq::DisplayPaneSelect(idx));
+        }
+    }
     "confirm-respond" => {
         let yes = args.get(0).map(|a| *a == "y" || *a == "yes").unwrap_or(false);
         let _ = tx.send(CtrlReq::ConfirmRespond(yes));

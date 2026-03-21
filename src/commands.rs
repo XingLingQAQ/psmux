@@ -680,6 +680,15 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             enter_copy_mode(app);
         }
         "display-panes" | "displayp" => {
+            let win = &app.windows[app.active_idx];
+            let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
+            compute_rects(&win.root, app.last_window_area, &mut rects);
+            app.display_map.clear();
+            for (i, (path, _)) in rects.into_iter().enumerate() {
+                if i >= 10 { break; }
+                let digit = (i + app.pane_base_index) % 10;
+                app.display_map.push((digit, path));
+            }
             app.mode = Mode::PaneChooser { opened_at: Instant::now() };
         }
         "confirm-before" | "confirm" => {

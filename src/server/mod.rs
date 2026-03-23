@@ -150,7 +150,7 @@ fn serialize_overlay_json(app: &AppState) -> String {
 }
 
 fn should_spawn_warm_server(app: &AppState) -> bool {
-    app.session_name != "__warm__" && !app.destroy_unattached
+    app.warm_enabled && app.session_name != "__warm__" && !app.destroy_unattached
 }
 
 /// Spawn a standby "warm server" process that pre-loads config + shell.
@@ -498,8 +498,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // If the user configured a custom default-shell in their config, the
     // early warm pane has the wrong shell — kill it so create_window falls
     // through to a cold spawn with the correct shell.
+    // Also kill it if warm was disabled via config (set -g warm off).
     if let Some(wp) = early_warm {
-        if app.default_shell.is_empty() {
+        if !app.warm_enabled {
+            // Warm disabled by config — kill the early warm pane
+            let mut wp = wp;
+            wp.child.kill().ok();
+        } else if app.default_shell.is_empty() {
             // No custom shell — the pre-spawned default (pwsh) is correct.
             // Check if config loaded env vars that the early warm pane is missing.
             let needs_env = app.environment.iter().any(|(k, _)| {

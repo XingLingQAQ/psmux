@@ -98,6 +98,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         }
+        "warm" => if app.warm_enabled { "on".into() } else { "off".into() },
         "claude-code-fix-tty" => if app.claude_code_fix_tty { "on".into() } else { "off".into() },
         "claude-code-force-interactive" => if app.claude_code_force_interactive { "on".into() } else { "off".into() },
         _ => {
@@ -330,6 +331,15 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
                 let alias = value[..pos].trim().to_string();
                 let expansion = value[pos+1..].trim().to_string();
                 app.command_aliases.insert(alias, expansion);
+            }
+        }
+        "warm" => {
+            app.warm_enabled = matches!(value, "on" | "true" | "1");
+            // When warm is disabled, kill any existing warm pane
+            if !app.warm_enabled {
+                if let Some(mut wp) = app.warm_pane.take() {
+                    wp.child.kill().ok();
+                }
             }
         }
         "claude-code-fix-tty" => {

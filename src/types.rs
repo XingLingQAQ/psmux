@@ -474,6 +474,9 @@ pub struct AppState {
     /// Transient status-bar message from display-message (without -p).
     /// Tuple of (message_text, timestamp_when_set).
     pub status_message: Option<(String, std::time::Instant)>,
+    /// Whether warm pane/server pre-spawning is enabled (default: on).
+    /// When off, new sessions/windows always cold-spawn a fresh shell.
+    pub warm_enabled: bool,
     /// Pre-spawned warm pane: shell already loaded, ready for instant new-window.
     pub warm_pane: Option<WarmPane>,
     /// Plugin .ps1 scripts queued during config loading for post-startup execution.
@@ -623,6 +626,7 @@ impl AppState {
             claude_code_force_interactive: true,
             last_hover_pos: None,
             status_message: None,
+            warm_enabled: std::env::var("PSMUX_NO_WARM").map(|v| v != "1" && v != "true").unwrap_or(true),
             warm_pane: None,
             pending_plugin_scripts: Vec::new(),
         }

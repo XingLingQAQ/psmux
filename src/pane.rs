@@ -173,6 +173,9 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
 /// (typically 500ms+), pwsh will have fully loaded its profile and the prompt
 /// is ready.
 pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState) -> io::Result<crate::types::WarmPane> {
+    if !app.warm_enabled {
+        return Err(io::Error::new(io::ErrorKind::Other, "warm panes disabled"));
+    }
     let area = app.last_window_area;
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
     let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);

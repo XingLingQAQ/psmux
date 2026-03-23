@@ -533,7 +533,9 @@ fn run_main() -> io::Result<()> {
                 // The warm server has config loaded and shell already running,
                 // so claiming it avoids the full cold-start latency.
                 // Only eligible when no custom command/dir is requested.
-                let claimed_warm = if initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() {
+                // Skipped when PSMUX_NO_WARM=1 is set.
+                let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false);
+                let claimed_warm = if !warm_disabled && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() {
                     let warm_base = if let Some(ref l) = l_socket_name {
                         format!("{}____warm__", l)
                     } else {
@@ -2405,6 +2407,8 @@ fn run_main() -> io::Result<()> {
         let port_path = format!("{}\\.psmux\\{}.port", home, port_file_base);
 
         // Try warm server claim first (fast path)
+        // Skipped when PSMUX_NO_WARM=1 is set.
+        let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false);
         let warm_base = if let Some(ref l) = l_socket_name {
             format!("{}____warm__", l)
         } else {
@@ -2412,7 +2416,7 @@ fn run_main() -> io::Result<()> {
         };
         let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
         let mut warm_claimed = false;
-        if std::path::Path::new(&warm_port_path).exists() {
+        if !warm_disabled && std::path::Path::new(&warm_port_path).exists() {
             let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
             if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
                 if let Ok(port) = port_str.trim().parse::<u16>() {

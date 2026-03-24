@@ -103,8 +103,19 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
 
                 // If the pane is squelched (hiding injected commands),
                 // return a blank leaf so the client never sees the flash.
-                if let Some(deadline) = p.squelch_until {
-                    if std::time::Instant::now() < deadline {
+                // Squelch is lifted when the vt100 parser receives the
+                // OSC 9999 sentinel (event-driven), or when the safety
+                // timeout expires (fallback for non-PowerShell shells).
+                if p.squelch_until.is_some() {
+                    // Check if the sentinel has arrived in the parser.
+                    let sentinel_arrived = p.term.lock()
+                        .map(|mut parser| parser.screen_mut().take_squelch_cleared())
+                        .unwrap_or(false);
+                    if sentinel_arrived {
+                        // Sentinel received: cd+cls finished, show the pane.
+                        p.squelch_until = None;
+                    } else if p.squelch_until.map_or(false, |d| std::time::Instant::now() < d) {
+                        // Still waiting: return blank frame.
                         return LayoutJson::Leaf {
                             id: p.id, rows: p.last_rows, cols: p.last_cols,
                             cursor_row: 0, cursor_col: 0, alternate_screen: false,
@@ -119,6 +130,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                             content: vec![], rows_v2: vec![],
                         };
                     } else {
+                        // Safety timeout expired without sentinel; unsquelch anyway.
                         p.squelch_until = None;
                     }
                 }

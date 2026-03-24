@@ -1930,16 +1930,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 // the directory change is invisible to the
                                 // user.  Leading space keeps it out of shell
                                 // history; the clear wipes visible traces.
-                                // The squelch_until flag tells the renderer to
-                                // return blank frames until cls/clear finishes,
-                                // preventing any flash of the injected command.
+                                //
+                                // After cls/clear, a sentinel OSC 9999 is
+                                // emitted so the renderer knows exactly when
+                                // the clear has finished (event-driven, no
+                                // fixed timeout).  The safety timeout is only
+                                // a fallback for shells that cannot emit the
+                                // sentinel (e.g. cmd.exe).
                                 if let Some(win) = app.windows.last_mut() {
                                     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
                                         use std::io::Write as _;
                                         let escaped = cwd.replace('\'', "''");
-                                        let clear = if cfg!(windows) { "cls" } else { "clear" };
-                                        let cd_cmd = format!(" cd '{}'; {}\r", escaped, clear);
-                                        p.squelch_until = Some(Instant::now() + Duration::from_millis(800));
+                                        let (clear, sentinel) = if cfg!(windows) {
+                                            ("cls", "; [Console]::Write([char]0x1b + ']9999;;' + [char]0x1b + '\\')")
+                                        } else {
+                                            ("clear", "; printf '\\033]9999;;\\033\\\\'")
+                                        };
+                                        let cd_cmd = format!(" cd '{}'; {}{}\r", escaped, clear, sentinel);
+                                        p.squelch_until = Some(Instant::now() + Duration::from_secs(5));
                                         let _ = p.writer.write_all(cd_cmd.as_bytes());
                                         let _ = p.writer.flush();
                                     }

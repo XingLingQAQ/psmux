@@ -220,6 +220,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"7", uri] => {
                 self.screen.set_path(uri);
             }
+            [b"9999", ..] => {
+                self.screen.squelch_cleared = true;
+            }
             [b"52", ty, data] => {
                 match (
                     ty.iter().all(|c| CLIPBOARD_SELECTOR.contains(c)),

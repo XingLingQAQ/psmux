@@ -117,6 +117,12 @@ pub struct Screen {
     /// Path announced by the shell via OSC 7 (`\e]7;file://host/path\a`).
     /// Used as a fallback for CWD when PEB walking fails (SSH, WSL).
     osc7_path: Option<String>,
+
+    /// Set to `true` when the vt100 parser receives OSC 9999 (psmux
+    /// internal sentinel).  The layout serialiser checks this flag to
+    /// know that injected cd+cls commands have finished executing and
+    /// the squelch can be lifted.
+    pub(crate) squelch_cleared: bool,
 }
 
 impl Screen {
@@ -138,6 +144,7 @@ impl Screen {
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
             osc_title: String::new(),
             osc7_path: None,
+            squelch_cleared: false,
         }
     }
 
@@ -670,6 +677,22 @@ impl Screen {
                 self.osc7_path = Some(path);
             }
         }
+    }
+
+    /// Returns `true` if the parser received OSC 9999 (psmux internal
+    /// sentinel signalling that injected commands have completed).
+    /// Calling this does NOT clear the flag; use [`take_squelch_cleared`]
+    /// for a consume-style check.
+    #[must_use]
+    pub fn squelch_cleared(&self) -> bool {
+        self.squelch_cleared
+    }
+
+    /// Returns `true` and resets the flag if OSC 9999 was received.
+    pub fn take_squelch_cleared(&mut self) -> bool {
+        let v = self.squelch_cleared;
+        self.squelch_cleared = false;
+        v
     }
 
     /// Returns the currently active foreground color.

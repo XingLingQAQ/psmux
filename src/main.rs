@@ -2434,9 +2434,9 @@ fn run_main() -> io::Result<()> {
                             .ok()
                             .and_then(|p| p.to_str().map(|s| s.to_string()));
                         if let Some(ref cwd) = client_cwd {
-                            let _ = write!(stream, "claim-session {} \"{}\"\n", session_name, cwd.replace('"', "\\\""));
+                            let _ = write!(stream, "claim-session {} {}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(cwd));
                         } else {
-                            let _ = write!(stream, "claim-session {}\n", session_name);
+                            let _ = write!(stream, "claim-session {}\n", crate::util::quote_arg(&session_name));
                         }
                         let _ = stream.flush();
                         // Use send_auth_cmd_response pattern: read AUTH

@@ -150,7 +150,7 @@ fn serialize_overlay_json(app: &AppState) -> String {
 }
 
 fn should_spawn_warm_server(app: &AppState) -> bool {
-    app.warm_enabled && app.session_name != "__warm__" && !app.destroy_unattached
+    app.session_name != "__warm__" && !app.destroy_unattached
 }
 
 /// Spawn a standby "warm server" process that pre-loads config + shell.
@@ -498,13 +498,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // If the user configured a custom default-shell in their config, the
     // early warm pane has the wrong shell — kill it so create_window falls
     // through to a cold spawn with the correct shell.
-    // Also kill it if warm was disabled via config (set -g warm off).
     if let Some(wp) = early_warm {
-        if !app.warm_enabled {
-            // Warm disabled by config — kill the early warm pane
-            let mut wp = wp;
-            wp.child.kill().ok();
-        } else if app.default_shell.is_empty() {
+        if app.default_shell.is_empty() {
             // No custom shell — the pre-spawned default (pwsh) is correct.
             // Check if config loaded env vars that the early warm pane is missing.
             let needs_env = app.environment.iter().any(|(k, _)| {
@@ -1939,6 +1934,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                         let cd_cmd = format!(" cd '{}'; {}\r", escaped, clear);
                                         let _ = p.writer.write_all(cd_cmd.as_bytes());
                                         let _ = p.writer.flush();
+                                        // Immediately blank the vt100 screen buffer so
+                                        // the first frame rendered to the client is clean
+                                        // (avoids a visible flash of the injected command
+                                        // before cls/clear runs in the shell).
+                                        if let Ok(mut parser) = p.term.lock() {
+                                            parser.process(b"\x1b[H\x1b[2J");
+                                        }
                                     }
                                 }
                             }

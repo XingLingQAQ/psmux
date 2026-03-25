@@ -218,6 +218,20 @@ fn spawn_warm_server(app: &AppState) {
     }
 }
 
+/// Parse a popup dimension spec: "80" (absolute) or "95%" (percentage of term_dim).
+fn parse_popup_dim(spec: &str, term_dim: u16, default: u16) -> u16 {
+    if let Some(pct_str) = spec.strip_suffix('%') {
+        if let Ok(pct) = pct_str.parse::<u16>() {
+            let pct = pct.min(100);
+            (term_dim as u32 * pct as u32 / 100) as u16
+        } else {
+            default
+        }
+    } else {
+        spec.parse().unwrap_or(default)
+    }
+}
+
 /// Compute the effective display size from all connected clients' terminal sizes.
 /// Returns None if no clients have reported sizes.
 fn compute_effective_client_size(app: &AppState) -> Option<(u16, u16)> {
@@ -2720,7 +2734,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                     }
                 }
-                CtrlReq::DisplayPopup(command, width, height, close_on_exit) => {
+                CtrlReq::DisplayPopup(command, width_spec, height_spec, close_on_exit, start_dir) => {
+                    // Resolve percentage dimensions against terminal area (#154)
+                    let term_w = app.last_window_area.width;
+                    let term_h = app.last_window_area.height;
+                    let width = parse_popup_dim(&width_spec, term_w, 80);
+                    let height = parse_popup_dim(&height_spec, term_h, 24);
+                    // Expand format variables in start_dir (e.g. #{pane_current_path})
+                    let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
+                    let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
+                    if let Some(dir) = &start_dir { let _ = env::set_current_dir(dir); }
                     if !command.is_empty() {
                         // Try to spawn with PTY for interactive programs (fzf, etc.)
                         let pty_result = Some(portable_pty::native_pty_system())
@@ -2728,7 +2751,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 let pty_size = portable_pty::PtySize { rows: height.saturating_sub(2), cols: width.saturating_sub(2), pixel_width: 0, pixel_height: 0 };
                                 let pair = pty_sys.openpty(pty_size).ok()?;
                                 let mut cmd_builder = portable_pty::CommandBuilder::new(if cfg!(windows) { "pwsh" } else { "sh" });
-                                if let Ok(dir) = std::env::current_dir() { cmd_builder.cwd(dir); }
+                                if let Some(dir) = &start_dir {
+                                    cmd_builder.cwd(dir);
+                                } else if let Ok(dir) = std::env::current_dir() {
+                                    cmd_builder.cwd(dir);
+                                }
+                                // Set TERM/COLORTERM so programs in popups get color support (#154)
+                                cmd_builder.env("TERM", "xterm-256color");
+                                cmd_builder.env("COLORTERM", "truecolor");
+                                cmd_builder.env("PSMUX_SESSION", &app.session_name);
+                                crate::pane::apply_user_environment(&mut cmd_builder, &app.environment);
                                 if cfg!(windows) { cmd_builder.args(["-NoProfile", "-Command", &command]); } else { cmd_builder.args(["-c", &command]); }
                                 let child = pair.slave.spawn_command(cmd_builder).ok()?;
                                 // Close the slave handle immediately – required for ConPTY.
@@ -2755,6 +2787,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 std::thread::sleep(std::time::Duration::from_millis(50));
                                 Some(PopupPty { master: pair.master, writer: pty_writer, child, term })
                             });
+                        if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
                         
                         app.mode = Mode::PopupMode {
                             command: command.clone(),
@@ -2768,6 +2801,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         };
                         state_dirty = true;
                     } else {
+                        if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
                         app.mode = Mode::PopupMode {
                             command: String::new(),
                             output: "Press 'q' or Escape to close\n".to_string(),

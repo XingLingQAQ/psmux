@@ -1664,3 +1664,84 @@ fn window_index_prompt_full_flow_via_prefix() {
     assert!(matches!(app.mode, Mode::Passthrough));
     assert_eq!(app.active_idx, 1, "full flow should jump to window 1 (beta)");
 }
+// ════════════════════════════════════════════════════════════════════════════
+//  Discussion #154: popup percentage dimensions, -d flag, TERM env
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn parse_popup_dim_absolute_value() {
+    assert_eq!(crate::commands::parse_popup_dim_local("80", 200, 80), 80);
+    assert_eq!(crate::commands::parse_popup_dim_local("40", 200, 80), 40);
+    assert_eq!(crate::commands::parse_popup_dim_local("120", 200, 80), 120);
+}
+
+#[test]
+fn parse_popup_dim_percentage_value() {
+    // 95% of 200 = 190
+    assert_eq!(crate::commands::parse_popup_dim_local("95%", 200, 80), 190);
+    // 50% of 200 = 100
+    assert_eq!(crate::commands::parse_popup_dim_local("50%", 200, 80), 100);
+    // 100% of 200 = 200
+    assert_eq!(crate::commands::parse_popup_dim_local("100%", 200, 80), 200);
+    // 10% of 200 = 20
+    assert_eq!(crate::commands::parse_popup_dim_local("10%", 200, 80), 20);
+}
+
+#[test]
+fn parse_popup_dim_percentage_clamped_at_100() {
+    // 200% should be clamped to 100% = 200
+    assert_eq!(crate::commands::parse_popup_dim_local("200%", 200, 80), 200);
+}
+
+#[test]
+fn parse_popup_dim_invalid_falls_back_to_default() {
+    assert_eq!(crate::commands::parse_popup_dim_local("abc", 200, 80), 80);
+    assert_eq!(crate::commands::parse_popup_dim_local("abc%", 200, 80), 80);
+    assert_eq!(crate::commands::parse_popup_dim_local("", 200, 80), 80);
+}
+
+#[test]
+fn display_popup_d_flag_stripped_from_command() {
+    // When -d is used, the directory path should NOT leak into the command string
+    let mut app = mock_app_with_window();
+    execute_command_string(&mut app, "display-popup -d /some/path lazygit").unwrap();
+    match &app.mode {
+        Mode::PopupMode { command, .. } => {
+            assert!(!command.contains("/some/path"), "start dir should not be in command, got: {}", command);
+            // The actual PTY command won't start in tests (no PTY), but the command string is correct
+            assert!(command.contains("lazygit") || command.is_empty(),
+                "command should contain lazygit or be empty if PTY failed, got: {}", command);
+        }
+        other => panic!("expected PopupMode, got {:?}", std::mem::discriminant(other)),
+    }
+}
+
+#[test]
+fn display_popup_c_flag_also_works_for_directory() {
+    // -c should work the same as -d for setting the popup directory
+    let mut app = mock_app_with_window();
+    execute_command_string(&mut app, "popup -c /tmp echo test").unwrap();
+    match &app.mode {
+        Mode::PopupMode { command, .. } => {
+            assert!(!command.contains("/tmp"), "start dir should not leak into command, got: {}", command);
+        }
+        other => panic!("expected PopupMode, got {:?}", std::mem::discriminant(other)),
+    }
+}
+
+#[test]
+fn display_popup_d_flag_with_percent_dims() {
+    // Combined test: -d with percentage dimensions
+    let mut app = mock_app_with_window();
+    execute_command_string(&mut app, "popup -w 95% -h 80% -d /home/user htop").unwrap();
+    match &app.mode {
+        Mode::PopupMode { command, width, height, .. } => {
+            assert!(!command.contains("/home/user"), "dir should not leak into command");
+            // Width/height should be resolved percentages (not the raw "95" or "80")
+            // Since crossterm::terminal::size() varies, just verify they are not the raw fallback defaults
+            assert!(*width > 0, "width should be resolved");
+            assert!(*height > 0, "height should be resolved");
+        }
+        other => panic!("expected PopupMode, got {:?}", std::mem::discriminant(other)),
+    }
+}

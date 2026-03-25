@@ -819,7 +819,7 @@ pub enum CtrlReq {
     WaitFor(String, WaitForOp),
     DisplayMenu(String, Option<i16>, Option<i16>),
     DisplayMenuDirect(Menu),
-    DisplayPopup(String, u16, u16, bool),
+    DisplayPopup(String, String, String, bool, Option<String>),
     ConfirmBefore(String, String),
     ClockMode,
     ResizePaneAbsolute(String, u16),

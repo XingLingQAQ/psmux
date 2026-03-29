@@ -791,6 +791,7 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "set-titles-string" => Some(app.set_titles_string.clone()),
         "pane-border-style" => Some(app.pane_border_style.clone()),
         "pane-active-border-style" => Some(app.pane_active_border_style.clone()),
+        "pane-border-hover-style" => Some(app.pane_border_hover_style.clone()),
         "window-status-format" => Some(app.window_status_format.clone()),
         "window-status-current-format" => Some(app.window_status_current_format.clone()),
         "window-status-separator" => Some(app.window_status_separator.clone()),

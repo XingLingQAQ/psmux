@@ -422,6 +422,8 @@ pub struct AppState {
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
     pub pane_active_border_style: String,
+    /// pane-border-hover-style: style for border hover highlight
+    pub pane_border_hover_style: String,
     /// window-status-format: format for inactive window tabs
     pub window_status_format: String,
     /// window-status-current-format: format for active window tab
@@ -630,6 +632,7 @@ impl AppState {
             user_options: std::collections::HashMap::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
+            pane_border_hover_style: "fg=yellow".to_string(),
             window_status_format: "#I:#W#{?window_flags,#{window_flags}, }".to_string(),
             window_status_current_format: "#I:#W#{?window_flags,#{window_flags}, }".to_string(),
             window_status_separator: " ".to_string(),

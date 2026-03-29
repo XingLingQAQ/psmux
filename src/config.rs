@@ -600,6 +600,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "status-keys" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "pane-border-style" => { app.pane_border_style = value.to_string(); }
         "pane-active-border-style" => { app.pane_active_border_style = value.to_string(); }
+        "pane-border-hover-style" => { app.pane_border_hover_style = value.to_string(); }
         "window-status-format" => { app.window_status_format = value.to_string(); }
         "window-status-current-format" => { app.window_status_current_format = value.to_string(); }
         "window-status-separator" => { app.window_status_separator = value.to_string(); }

@@ -253,6 +253,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     mode-style          Str  Copy-mode highlight style
     pane-border-style   Str  Inactive pane border style
     pane-active-border-style Str Active pane border style
+    pane-border-hover-style Str Border hover highlight style
     window-status-format        Str  Inactive window tab format
     window-status-current-format Str  Active window tab format
     window-status-separator     Str  Separator between tabs

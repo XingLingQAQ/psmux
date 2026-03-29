@@ -223,7 +223,7 @@ fn collect_layout_borders(
     node: &LayoutJson,
     area: Rect,
     path: &mut Vec<usize>,
-    out: &mut Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>)>,
+    out: &mut Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>, Rect)>,
 ) {
     if let LayoutJson::Split { kind, sizes, children } = node {
         let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
@@ -241,7 +241,7 @@ fn collect_layout_borders(
                 } else {
                     rects[i].y + rects[i].height
                 };
-                out.push((path.clone(), kind.clone(), i, pos, total_px, effective_sizes.clone()));
+                out.push((path.clone(), kind.clone(), i, pos, total_px, effective_sizes.clone(), area));
             }
         }
         for (i, child) in children.iter().enumerate() {
@@ -407,6 +407,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut custom_status_right: Option<String> = None;
     let mut pane_border_fg: Color = Color::DarkGray;
     let mut pane_active_border_fg: Color = Color::Green;
+    let mut pane_border_hover_fg: Color = Color::Yellow;
     let mut win_status_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_current_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_sep: String = " ".to_string();
@@ -547,6 +548,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         pane_border_style: Option<String>,
         #[serde(default)]
         pane_active_border_style: Option<String>,
+        #[serde(default)]
+        pane_border_hover_style: Option<String>,
         /// window-status-format (short key to save bandwidth)
         #[serde(default)]
         wsf: Option<String>,
@@ -678,11 +681,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut client_status_row: u16 = u16::MAX; // row where status bar tabs are rendered
     let mut client_base_index: usize = 0; // base-index for window numbering
     let mut client_pane_rects: Vec<(usize, Rect)> = Vec::new();
-    let mut client_borders: Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>)> = Vec::new();
+    let mut client_borders: Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>, Rect)> = Vec::new();
     let mut client_content_area: Rect = Rect::default();
     let mut client_copy_mode: bool = false;
     let mut client_zoomed: bool = false;
     let mut client_drag: Option<ClientDragState> = None;
+    // Border hover highlight: (position, kind, area) of the border under the cursor.
+    let mut hovered_border: Option<(u16, String, Rect)> = None;
     // Buffered OSC 52 clipboard text — written AFTER terminal.draw() to
     // avoid corrupting ratatui's output buffer.
     let mut pending_osc52: Option<String> = None;
@@ -1794,11 +1799,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     let mut on_border = false;
                                     if !client_zoomed {
                                         let tol = 1u16;
-                                        for (bpath, bkind, bidx, bpos, btotal, bsizes) in &client_borders {
+                                        for (bpath, bkind, bidx, bpos, btotal, bsizes, barea) in &client_borders {
                                             let hit = if bkind == "Horizontal" {
                                                 me.column >= bpos.saturating_sub(tol) && me.column <= bpos + tol
+                                                && me.row >= barea.y && me.row < barea.y + barea.height
                                             } else {
                                                 me.row >= bpos.saturating_sub(tol) && me.row <= bpos + tol
+                                                && me.column >= barea.x && me.column < barea.x + barea.width
                                             };
                                             if hit {
                                                 client_drag = Some(ClientDragState {
@@ -2010,6 +2017,29 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             MouseEventKind::Up(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Middle) => {}
                             MouseEventKind::Moved => {
+                                // Detect border hover for visual preview
+                                let mut new_hover: Option<(u16, String, Rect)> = None;
+                                if !client_zoomed {
+                                    let tol = 1u16;
+                                    for (_, bkind, _, bpos, _, _, barea) in &client_borders {
+                                        let hit = if bkind == "Horizontal" {
+                                            me.column >= bpos.saturating_sub(tol) && me.column <= bpos + tol
+                                            && me.row >= barea.y && me.row < barea.y + barea.height
+                                        } else {
+                                            me.row >= bpos.saturating_sub(tol) && me.row <= bpos + tol
+                                            && me.column >= barea.x && me.column < barea.x + barea.width
+                                        };
+                                        if hit {
+                                            new_hover = Some((*bpos, bkind.clone(), *barea));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if new_hover != hovered_border {
+                                    hovered_border = new_hover;
+                                    selection_changed = true; // trigger redraw
+                                }
+                                // Forward hover to PTY
                                 if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
@@ -2351,6 +2381,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             if !pabs.is_empty() {
                 let (fg, _bg, _bold) = parse_tmux_style_components(pabs);
                 if let Some(c) = fg { pane_active_border_fg = c; }
+            }
+        }
+        if let Some(ref pbhs) = state.pane_border_hover_style {
+            if !pbhs.is_empty() {
+                let (fg, _bg, _bold) = parse_tmux_style_components(pbhs);
+                if let Some(c) = fg { pane_border_hover_fg = c; }
             }
         }
         // Update window-status-format strings
@@ -2807,6 +2843,62 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let active_rect = compute_active_rect_json(&root, content_chunk);
             render_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, active_rect, &mode_style_str, state.zoomed);
             fix_border_intersections(f.buffer_mut());
+            // Re-color all border characters based on adjacency to the active pane.
+            // render_json and fix_border_intersections can leave inconsistent styles
+            // at intersections and along edges shared by nested splits.
+            if let Some(ar) = active_rect {
+                let buf = f.buffer_mut();
+                let w = buf.area.width as usize;
+                let h = buf.area.height as usize;
+                let border_style = Style::default().fg(pane_border_fg);
+                let active_style = Style::default().fg(pane_active_border_fg);
+                for row in 0..h {
+                    for col in 0..w {
+                        let idx = row * w + col;
+                        if idx >= buf.content.len() { continue; }
+                        let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
+                        if !matches!(ch, '│' | '─' | '┼' | '├' | '┤' | '┬' | '┴') { continue; }
+                        let x = buf.area.x + col as u16;
+                        let y = buf.area.y + row as u16;
+                        let adj = (x + 1 == ar.x && y >= ar.y && y < ar.y + ar.height)
+                            || (x == ar.x + ar.width && y >= ar.y && y < ar.y + ar.height)
+                            || (y + 1 == ar.y && x >= ar.x && x < ar.x + ar.width)
+                            || (y == ar.y + ar.height && x >= ar.x && x < ar.x + ar.width)
+                            || ((x + 1 == ar.x || x == ar.x + ar.width) && (y + 1 == ar.y || y == ar.y + ar.height));
+                        buf.content[idx].set_style(if adj { active_style } else { border_style });
+                    }
+                }
+            }
+
+            // Highlight the border under the cursor to preview what a drag would move.
+            if let Some((hpos, ref hkind, harea)) = hovered_border {
+                let buf = f.buffer_mut();
+                let w = buf.area.width as usize;
+                let hover_style = Style::default().fg(pane_border_hover_fg);
+                if hkind == "Horizontal" {
+                    // Vertical separator line at column hpos, spanning harea's height
+                    let col = hpos as usize;
+                    if col >= buf.area.x as usize && col < (buf.area.x + buf.area.width) as usize {
+                        for y in harea.y..harea.y + harea.height {
+                            let idx = (y - buf.area.y) as usize * w + (col - buf.area.x as usize);
+                            if idx < buf.content.len() {
+                                buf.content[idx].set_style(hover_style);
+                            }
+                        }
+                    }
+                } else {
+                    // Horizontal separator line at row hpos, spanning harea's width
+                    let row = hpos as usize;
+                    if row >= buf.area.y as usize && row < (buf.area.y + buf.area.height) as usize {
+                        for x in harea.x..harea.x + harea.width {
+                            let idx = (row - buf.area.y as usize) * w + (x - buf.area.x) as usize;
+                            if idx < buf.content.len() {
+                                buf.content[idx].set_style(hover_style);
+                            }
+                        }
+                    }
+                }
+            }
 
             // ── Left-click drag text selection overlay ────────────────
             // Suppress the client-side blue selection overlay when the

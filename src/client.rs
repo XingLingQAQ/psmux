@@ -2250,18 +2250,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         repeat_time_ms = state.repeat_time;
         // Update status-left / status-right from server (already format-expanded)
         if let Some(sl) = state.status_left {
-            if !sl.is_empty() {
-                // Pass full string — visual truncation is handled by ratatui
-                // when rendering into the allocated status bar area.
-                // Do NOT naively truncate by char count as that can split
-                // inside #[...] style directives, causing parse failures.
-                custom_status_left = Some(sl);
-            }
+            // Pass full string — visual truncation is handled by ratatui
+            // when rendering into the allocated status bar area.
+            // Do NOT naively truncate by char count as that can split
+            // inside #[...] style directives, causing parse failures.
+            // Allow empty values so conditionals like #{?client_prefix,...,}
+            // can clear the status area when the condition becomes false.
+            custom_status_left = if sl.is_empty() { None } else { Some(sl) };
         }
         if let Some(sr) = state.status_right {
-            if !sr.is_empty() {
-                custom_status_right = Some(sr);
-            }
+            custom_status_right = if sr.is_empty() { None } else { Some(sr) };
         }
         let status_lines = if state.status_visible { state.status_lines } else { 0 };
         // If server's status_lines changed, re-send client-size with the

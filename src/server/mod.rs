@@ -777,7 +777,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
-                CtrlReq::SplitWindow(k, cmd, detached, start_dir, size_pct, resp) => {
+                CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux: split-window without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
@@ -793,9 +793,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = resp.send(String::new());
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
-                    // Apply size if specified (as percentage)
-                    if let Some(pct) = size_pct {
-                        let pct = pct.clamp(1, 99);
+                    // Apply size if specified: (value, true) = percentage, (value, false) = cell count
+                    if let Some((val, is_pct)) = split_size {
+                        let pct = if is_pct {
+                            val.clamp(1, 99)
+                        } else {
+                            // Convert cell count to percentage based on split direction
+                            let area = app.last_window_area;
+                            let total = if k == LayoutKind::Horizontal { area.width } else { area.height };
+                            if total > 0 { ((val as u32 * 100) / total as u32).clamp(1, 99) as u16 } else { 50 }
+                        };
                         let win = &mut app.windows[app.active_idx];
                         if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &prev_path) {
                             sizes[0] = 100 - pct;
@@ -836,7 +843,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
-                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, size_pct, format_str, resp) => {
+                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
@@ -848,8 +855,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         eprintln!("psmux: split-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
-                    if let Some(pct) = size_pct {
-                        let pct = pct.clamp(1, 99);
+                    // Apply size if specified: (value, true) = percentage, (value, false) = cell count
+                    if let Some((val, is_pct)) = split_size {
+                        let pct = if is_pct {
+                            val.clamp(1, 99)
+                        } else {
+                            let area = app.last_window_area;
+                            let total = if k == LayoutKind::Horizontal { area.width } else { area.height };
+                            if total > 0 { ((val as u32 * 100) / total as u32).clamp(1, 99) as u16 } else { 50 }
+                        };
                         let win = &mut app.windows[app.active_idx];
                         if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &prev_path) {
                             sizes[0] = 100 - pct;
@@ -2705,11 +2719,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SelectLayout(layout) => {
                     unzoom_if_zoomed(&mut app);
                     apply_layout(&mut app, &layout);
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
                     state_dirty = true;
                 }
                 CtrlReq::NextLayout => {
                     unzoom_if_zoomed(&mut app);
                     cycle_layout(&mut app);
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
                     state_dirty = true;
                 }
                 CtrlReq::ListClients(resp) => {
@@ -3053,6 +3071,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ResizePaneAbsolute(axis, size) => {
                     unzoom_if_zoomed(&mut app);
                     resize_pane_absolute(&mut app, &axis, size);
+                    resize_all_panes(&mut app);
+                    hook_event = Some("after-resize-pane");
                 }
                 CtrlReq::ResizePanePercent(axis, pct) => {
                     unzoom_if_zoomed(&mut app);
@@ -3061,6 +3081,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let total = if axis == "x" { area.width } else { area.height };
                     let abs_size = ((total as u32) * (pct as u32) / 100).max(1) as u16;
                     resize_pane_absolute(&mut app, &axis, abs_size);
+                    resize_all_panes(&mut app);
+                    hook_event = Some("after-resize-pane");
                 }
                 CtrlReq::ShowOptionValue(resp, name) => {
                     let val = get_option_value(&app, &name);
@@ -3118,6 +3140,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::PrevLayout => {
                     unzoom_if_zoomed(&mut app);
                     cycle_layout_reverse(&mut app);
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
                     state_dirty = true;
                 }
                 CtrlReq::FocusIn => {

@@ -755,3 +755,7 @@ pub fn collect_leaves(node: Node) -> Vec<Node> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue171_layout_bugs.rs"]
+mod test_issue171_layout_bugs;

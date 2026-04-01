@@ -484,17 +484,19 @@ match cmd {
         let print_info = args.iter().any(|a| *a == "-P");
         let format_str: Option<String> = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
         let start_dir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
-        let size_pct: Option<u16> = args.windows(2).find(|w| w[0] == "-p").and_then(|w| w[1].trim_matches('%').parse().ok())
-            .or_else(|| args.windows(2).find(|w| w[0] == "-l").and_then(|w| {
-                let s = w[1].trim_matches('%');
-                s.parse().ok()
-            }));
+        // -p N = percentage, -l N = cell count (tmux semantics)
+        let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
+            .and_then(|w| w[1].trim_matches('%').parse::<u16>().ok())
+            .map(|v| (v, true))
+            .or_else(|| args.windows(2).find(|w| w[0] == "-l")
+                .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
+                .map(|v| (v, false)));
         let cmd_str: Option<String> = args.iter()
             .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
             .map(|s| s.trim_matches('"').to_string());
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, size_pct, format_str, rtx));
+            let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx));
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
@@ -502,7 +504,7 @@ match cmd {
             if !persistent { break; }
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, size_pct, rtx));
+            let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx));
             if let Ok(err_msg) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 if !err_msg.is_empty() {
                     let _ = write!(write_stream, "{}\n", err_msg);
@@ -1862,13 +1864,18 @@ fn dispatch_control_command(
             let detached = args.iter().any(|a| *a == "-d");
             let print_info = args.iter().any(|a| *a == "-P");
             let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
-            let size_pct = args.windows(2).find(|w| w[0] == "-p" || w[0] == "-l")
-                .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok());
+            // -p N = percentage, -l N = cell count (tmux semantics)
+            let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
+                .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
+                .map(|v| (v, true))
+                .or_else(|| args.windows(2).find(|w| w[0] == "-l")
+                    .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
+                    .map(|v| (v, false)));
             let (rtx, rrx) = mpsc::channel::<String>();
             if print_info {
-                let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, size_pct, format_str, rtx));
+                let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx));
             } else {
-                let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, size_pct, rtx));
+                let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
@@ -2071,17 +2078,30 @@ fn dispatch_control_command(
             true
         }
         "resize-pane" | "resizep" => {
-            let axis = if args.iter().any(|a| *a == "-L" || *a == "-R") { "x" }
-                       else if args.iter().any(|a| *a == "-U" || *a == "-D") { "y" }
-                       else { "y" };
-            let dir = if args.iter().any(|a| *a == "-L" || *a == "-U") {
-                format!("-{}", axis)
+            if args.iter().any(|a| *a == "-Z") {
+                let _ = tx.send(CtrlReq::ZoomPane);
+            } else if let Some(xval) = args.windows(2).find(|w| w[0] == "-x").map(|w| w[1]) {
+                if let Some(pct) = xval.strip_suffix('%').and_then(|n| n.parse::<u8>().ok()) {
+                    let _ = tx.send(CtrlReq::ResizePanePercent("x".to_string(), pct));
+                } else if let Ok(abs) = xval.parse::<u16>() {
+                    let _ = tx.send(CtrlReq::ResizePaneAbsolute("x".to_string(), abs));
+                }
+            } else if let Some(yval) = args.windows(2).find(|w| w[0] == "-y").map(|w| w[1]) {
+                if let Some(pct) = yval.strip_suffix('%').and_then(|n| n.parse::<u8>().ok()) {
+                    let _ = tx.send(CtrlReq::ResizePanePercent("y".to_string(), pct));
+                } else if let Ok(abs) = yval.parse::<u16>() {
+                    let _ = tx.send(CtrlReq::ResizePaneAbsolute("y".to_string(), abs));
+                }
             } else {
-                axis.to_string()
-            };
-            let amount = args.iter().filter(|a| !a.starts_with('-')).next()
-                .and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
-            let _ = tx.send(CtrlReq::ResizePane(dir, amount));
+                let amount = args.iter().filter(|a| !a.starts_with('-')).next()
+                    .and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
+                let dir = if args.iter().any(|a| *a == "-U") { "U" }
+                    else if args.iter().any(|a| *a == "-D") { "D" }
+                    else if args.iter().any(|a| *a == "-L") { "L" }
+                    else if args.iter().any(|a| *a == "-R") { "R" }
+                    else { "D" };
+                let _ = tx.send(CtrlReq::ResizePane(dir.to_string(), amount));
+            }
             let _ = resp_tx.send(String::new());
             true
         }

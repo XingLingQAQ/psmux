@@ -1878,3 +1878,48 @@ fn display_popup_d_flag_with_percent_dims() {
         other => panic!("expected PopupMode, got {:?}", std::mem::discriminant(other)),
     }
 }
+
+// ── Issue #111 follow-up: new-window -c must preserve -c flag in bind-key ──
+
+#[test]
+fn new_window_bare_returns_action_new_window() {
+    // Bare new-window with no args should still return the simple Action::NewWindow
+    assert!(matches!(parse_command_to_action("new-window"), Some(Action::NewWindow)));
+    assert!(matches!(parse_command_to_action("neww"), Some(Action::NewWindow)));
+}
+
+#[test]
+fn new_window_with_c_flag_returns_command_preserving_args() {
+    // new-window -c <dir> must NOT be reduced to Action::NewWindow — the -c flag
+    // must be preserved so the server can expand #{pane_current_path}. (Issue #111)
+    match parse_command_to_action("new-window -c #{pane_current_path}") {
+        Some(Action::Command(cmd)) => {
+            assert!(cmd.contains("-c"), "expected -c in command, got: {}", cmd);
+            assert!(cmd.contains("#{pane_current_path}"), "expected format var in command, got: {}", cmd);
+        }
+        _ => panic!("expected Action::Command preserving -c"),
+    }
+}
+
+#[test]
+fn new_window_with_name_flag_returns_command() {
+    // new-window -n myname should also be preserved as Command
+    match parse_command_to_action("new-window -n myname") {
+        Some(Action::Command(cmd)) => {
+            assert!(cmd.contains("-n"), "expected -n in command, got: {}", cmd);
+            assert!(cmd.contains("myname"), "expected window name in command, got: {}", cmd);
+        }
+        _ => panic!("expected Action::Command"),
+    }
+}
+
+#[test]
+fn new_window_with_shell_command_returns_command() {
+    // new-window -- python3 should also be preserved
+    match parse_command_to_action("new-window -- python3") {
+        Some(Action::Command(cmd)) => {
+            assert!(cmd.contains("python3"), "expected shell command in command, got: {}", cmd);
+        }
+        _ => panic!("expected Action::Command"),
+    }
+}

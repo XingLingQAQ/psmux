@@ -187,7 +187,16 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
     
     match parts[0] {
         "display-panes" | "displayp" => Some(Action::DisplayPanes),
-        "new-window" | "neww" => Some(Action::NewWindow),
+        "new-window" | "neww" => {
+            // If extra flags like -c, -d, -n, -F, -e or a shell command are present,
+            // store as Command to preserve the full argument string (esp. -c for start dir).
+            let has_extra = parts.len() > 1;
+            if has_extra {
+                Some(Action::Command(cmd.to_string()))
+            } else {
+                Some(Action::NewWindow)
+            }
+        }
         "split-window" | "splitw" => {
             // If extra flags like -c, -d, -p, -F, or a shell command are present,
             // store as Command to preserve the full argument string.

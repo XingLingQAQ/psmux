@@ -2114,21 +2114,25 @@ fn dispatch_control_command(
             true
         }
         "bind-key" | "bind" => {
-            // Simplified bind: bind [-n] [-T table] key command
-            let no_prefix = args.iter().any(|a| *a == "-n");
-            let table_name = args.windows(2).find(|w| w[0] == "-T")
-                .map(|w| w[1].to_string())
-                .unwrap_or_else(|| if no_prefix { "root".to_string() } else { "prefix".to_string() });
-            let repeat = args.iter().any(|a| *a == "-r");
-            let positional: Vec<&str> = args.iter()
-                .filter(|a| !a.starts_with('-') && {
-                    let pos = args.iter().position(|x| x == *a).unwrap_or(0);
-                    !(pos > 0 && args[pos-1] == "-T")
-                })
-                .copied().collect();
-            if positional.len() >= 2 {
-                let key = positional[0].to_string();
-                let command = positional[1..].join(" ");
+            // Parse bind-key's own flags, then treat everything after
+            // the key name as the verbatim command (preserving flags like -c).
+            let mut table_name = "prefix".to_string();
+            let mut repeat = false;
+            let mut i = 0;
+            while i < args.len() {
+                match args[i] {
+                    "-T" if i + 1 < args.len() => {
+                        table_name = args[i + 1].to_string();
+                        i += 2; continue;
+                    }
+                    "-n" => { table_name = "root".to_string(); i += 1; continue; }
+                    "-r" => { repeat = true; i += 1; continue; }
+                    _ => break,
+                }
+            }
+            if i < args.len() && i + 1 < args.len() {
+                let key = args[i].to_string();
+                let command = args[i + 1..].join(" ");
                 let _ = tx.send(CtrlReq::BindKey(table_name, key, command, repeat));
             }
             let _ = resp_tx.send(String::new());

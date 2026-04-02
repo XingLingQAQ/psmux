@@ -1248,24 +1248,14 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
     // (especially important when using -L socket namespaces like in tppanel preview).
     let target_session = app.port_file_base();
-    #[cfg(windows)]
-    {
-        let mut cmd = std::process::Command::new("pwsh");
-        cmd.args(["-NoProfile", "-Command", &shell_cmd]);
-        if !target_session.is_empty() {
-            cmd.env("PSMUX_TARGET_SESSION", &target_session);
-        }
-        let _ = cmd.spawn();
+    let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+    let mut cmd = std::process::Command::new(&shell_prog);
+    for a in &shell_args { cmd.arg(a); }
+    cmd.arg(&shell_cmd);
+    if !target_session.is_empty() {
+        cmd.env("PSMUX_TARGET_SESSION", &target_session);
     }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", &shell_cmd]);
-        if !target_session.is_empty() {
-            cmd.env("PSMUX_TARGET_SESSION", &target_session);
-        }
-        let _ = cmd.spawn();
-    }
+    let _ = cmd.spawn();
 }
 
 /// Parse a `.tmux` entry script (bash) and extract tmux commands from it.
@@ -1512,19 +1502,11 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
     } else if condition == "false" || condition == "0" {
         false
     } else {
-        #[cfg(windows)]
-        {
-            std::process::Command::new("pwsh")
-                .args(["-NoProfile", "-Command", condition])
-                .status().map(|s| s.success())
-                .unwrap_or_else(|_| {
-                    std::process::Command::new("cmd")
-                        .args(["/c", condition])
-                        .status().map(|s| s.success()).unwrap_or(false)
-                })
-        }
-        #[cfg(not(windows))]
-        { std::process::Command::new("sh").args(["-c", condition]).status().map(|s| s.success()).unwrap_or(false) }
+        let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+        let mut c = std::process::Command::new(&shell_prog);
+        for a in &shell_args { c.arg(a); }
+        c.arg(condition);
+        c.status().map(|s| s.success()).unwrap_or(false)
     };
 
     let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };

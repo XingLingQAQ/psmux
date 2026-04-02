@@ -403,7 +403,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         let target_session = app.port_file_base();
         let mut children: Vec<std::process::Child> = Vec::new();
         for ps1 in &scripts {
-            let mut cmd = std::process::Command::new("pwsh");
+            // Resolve shell: pwsh (PS7) preferred, fall back to powershell.exe (Windows PS)
+            let shell = if which::which("pwsh").is_ok() { "pwsh" } else { "powershell" };
+            let mut cmd = std::process::Command::new(shell);
             cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1]);
             if !target_session.is_empty() {
                 cmd.env("PSMUX_TARGET_SESSION", &target_session);
@@ -2710,22 +2712,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             app.pipe_panes.remove(idx);
                         }
                         // Start new pipe
-                        #[cfg(windows)]
-                        let process = std::process::Command::new("pwsh")
-                            .args(["-NoProfile", "-Command", &cmd])
-                            .stdin(if stdout { std::process::Stdio::piped() } else { std::process::Stdio::null() })
-                            .stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() })
-                            .stderr(std::process::Stdio::null())
-                            .spawn()
-                            .ok();
-                        #[cfg(not(windows))]
-                        let process = std::process::Command::new("sh")
-                            .args(["-c", &cmd])
-                            .stdin(if stdout { std::process::Stdio::piped() } else { std::process::Stdio::null() })
-                            .stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() })
-                            .stderr(std::process::Stdio::null())
-                            .spawn()
-                            .ok();
+                        let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+                        let process = {
+                            let mut c = std::process::Command::new(&shell_prog);
+                            for a in &shell_args { c.arg(a); }
+                            c.arg(&cmd);
+                            c.stdin(if stdout { std::process::Stdio::piped() } else { std::process::Stdio::null() });
+                            c.stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() });
+                            c.stderr(std::process::Stdio::null());
+                            c.spawn().ok()
+                        };
                         
                         app.pipe_panes.push(PipePaneState {
                             pane_id,
@@ -3299,6 +3295,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         popup_pane: None,
                         scroll_offset: 0,
                     };
+                    state_dirty = true;
+                }
+                CtrlReq::StatusMessage(msg) => {
+                    app.status_message = Some((msg, std::time::Instant::now()));
                     state_dirty = true;
                 }
                 CtrlReq::ClearPromptHistory => {

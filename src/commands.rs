@@ -24,6 +24,31 @@ pub(crate) fn parse_popup_dim_local(spec: &str, term_dim: u16, default: u16) -> 
     }
 }
 
+/// The default format string for `display-message` when no argument is given (tmux parity).
+pub(crate) const DISPLAY_MESSAGE_DEFAULT_FMT: &str =
+    "[#{session_name}] #{window_index}:#{window_name}#{window_flags} \"#{pane_title}\" #{pane_index} #{pane_current_command}";
+
+/// Resolve the shell and its invocation prefix for `run-shell` commands.
+/// Returns (program, prefix_args) where prefix_args are flags like ["-NoProfile", "-Command"].
+/// On Windows: tries pwsh -> powershell -> cmd.
+/// On Unix: uses sh -c.
+pub fn resolve_run_shell() -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        if which::which("pwsh").is_ok() {
+            return ("pwsh".to_string(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
+        }
+        if which::which("powershell").is_ok() {
+            return ("powershell".to_string(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
+        }
+        ("cmd".to_string(), vec!["/c".to_string()])
+    }
+    #[cfg(not(windows))]
+    {
+        ("sh".to_string(), vec!["-c".to_string()])
+    }
+}
+
 /// Show text output in a popup overlay (used by list-* commands inside a session).
 fn show_output_popup(app: &mut AppState, title: &str, output: String) {
     let lines: Vec<&str> = output.lines().collect();
@@ -915,24 +940,24 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             app.sync_input = !app.sync_input;
         }
         "set-option" | "set" | "set-window-option" | "setw" => {
+            // Always apply locally first (fix #179: TCP server drops these)
+            crate::config::parse_config_line(app, cmd);
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-            } else {
-                crate::config::parse_config_line(app, cmd);
             }
         }
         "bind-key" | "bind" => {
+            // Always apply locally first (fix #179: TCP server drops these)
+            crate::config::parse_config_line(app, cmd);
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-            } else {
-                crate::config::parse_config_line(app, cmd);
             }
         }
         "unbind-key" | "unbind" => {
+            // Always apply locally first (fix #179: TCP server drops these)
+            crate::config::parse_config_line(app, cmd);
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-            } else {
-                crate::config::parse_config_line(app, cmd);
             }
         }
         "source-file" | "source" => {
@@ -1113,12 +1138,22 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         }
         "display-message" | "display" => {
             if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+                // Forward to server; use default format when no args given
+                let effective_cmd = if parts.len() <= 1 {
+                    format!("display-message \"{}\"", DISPLAY_MESSAGE_DEFAULT_FMT)
+                } else {
+                    cmd.to_string()
+                };
+                let _ = send_control_to_port(port, &format!("{}\n", effective_cmd), &app.session_key);
             } else {
                 // Local: expand format string and show as status message
-                let msg = parts[1..].join(" ");
-                let msg = msg.trim_matches('"').trim_matches('\'');
-                let expanded = crate::format::expand_format(msg, app);
+                let msg = if parts.len() <= 1 {
+                    DISPLAY_MESSAGE_DEFAULT_FMT.to_string()
+                } else {
+                    let raw = parts[1..].join(" ");
+                    raw.trim_matches('"').trim_matches('\'').to_string()
+                };
+                let expanded = crate::format::expand_format(&msg, app);
                 app.status_message = Some((expanded, Instant::now()));
             }
         }
@@ -1434,63 +1469,56 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 else { cmd_parts.push(arg); }
             }
             let shell_cmd = cmd_parts.join(" ");
-            if !shell_cmd.is_empty() {
+            if shell_cmd.is_empty() {
+                // No command given: show usage (tmux parity)
+                app.status_message = Some((
+                    "usage: run-shell [-b] shell-command".to_string(),
+                    Instant::now(),
+                ));
+            } else {
                 // Expand ~ to home directory + XDG fallback for plugin paths
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
                 // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
                 let target_session = app.port_file_base();
+                let (shell_prog, shell_args) = resolve_run_shell();
 
                 if background {
                     // -b flag: fire and forget, no output capture
-                    #[cfg(windows)]
-                    {
-                        let mut c = std::process::Command::new("pwsh");
-                        c.args(["-NoProfile", "-Command", &shell_cmd]);
-                        if !target_session.is_empty() {
-                            c.env("PSMUX_TARGET_SESSION", &target_session);
-                        }
-                        let _ = c.spawn();
+                    let mut c = std::process::Command::new(&shell_prog);
+                    for a in &shell_args { c.arg(a); }
+                    c.arg(&shell_cmd);
+                    if !target_session.is_empty() {
+                        c.env("PSMUX_TARGET_SESSION", &target_session);
                     }
-                    #[cfg(not(windows))]
-                    {
-                        let mut c = std::process::Command::new("sh");
-                        c.args(["-c", &shell_cmd]);
-                        if !target_session.is_empty() {
-                            c.env("PSMUX_TARGET_SESSION", &target_session);
-                        }
-                        let _ = c.spawn();
-                    }
+                    let _ = c.spawn();
                 } else {
                     // No -b: capture output and display in popup
-                    #[cfg(windows)]
-                    let result = {
-                        let mut c = std::process::Command::new("pwsh");
-                        c.args(["-NoProfile", "-Command", &shell_cmd]);
-                        if !target_session.is_empty() {
-                            c.env("PSMUX_TARGET_SESSION", &target_session);
-                        }
-                        c.output()
-                    };
-                    #[cfg(not(windows))]
-                    let result = {
-                        let mut c = std::process::Command::new("sh");
-                        c.args(["-c", &shell_cmd]);
-                        if !target_session.is_empty() {
-                            c.env("PSMUX_TARGET_SESSION", &target_session);
-                        }
-                        c.output()
-                    };
-                    if let Ok(output) = result {
-                        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        if !stderr.is_empty() {
-                            if !text.is_empty() && !text.ends_with('\n') {
-                                text.push('\n');
+                    let mut c = std::process::Command::new(&shell_prog);
+                    for a in &shell_args { c.arg(a); }
+                    c.arg(&shell_cmd);
+                    if !target_session.is_empty() {
+                        c.env("PSMUX_TARGET_SESSION", &target_session);
+                    }
+                    let result = c.output();
+                    match result {
+                        Ok(output) => {
+                            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            if !stderr.is_empty() {
+                                if !text.is_empty() && !text.ends_with('\n') {
+                                    text.push('\n');
+                                }
+                                text.push_str(&stderr);
                             }
-                            text.push_str(&stderr);
+                            if !text.is_empty() {
+                                show_output_popup(app, "run-shell", text);
+                            }
                         }
-                        if !text.is_empty() {
-                            show_output_popup(app, "run-shell", text);
+                        Err(e) => {
+                            app.status_message = Some((
+                                format!("run-shell: {}", e),
+                                Instant::now(),
+                            ));
                         }
                     }
                 }
@@ -1529,3 +1557,7 @@ mod tests_commands_audit;
 #[cfg(test)]
 #[path = "../tests-rs/test_parity.rs"]
 mod tests_parity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue179_bind_key_uppercase.rs"]
+mod tests_issue179_bind_key_uppercase;

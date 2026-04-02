@@ -997,7 +997,11 @@ match cmd {
             i += 1;
         }
 
-        let fmt = parts.join(" ");
+        let fmt = if parts.is_empty() {
+            crate::commands::DISPLAY_MESSAGE_DEFAULT_FMT.to_string()
+        } else {
+            parts.join(" ")
+        };
         // Pass target pane index for PANE_POS_OVERRIDE (#113).
         let target_pane_idx: Option<usize> = if !pane_is_id { target_pane } else { None };
         let (rtx, rrx) = mpsc::channel::<String>();
@@ -1306,11 +1310,11 @@ match cmd {
         let _ = tx.send(CtrlReq::ClearHistory);
     }
     "save-buffer" | "saveb" => {
-        let path = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"").to_string();
+        let path = args.iter().find(|a| **a == "-" || !a.starts_with('-')).unwrap_or(&"").to_string();
         let _ = tx.send(CtrlReq::SaveBuffer(path));
     }
     "load-buffer" | "loadb" => {
-        let path = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"").to_string();
+        let path = args.iter().find(|a| **a == "-" || !a.starts_with('-')).unwrap_or(&"").to_string();
         let _ = tx.send(CtrlReq::LoadBuffer(path));
     }
     "set-environment" | "setenv" => {
@@ -1574,17 +1578,50 @@ match cmd {
         let shell_cmd = shell_cmd.trim_matches(|c: char| c == '\'' || c == '"').to_string();
         // Expand ~ to home directory + XDG fallback for plugin paths
         let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
-        if !shell_cmd.is_empty() {
+        if shell_cmd.is_empty() {
+            if !persistent {
+                let _ = write!(write_stream, "usage: run-shell [-b] shell-command\n");
+                let _ = write_stream.flush();
+            }
+        } else {
+            let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
             if background {
-                let _ = std::process::Command::new("pwsh").args(["-NoProfile", "-Command", &shell_cmd]).spawn();
+                let mut c = std::process::Command::new(&shell_prog);
+                for a in &shell_args { c.arg(a); }
+                c.arg(&shell_cmd);
+                let _ = c.spawn();
             } else {
-                let output = std::process::Command::new("pwsh")
-                    .args(["-NoProfile", "-Command", &shell_cmd]).output();
-                if let Ok(out) = output {
-                    let text = String::from_utf8_lossy(&out.stdout);
-                    if !text.is_empty() {
-                        let _ = write!(write_stream, "{}", text);
-                        let _ = write_stream.flush();
+                let mut c = std::process::Command::new(&shell_prog);
+                for a in &shell_args { c.arg(a); }
+                c.arg(&shell_cmd);
+                let result = c.output();
+                match result {
+                    Ok(out) => {
+                        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                        let stderr_text = String::from_utf8_lossy(&out.stderr);
+                        if !stderr_text.is_empty() {
+                            if !text.is_empty() && !text.ends_with('\n') {
+                                text.push('\n');
+                            }
+                            text.push_str(&stderr_text);
+                        }
+                        if !text.is_empty() {
+                            if persistent {
+                                let _ = tx.send(CtrlReq::ShowTextPopup("run-shell".to_string(), text));
+                            } else {
+                                let _ = write!(write_stream, "{}", text);
+                                let _ = write_stream.flush();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("run-shell: {}\n", e);
+                        if persistent {
+                            let _ = tx.send(CtrlReq::StatusMessage(err_msg));
+                        } else {
+                            let _ = write!(write_stream, "{}", err_msg);
+                            let _ = write_stream.flush();
+                        }
                     }
                 }
             }
@@ -1608,21 +1645,14 @@ match cmd {
             } else if condition == "false" || condition == "0" {
                 false
             } else {
-                // Try pwsh first, fall back to cmd /c
-                std::process::Command::new("pwsh")
-                    .args(["-NoProfile", "-Command", condition])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or_else(|_| {
-                        std::process::Command::new("cmd")
-                            .args(["/c", condition])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status()
-                            .map(|s| s.success()).unwrap_or(false)
-                    })
+                // Use resolve_run_shell for consistent shell fallback
+                let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+                let mut c = std::process::Command::new(&shell_prog);
+                for a in &shell_args { c.arg(a); }
+                c.arg(condition);
+                c.stdout(std::process::Stdio::null());
+                c.stderr(std::process::Stdio::null());
+                c.status().map(|s| s.success()).unwrap_or(false)
             };
             let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };
             if let Some(chosen) = cmd_to_run {
@@ -1820,7 +1850,12 @@ fn dispatch_control_command(
         }
         "display-message" | "display" => {
             let print_mode = args.iter().any(|a| *a == "-p");
-            let fmt = args.last().map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+            let raw_fmt = args.last().map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+            let fmt = if raw_fmt.is_empty() {
+                crate::commands::DISPLAY_MESSAGE_DEFAULT_FMT.to_string()
+            } else {
+                raw_fmt
+            };
             let target_pane_idx = if pane_is_id { None } else { target_pane };
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode));

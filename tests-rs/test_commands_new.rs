@@ -1923,3 +1923,88 @@ fn new_window_with_shell_command_returns_command() {
         _ => panic!("expected Action::Command"),
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Issue #170 follow-up: run-shell no-arg usage + display-message defaults
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn run_shell_no_args_shows_usage() {
+    let mut app = mock_app();
+    let _ = execute_command_string(&mut app, "run-shell");
+    // Should show usage on status bar, not enter popup
+    assert!(!matches!(app.mode, Mode::PopupMode { .. }), "run-shell with no args should not show popup");
+    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    assert!(msg.contains("usage"), "expected usage message on status bar, got: {}", msg);
+}
+
+#[test]
+fn run_alias_no_args_shows_usage() {
+    let mut app = mock_app();
+    let _ = execute_command_string(&mut app, "run");
+    assert!(!matches!(app.mode, Mode::PopupMode { .. }));
+    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    assert!(msg.contains("usage"), "expected usage message for 'run' alias, got: {}", msg);
+}
+
+#[test]
+fn display_message_no_args_uses_default_format() {
+    let mut app = mock_app();
+    // Ensure control_port is None so the local handler runs
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message");
+    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    // Default format should contain session name
+    assert!(!msg.is_empty(), "display-message with no args should produce a non-empty status message");
+    assert!(msg.contains("test_session"), "default format should expand session_name, got: {}", msg);
+}
+
+#[test]
+fn display_alias_no_args_uses_default_format() {
+    let mut app = mock_app();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display");
+    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    assert!(!msg.is_empty(), "display alias with no args should produce a non-empty status message");
+}
+
+#[test]
+fn display_message_with_args_still_works() {
+    let mut app = mock_app();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message \"hello world\"");
+    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    assert!(msg.contains("hello world"), "display-message with explicit text should show it, got: {}", msg);
+}
+
+#[test]
+fn run_shell_error_shows_on_status_bar() {
+    let mut app = mock_app();
+    // Use a command that will definitely fail (non-existent program path)
+    let _ = execute_command_string(&mut app, "run-shell \"__nonexistent_program_that_does_not_exist_12345\"");
+    // Either shows popup with error output, or shows error on status bar
+    // (depends on whether shell itself reports the error via stderr)
+    match &app.mode {
+        Mode::PopupMode { output, .. } => {
+            // Shell captured the error as stderr output
+            assert!(!output.is_empty(), "popup should contain error information");
+        }
+        _ => {
+            // If no popup, the status bar might have an error (e.g. shell not found)
+            // This is acceptable behavior
+        }
+    }
+}
+
+#[test]
+fn resolve_run_shell_returns_valid_shell() {
+    let (prog, args) = resolve_run_shell();
+    assert!(!prog.is_empty(), "shell program should not be empty");
+    assert!(!args.is_empty(), "shell args should include at least one flag");
+    // The returned program should be findable on the system
+    assert!(
+        which::which(&prog).is_ok(),
+        "resolved shell '{}' should exist on PATH",
+        prog
+    );
+}

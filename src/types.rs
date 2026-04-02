@@ -1003,6 +1003,8 @@ pub enum CtrlReq {
     /// Show static text in a popup overlay (title, content).
     /// Used by the persistent client command prompt for list-* commands.
     ShowTextPopup(String, String),
+    /// Set status bar message (fire-and-forget, no response channel needed).
+    StatusMessage(String),
     /// Clear the command prompt history.
     ClearPromptHistory,
     /// Show the command prompt history in a popup.

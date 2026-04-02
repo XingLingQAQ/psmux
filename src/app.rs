@@ -1132,6 +1132,9 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 CtrlReq::SourceFile(path) => {
                     crate::config::source_file(&mut app, &path);
                 }
+                CtrlReq::StatusMessage(msg) => {
+                    app.status_message = Some((msg, Instant::now()));
+                }
                 // For attach mode, we just ignore the new commands - they're handled by the server
                 _ => {}
             }

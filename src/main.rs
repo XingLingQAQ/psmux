@@ -1461,25 +1461,27 @@ fn run_main() -> io::Result<()> {
                     }
                     i += 1;
                 }
-                let shell_cmd = crate::util::expand_run_shell_path(&cmd_to_run.join(" "));
-                // Run the command using the system shell
+                let shell_cmd_str = cmd_to_run.join(" ");
+                if shell_cmd_str.trim().is_empty() {
+                    eprintln!("usage: run-shell [-b] shell-command");
+                    std::process::exit(1);
+                }
+                let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd_str);
+                let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+                // Run the command using the resolved shell
                 if background {
-                    #[cfg(windows)]
-                    {
-                        let _ = std::process::Command::new("pwsh")
-                            .args(["-NoProfile", "-Command", &shell_cmd])
-                            .spawn();
-                    }
+                    let mut c = std::process::Command::new(&shell_prog);
+                    for a in &shell_args { c.arg(a); }
+                    c.arg(&shell_cmd);
+                    let _ = c.spawn();
                 } else {
-                    #[cfg(windows)]
-                    {
-                        let output = std::process::Command::new("pwsh")
-                            .args(["-NoProfile", "-Command", &shell_cmd])
-                            .output()?;
-                        io::stdout().write_all(&output.stdout)?;
-                        io::stderr().write_all(&output.stderr)?;
-                        std::process::exit(output.status.code().unwrap_or(0));
-                    }
+                    let mut c = std::process::Command::new(&shell_prog);
+                    for a in &shell_args { c.arg(a); }
+                    c.arg(&shell_cmd);
+                    let output = c.output()?;
+                    io::stdout().write_all(&output.stdout)?;
+                    io::stderr().write_all(&output.stderr)?;
+                    std::process::exit(output.status.code().unwrap_or(0));
                 }
                 return Ok(());
             }
@@ -1742,26 +1744,13 @@ fn run_main() -> io::Result<()> {
                         let cmd_false_bg = cmd_false.clone();
                         std::thread::spawn(move || {
                             let success = {
-                                #[cfg(windows)]
-                                {
-                                    std::process::Command::new("pwsh")
-                                        .args(["-NoProfile", "-Command", &cond])
-                                        .stdout(std::process::Stdio::null())
-                                        .stderr(std::process::Stdio::null())
-                                        .status()
-                                        .map(|s| s.success())
-                                        .unwrap_or(false)
-                                }
-                                #[cfg(not(windows))]
-                                {
-                                    std::process::Command::new("sh")
-                                        .args(["-c", &cond])
-                                        .stdout(std::process::Stdio::null())
-                                        .stderr(std::process::Stdio::null())
-                                        .status()
-                                        .map(|s| s.success())
-                                        .unwrap_or(false)
-                                }
+                                let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+                                let mut c = std::process::Command::new(&shell_prog);
+                                for a in &shell_args { c.arg(a); }
+                                c.arg(&cond);
+                                c.stdout(std::process::Stdio::null());
+                                c.stderr(std::process::Stdio::null());
+                                c.status().map(|s| s.success()).unwrap_or(false)
                             };
                             let cmd_to_run = if success { Some(true_cmd) } else { cmd_false_bg };
                             if let Some(cmd) = cmd_to_run {
@@ -1782,25 +1771,14 @@ fn run_main() -> io::Result<()> {
                         false
                     } else {
                         // Run shell command - suppress stdout/stderr so it doesn't leak to terminal
-                        #[cfg(windows)]
                         {
-                            std::process::Command::new("pwsh")
-                                .args(["-NoProfile", "-Command", &cond])
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status()
-                                .map(|s| s.success())
-                                .unwrap_or(false)
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            std::process::Command::new("sh")
-                                .args(["-c", &cond])
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status()
-                                .map(|s| s.success())
-                                .unwrap_or(false)
+                            let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+                            let mut c = std::process::Command::new(&shell_prog);
+                            for a in &shell_args { c.arg(a); }
+                            c.arg(&cond);
+                            c.stdout(std::process::Stdio::null());
+                            c.stderr(std::process::Stdio::null());
+                            c.status().map(|s| s.success()).unwrap_or(false)
                         }
                     };
                     
@@ -2084,6 +2062,8 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
+                        "-w" => {} // tmux 3.2+ clipboard propagation flag, silently accept
+                        "-" => { file_path = Some("-".to_string()); }
                         s if !s.starts_with('-') => { file_path = Some(s.to_string()); }
                         _ => {}
                     }
@@ -2124,6 +2104,7 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
+                        "-" => { file_path = Some("-".to_string()); }
                         s if !s.starts_with('-') => { file_path = Some(s.to_string()); }
                         _ => {}
                     }

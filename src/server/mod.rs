@@ -1223,6 +1223,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 combined_buf.push_str("\"}");
                             }
                         }
+                        // Inject pane-border-status and pane-border-format
+                        if let Some(pbs) = app.user_options.get("pane-border-status") {
+                            if combined_buf.ends_with('}') {
+                                combined_buf.pop();
+                                combined_buf.push_str(",\"pane_border_status\":\"");
+                                combined_buf.push_str(&json_escape_string(pbs));
+                                combined_buf.push('"');
+                                if let Some(pbf) = app.user_options.get("pane-border-format") {
+                                    combined_buf.push_str(",\"pane_border_format\":\"");
+                                    combined_buf.push_str(&json_escape_string(pbf));
+                                    combined_buf.push('"');
+                                }
+                                combined_buf.push('}');
+                            }
+                        }
                         let overlay_json = serialize_overlay_json(&app);
                         if !overlay_json.is_empty() && combined_buf.ends_with('}') {
                             combined_buf.pop();
@@ -1377,7 +1392,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ToggleSync => { app.sync_input = !app.sync_input; }
                 CtrlReq::SetPaneTitle(title) => {
                     let win = &mut app.windows[app.active_idx];
-                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) { p.title = title; }
+                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                        p.title_locked = !title.is_empty();
+                        p.title = title;
+                    }
+                    meta_dirty = true;
                 }
                 CtrlReq::SetPaneStyle(style) => {
                     // Per-pane styling (e.g. "bg=default,fg=blue") matching
@@ -3661,6 +3680,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         combined_buf.push_str("\"}");
                     }
                 }
+                // Inject pane-border-status and pane-border-format
+                if let Some(pbs) = app.user_options.get("pane-border-status") {
+                    if combined_buf.ends_with('}') {
+                        combined_buf.pop();
+                        combined_buf.push_str(",\"pane_border_status\":\"");
+                        combined_buf.push_str(&json_escape_string(pbs));
+                        combined_buf.push('"');
+                        if let Some(pbf) = app.user_options.get("pane-border-format") {
+                            combined_buf.push_str(",\"pane_border_format\":\"");
+                            combined_buf.push_str(&json_escape_string(pbf));
+                            combined_buf.push('"');
+                        }
+                        combined_buf.push('}');
+                    }
+                }
                 let overlay_json = serialize_overlay_json(&app);
                 if !overlay_json.is_empty() && combined_buf.ends_with('}') {
                     combined_buf.pop();
@@ -3835,3 +3869,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue169_manual_rename.rs"]
 mod test_issue169;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_pane_title.rs"]
+mod test_pane_title;

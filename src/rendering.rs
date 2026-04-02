@@ -308,7 +308,8 @@ pub fn render_node(
             // Pane border format/status overlay
             if border_status != "off" && !border_format.is_empty() && area.height > 1 {
                 let pane_label = border_format.replace("#{pane_index}", &pane_idx.to_string())
-                    .replace("#P", &pane_idx.to_string());
+                    .replace("#P", &pane_idx.to_string())
+                    .replace("#{pane_title}", &pane.title);
                 let label_width = UnicodeWidthStr::width(pane_label.as_str()) as u16;
                 if label_width > 0 && area.width >= label_width {
                     let label_y = if border_status == "bottom" { area.y + area.height.saturating_sub(1) } else { area.y };

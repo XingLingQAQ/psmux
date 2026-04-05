@@ -302,12 +302,24 @@ fn expand_expression(expr: &str, app: &AppState, win_idx: usize) -> String {
         match first {
             b'W' => {
                 // #{W:fmt} — expand fmt once per window, join with spaces
+                // #{W:fmt,current_fmt} — use fmt for non-active, current_fmt for active window
                 let inner_fmt = &expr[2..];
+                let args = split_at_depth0(inner_fmt, b',');
+                let (normal_fmt, current_fmt) = if args.len() >= 2 {
+                    (args[0].as_str(), args[1].as_str())
+                } else {
+                    (inner_fmt, inner_fmt)
+                };
+                let two_arg = args.len() >= 2;
                 let mut parts = Vec::new();
                 for wi in 0..app.windows.len() {
-                    parts.push(expand_format_for_window(inner_fmt, app, wi));
+                    let fmt = if wi == app.active_idx { current_fmt } else { normal_fmt };
+                    parts.push(expand_format_for_window(fmt, app, wi));
                 }
-                return parts.join(" ");
+                // Two-argument form joins without separator (user controls layout),
+                // single-argument form joins with spaces (backward compatible).
+                let sep = if two_arg { "" } else { " " };
+                return parts.join(sep);
             }
             b'P' => {
                 // #{P:fmt} — expand fmt once per pane in the current window

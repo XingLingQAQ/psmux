@@ -3348,16 +3348,21 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             // Render the first status line (line 0)
             let line0_area = Rect { x: status_chunk.x, y: status_chunk.y, width: status_chunk.width, height: 1.min(status_chunk.height) };
             if use_status_format_0 && state.status_message.is_none() {
-                // status-format[0] overrides the default left+tabs+right layout
-                let fmt0_spans = crate::rendering::parse_inline_styles(&status_format[0], sb_base);
-                let fmt0_w: usize = fmt0_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-                let mut final_spans = fmt0_spans;
-                if fmt0_w < total_width {
-                    final_spans.push(Span::styled(" ".repeat(total_width - fmt0_w), sb_base));
-                } else {
-                    crate::style::truncate_spans_to_width(&mut final_spans, total_width);
-                }
-                let fmt0_widget = Paragraph::new(Line::from(final_spans)).style(sb_base);
+                // status-format[0] overrides the default left+tabs+right layout.
+                // Use the layout engine to handle #[align], #[fill], #[list], #[range].
+                let layout = crate::style::layout_format_line(
+                    &status_format[0], total_width, sb_base,
+                );
+                // Update tab positions from range info so mouse clicks work
+                // with custom status-format layouts.
+                client_tab_positions = layout.ranges.iter().filter_map(|(rt, s, e)| {
+                    match rt {
+                        crate::style::StatusRangeType::Window(idx) => {
+                            Some((*idx, *s + status_chunk.x, *e + status_chunk.x))
+                        }
+                    }
+                }).collect();
+                let fmt0_widget = Paragraph::new(Line::from(layout.spans)).style(sb_base);
                 f.render_widget(fmt0_widget, line0_area);
             } else {
                 f.render_widget(status_bar, line0_area);
@@ -3372,16 +3377,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 } else {
                     String::new()
                 };
-                // Parse inline styles (#[fg=...], etc.) and pad to full width
-                let parsed_spans = crate::rendering::parse_inline_styles(&text, sb_base);
-                let visible_w: usize = parsed_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-                let mut line_spans = parsed_spans;
-                if visible_w < line_area.width as usize {
-                    line_spans.push(Span::styled(" ".repeat(line_area.width as usize - visible_w), sb_base));
-                } else {
-                    crate::style::truncate_spans_to_width(&mut line_spans, line_area.width as usize);
-                }
-                let line_widget = Paragraph::new(Line::from(line_spans)).style(sb_base);
+                // Use the layout engine for #[align], #[fill], #[list], #[range] support
+                let layout = crate::style::layout_format_line(&text, line_area.width as usize, sb_base);
+                let line_widget = Paragraph::new(Line::from(layout.spans)).style(sb_base);
                 f.render_widget(line_widget, line_area);
             }
             if renaming {

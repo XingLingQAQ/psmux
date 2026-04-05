@@ -697,7 +697,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         | CtrlReq::SendPaste(_)
                     );
                     let is_temp_focus = matches!(&req,
-                        CtrlReq::FocusWindowTemp(_) | CtrlReq::FocusPaneTemp(_) | CtrlReq::FocusPaneByIndexTemp(_));
+                        CtrlReq::FocusWindowTemp(_) | CtrlReq::FocusWindowByNameTemp(_) | CtrlReq::FocusPaneTemp(_) | CtrlReq::FocusPaneByIndexTemp(_));
                     let mut hook_event: Option<&str> = None;
                     // Track active_idx changes for debugging window-switch issues
                     let _prev_active_idx = app.active_idx;
@@ -706,7 +706,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::PrevWindow => "PrevWindow",
                         CtrlReq::SelectWindow(_) => "SelectWindow",
                         CtrlReq::FocusWindow(_) => "FocusWindow",
+                        CtrlReq::FocusWindowByName(_) => "FocusWindowByName",
                         CtrlReq::FocusWindowTemp(_) => "FocusWindowTemp",
+                        CtrlReq::FocusWindowByNameTemp(_) => "FocusWindowByNameTemp",
                         CtrlReq::FocusWindowCmd(_) => "FocusWindowCmd",
                         CtrlReq::LastWindow => "LastWindow",
                         CtrlReq::MouseDown(..) => "MouseDown",
@@ -947,6 +949,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     meta_dirty = true;
                 }
+                CtrlReq::FocusWindowByName(ref name) => {
+                    if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
+                        if internal_idx != app.active_idx {
+                            switch_with_copy_save(&mut app, |app| {
+                                app.last_window_idx = app.active_idx;
+                                app.active_idx = internal_idx;
+                            });
+                            if let Some(win) = app.windows.get_mut(internal_idx) {
+                                win.activity_flag = false;
+                                win.bell_flag = false;
+                                win.silence_flag = false;
+                            }
+                            resize_all_panes(&mut app);
+                        }
+                    }
+                    meta_dirty = true;
+                }
                 CtrlReq::FocusPane(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
                     switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, pid); });
@@ -982,6 +1001,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if internal_idx < app.windows.len() {
                             app.active_idx = internal_idx;
                         }
+                    }
+                }
+                CtrlReq::FocusWindowByNameTemp(ref name) => {
+                    if temp_focus_restore.is_none() {
+                        let pane_id = crate::tree::get_active_pane_id(
+                            &app.windows[app.active_idx].root,
+                            &app.windows[app.active_idx].active_path,
+                        ).unwrap_or(usize::MAX);
+                        temp_focus_restore = Some((app.active_idx, pane_id));
+                    }
+                    if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
+                        app.active_idx = internal_idx;
                     }
                 }
                 CtrlReq::FocusPaneTemp(pid) => {

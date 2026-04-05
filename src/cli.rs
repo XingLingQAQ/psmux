@@ -508,8 +508,11 @@ pub fn parse_target(target: &str) -> ParsedTarget {
             }
         } else if let Some(dot_pos) = wp.find('.') {
             if dot_pos > 0 {
-                if let Ok(w) = wp[..dot_pos].parse::<usize>() {
+                let win_part = &wp[..dot_pos];
+                if let Ok(w) = win_part.parse::<usize>() {
                     result.window = Some(w);
+                } else if !win_part.is_empty() {
+                    result.window_name = Some(win_part.to_string());
                 }
             }
             if let Ok(p) = wp[dot_pos + 1..].parse::<usize>() {
@@ -518,6 +521,8 @@ pub fn parse_target(target: &str) -> ParsedTarget {
         } else {
             if let Ok(w) = wp.parse::<usize>() {
                 result.window = Some(w);
+            } else if !wp.is_empty() {
+                result.window_name = Some(wp.to_string());
             }
         }
     }
@@ -529,4 +534,59 @@ pub fn parse_target(target: &str) -> ParsedTarget {
 pub fn extract_session_from_target(target: &str) -> String {
     let parsed = parse_target(target);
     parsed.session.unwrap_or_else(|| "default".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_target_window_name() {
+        let pt = parse_target("mysession:mywindow");
+        assert_eq!(pt.session, Some("mysession".to_string()));
+        assert_eq!(pt.window, None);
+        assert_eq!(pt.window_name, Some("mywindow".to_string()));
+    }
+
+    #[test]
+    fn parse_target_window_index() {
+        let pt = parse_target("mysession:2");
+        assert_eq!(pt.session, Some("mysession".to_string()));
+        assert_eq!(pt.window, Some(2));
+        assert_eq!(pt.window_name, None);
+    }
+
+    #[test]
+    fn parse_target_window_name_with_pane() {
+        let pt = parse_target("mysession:mywindow.1");
+        assert_eq!(pt.session, Some("mysession".to_string()));
+        assert_eq!(pt.window, None);
+        assert_eq!(pt.window_name, Some("mywindow".to_string()));
+        assert_eq!(pt.pane, Some(1));
+    }
+
+    #[test]
+    fn parse_target_bare_window_name() {
+        // :mywindow (no session)
+        let pt = parse_target(":mywindow");
+        assert_eq!(pt.session, None);
+        assert_eq!(pt.window, None);
+        assert_eq!(pt.window_name, Some("mywindow".to_string()));
+    }
+
+    #[test]
+    fn parse_target_bare_window_index() {
+        let pt = parse_target(":3");
+        assert_eq!(pt.session, None);
+        assert_eq!(pt.window, Some(3));
+        assert_eq!(pt.window_name, None);
+    }
+
+    #[test]
+    fn parse_target_session_only() {
+        let pt = parse_target("mysession");
+        assert_eq!(pt.session, Some("mysession".to_string()));
+        assert_eq!(pt.window, None);
+        assert_eq!(pt.window_name, None);
+    }
 }

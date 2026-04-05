@@ -66,6 +66,7 @@ let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
 let mut persistent = false;
 let mut resp_tx_opt: Option<mpsc::Sender<mpsc::Receiver<String>>> = None;
 let mut global_target_win: Option<usize> = None;
+let mut global_target_win_name: Option<String> = None;
 let mut global_target_pane: Option<usize> = None;
 let mut global_pane_is_id = false;
 let mut line = String::new();
@@ -224,6 +225,7 @@ if control_echo || control_noecho {
 
         // Parse -t from command args
         let mut ctrl_target_win: Option<usize> = None;
+        let mut ctrl_target_win_name: Option<String> = None;
         let mut ctrl_target_pane: Option<usize> = None;
         let mut ctrl_pane_is_id = false;
         let mut ctrl_raw_target: Option<String> = None;
@@ -234,7 +236,8 @@ if control_echo || control_noecho {
                     if let Some(v) = cmd_args.get(i+1) {
                         ctrl_raw_target = Some(v.to_string());
                         let pt = parse_target(v);
-                        if pt.window.is_some() { ctrl_target_win = pt.window; }
+                        if pt.window.is_some() { ctrl_target_win = pt.window; ctrl_target_win_name = None; }
+                        else if pt.window_name.is_some() { ctrl_target_win_name = pt.window_name; ctrl_target_win = None; }
                         if pt.pane.is_some() {
                             ctrl_target_pane = pt.pane;
                             ctrl_pane_is_id = pt.pane_is_id;
@@ -266,6 +269,12 @@ if control_echo || control_noecho {
                 let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
             } else {
                 let _ = tx_ctrl.send(CtrlReq::FocusWindowTemp(wid));
+            }
+        } else if let Some(ref wname) = ctrl_target_win_name {
+            if is_focus_cmd {
+                let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
+            } else {
+                let _ = tx_ctrl.send(CtrlReq::FocusWindowByNameTemp(wname.clone()));
             }
         }
         if let Some(pid) = ctrl_target_pane {
@@ -330,6 +339,7 @@ if line.trim().starts_with("TARGET ") {
     global_raw_target = Some(target_spec.to_string());
     let parsed = parse_target(target_spec);
     global_target_win = parsed.window;
+    global_target_win_name = parsed.window_name;
     global_target_pane = parsed.pane;
     global_pane_is_id = parsed.pane_is_id;
     // Now read the actual command line
@@ -387,6 +397,7 @@ loop {
 
 // Parse -t argument from command line (takes precedence over global TARGET)
 let mut target_win: Option<usize> = global_target_win;
+let mut target_win_name: Option<String> = global_target_win_name.clone();
 let mut target_pane: Option<usize> = global_target_pane;
 let mut pane_is_id = global_pane_is_id;
 // Save raw -t value for relative pane targets like :.+ or :.-
@@ -399,7 +410,8 @@ while i < args.len() {
             raw_target = Some(v.to_string());
             // Parse the -t value using parse_target for consistent handling
             let pt = parse_target(v);
-            if pt.window.is_some() { target_win = pt.window; }
+            if pt.window.is_some() { target_win = pt.window; target_win_name = None; }
+            else if pt.window_name.is_some() { target_win_name = pt.window_name; target_win = None; }
             if pt.pane.is_some() { 
                 target_pane = pt.pane;
                 pane_is_id = pt.pane_is_id;
@@ -431,6 +443,12 @@ if let Some(wid) = target_win {
         let _ = tx.send(CtrlReq::FocusWindow(wid));
     } else {
         let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
+    }
+} else if let Some(ref wname) = target_win_name {
+    if is_focus_cmd {
+        let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
+    } else {
+        let _ = tx.send(CtrlReq::FocusWindowByNameTemp(wname.clone()));
     }
 }
 let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {

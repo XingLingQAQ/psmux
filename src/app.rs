@@ -235,12 +235,14 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 
                 // Check for optional TARGET line (for session:window.pane addressing)
                 let mut global_target_win: Option<usize> = None;
+                let mut global_target_win_name: Option<String> = None;
                 let mut global_target_pane: Option<usize> = None;
                 let mut global_pane_is_id = false;
                 if line.trim().starts_with("TARGET ") {
                     let target_spec = line.trim().strip_prefix("TARGET ").unwrap_or("");
                     let parsed = parse_target(target_spec);
                     global_target_win = parsed.window;
+                    global_target_win_name = parsed.window_name;
                     global_target_pane = parsed.pane;
                     global_pane_is_id = parsed.pane_is_id;
                     // Now read the actual command line
@@ -253,6 +255,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 // parse optional target specifier
                 let args: Vec<&str> = parts.by_ref().collect();
                 let mut target_win: Option<usize> = global_target_win;
+                let mut target_win_name: Option<String> = global_target_win_name.clone();
                 let mut target_pane: Option<usize> = global_target_pane;
                 let mut pane_is_id = global_pane_is_id;
                 let mut start_line: Option<i32> = None;
@@ -263,7 +266,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         if let Some(v) = args.get(i+1) {
                             // Parse using parse_target for consistent handling
                             let pt = parse_target(v);
-                            if pt.window.is_some() { target_win = pt.window; }
+                            if pt.window.is_some() { target_win = pt.window; target_win_name = None; }
+                            else if pt.window_name.is_some() { target_win_name = pt.window_name; target_win = None; }
                             if pt.pane.is_some() { 
                                 target_pane = pt.pane;
                                 pane_is_id = pt.pane_is_id;
@@ -285,6 +289,12 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         let _ = tx.send(CtrlReq::FocusWindow(wid));
                     } else {
                         let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
+                    }
+                } else if let Some(ref wname) = target_win_name {
+                    if is_focus_cmd {
+                        let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
+                    } else {
+                        let _ = tx.send(CtrlReq::FocusWindowByNameTemp(wname.clone()));
                     }
                 }
                 let targeted_kill_pane_id = if matches!(cmd, "kill-pane") && pane_is_id {
@@ -978,7 +988,9 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     if let Some(text) = capture_active_pane_range(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
                 CtrlReq::FocusWindow(wid) => { if let Some(idx) = find_window_index_by_id(&app, wid) { app.active_idx = idx; } }
+                CtrlReq::FocusWindowByName(ref name) => { if let Some(idx) = app.windows.iter().position(|w| w.name == *name) { app.active_idx = idx; } }
                 CtrlReq::FocusWindowTemp(wid) => { if let Some(idx) = find_window_index_by_id(&app, wid) { app.active_idx = idx; } }
+                CtrlReq::FocusWindowByNameTemp(ref name) => { if let Some(idx) = app.windows.iter().position(|w| w.name == *name) { app.active_idx = idx; } }
                 CtrlReq::FocusPane(pid) => { focus_pane_by_id(&mut app, pid); }
                 CtrlReq::FocusPaneByIndex(idx) => { focus_pane_by_index(&mut app, idx); }
                 CtrlReq::FocusPaneTemp(pid) => { focus_pane_by_id(&mut app, pid); }

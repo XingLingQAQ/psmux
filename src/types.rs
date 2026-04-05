@@ -820,8 +820,12 @@ pub enum CtrlReq {
     CapturePane(mpsc::Sender<String>),
     CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>),
     FocusWindow(usize),
+    /// Focus window by name lookup
+    FocusWindowByName(String),
     /// Temporary focus for -t targeting: server saves/restores active_idx
     FocusWindowTemp(usize),
+    /// Temporary focus by name for -t targeting
+    FocusWindowByNameTemp(String),
     FocusPane(usize),
     FocusPaneByIndex(usize),
     /// Temporary pane focus for -t targeting
@@ -1147,6 +1151,7 @@ pub enum WaitForOp {
 pub struct ParsedTarget {
     pub session: Option<String>,
     pub window: Option<usize>,
+    pub window_name: Option<String>,
     pub pane: Option<usize>,
     pub pane_is_id: bool,
     pub window_is_id: bool,

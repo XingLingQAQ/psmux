@@ -1634,7 +1634,10 @@ match cmd {
             let true_cmd = positional[1];
             let false_cmd = positional.get(2).copied();
             let success = if format_mode {
-                !condition.is_empty() && condition != "0"
+                let (rtx, rrx) = std::sync::mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false));
+                let expanded = rrx.recv().unwrap_or_default();
+                !expanded.is_empty() && expanded != "0"
             } else if condition == "true" || condition == "1" {
                 true
             } else if condition == "false" || condition == "0" {

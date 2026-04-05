@@ -1308,7 +1308,8 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     let true_cmd = positional[1];
                     let false_cmd = positional.get(2).copied();
                     let success = if format_mode {
-                        !condition.is_empty() && condition != "0"
+                        let expanded = crate::format::expand_format(condition, app);
+                        !expanded.is_empty() && expanded != "0"
                     } else if condition == "true" || condition == "1" {
                         true
                     } else if condition == "false" || condition == "0" {

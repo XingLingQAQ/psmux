@@ -1758,8 +1758,11 @@ fn run_main() -> io::Result<()> {
                     }
 
                     let success = if format_mode {
-                        // Treat condition as format string - non-empty and non-zero is true
-                        !cond.is_empty() && cond != "0"
+                        // Expand format string via server before evaluating
+                        let fmt_cmd = format!("display-message -p {}\n", crate::util::quote_arg(&cond));
+                        let expanded = send_control_with_response(fmt_cmd).unwrap_or_default();
+                        let expanded = expanded.trim_end_matches('\n');
+                        !expanded.is_empty() && expanded != "0"
                     } else if cond == "true" || cond == "1" {
                         true
                     } else if cond == "false" || cond == "0" {

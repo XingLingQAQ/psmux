@@ -59,6 +59,7 @@ pub fn spawn_server_hidden(exe: &std::path::Path, args: &[String]) -> std::io::R
     const SW_HIDE: u16 = 0;
     const CREATE_NEW_CONSOLE: u32 = 0x00000010;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 
     // Build command line: "exe" arg1 arg2 ...
     // Each argument is quoted to handle spaces.
@@ -80,20 +81,45 @@ pub fn spawn_server_hidden(exe: &std::path::Path, args: &[String]) -> std::io::R
 
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-    let ok = unsafe {
+    // Try with CREATE_BREAKAWAY_FROM_JOB first so the server escapes the
+    // parent's Job Object (e.g. sshd's kill-on-close job).  If the job
+    // disallows breakaway the call fails with ERROR_ACCESS_DENIED; in
+    // that case fall back without the flag.
+    let base_flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
+    let mut ok = unsafe {
         CreateProcessW(
             std::ptr::null(),
             cmdline_wide.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             0, // don't inherit handles
-            CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
+            base_flags | CREATE_BREAKAWAY_FROM_JOB,
             std::ptr::null(),
             std::ptr::null(),
             &si,
             &mut pi,
         )
     };
+
+    if ok == 0 {
+        // Retry without breakaway (job may disallow it)
+        // Re-encode cmdline_wide since CreateProcessW may have modified it
+        cmdline_wide = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+        ok = unsafe {
+            CreateProcessW(
+                std::ptr::null(),
+                cmdline_wide.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                base_flags,
+                std::ptr::null(),
+                std::ptr::null(),
+                &si,
+                &mut pi,
+            )
+        };
+    }
 
     if ok == 0 {
         return Err(std::io::Error::last_os_error());

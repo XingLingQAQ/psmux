@@ -329,6 +329,38 @@ fn augment_enter_shift_ignores_non_enter() {
         "augment_enter_shift must not add SHIFT to non-Enter keys");
 }
 
+/// Issue #121 follow-up Bug #3: Shift/Alt+Enter (no Ctrl) must use VT encoding
+/// only; Ctrl combos should still use CSI encoding (and native injection in the
+/// live code path).  Verify encode_key_event produces the right sequences.
+#[cfg(windows)]
+#[test]
+fn shift_enter_no_ctrl_uses_vt_not_csi() {
+    // Shift+Enter → \x1b\r (VT), NOT \x1b[13;2~ (CSI)
+    let ev = key(KeyCode::Enter, KeyModifiers::SHIFT);
+    let bytes = encode_key_event(&ev).unwrap();
+    assert_eq!(bytes, b"\x1b\r",
+        "Shift+Enter (no Ctrl) on Windows must use VT encoding (ESC+CR); got {:?}", bytes);
+}
+
+#[cfg(windows)]
+#[test]
+fn alt_enter_no_ctrl_uses_vt_not_csi() {
+    // Alt+Enter → \x1b\r (VT), NOT \x1b[13;3~ (CSI)
+    let ev = key(KeyCode::Enter, KeyModifiers::ALT);
+    let bytes = encode_key_event(&ev).unwrap();
+    assert_eq!(bytes, b"\x1b\r",
+        "Alt+Enter (no Ctrl) on Windows must use VT encoding (ESC+CR); got {:?}", bytes);
+}
+
+#[test]
+fn ctrl_enter_uses_csi_encoding() {
+    // Ctrl+Enter → CSI 13;5~ (must use CSI, not ESC+CR)
+    let ev = key(KeyCode::Enter, KeyModifiers::CONTROL);
+    let bytes = encode_key_event(&ev).unwrap();
+    assert_eq!(bytes, b"\x1b[13;5~",
+        "Ctrl+Enter must use CSI encoding; got {:?}", bytes);
+}
+
 /// VT fallback encoding for modified Enter still works (encode_key_event path).
 #[test]
 fn ctrl_shift_enter_vt_encoding_works() {

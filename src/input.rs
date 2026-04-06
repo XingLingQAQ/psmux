@@ -1782,10 +1782,17 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
 }
 
 pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
-    // On Windows, modified Enter (Shift/Alt/Ctrl+Enter) cannot be faithfully
-    // represented as VT sequences through ConPTY — ESC+CR is misread as
-    // Alt+Enter by PSReadLine.  Use native WriteConsoleInputW injection to
-    // deliver the exact KEY_EVENT_RECORD with correct modifier flags.
+    // On Windows, modified Enter delivery depends on the modifier:
+    //
+    // Shift/Alt+Enter (no Ctrl): Use VT encoding ONLY (\x1b\r).  Native
+    //   WriteConsoleInputW injection would cause ConPTY to translate the
+    //   KEY_EVENT back to plain \r, so VT-native apps (Claude Code) see a
+    //   double Enter.
+    //
+    // Ctrl+Enter / Ctrl+Shift+Enter: Use native injection ONLY.  ConPTY
+    //   cannot encode Ctrl+Enter in VT, so injection is the only reliable
+    //   path for console apps (PSReadLine).  Falls back to xterm CSI
+    //   encoding (\x1b[13;N~) if injection fails (for non-console apps).
     #[cfg(windows)]
     {
         if matches!(key.code, KeyCode::Enter) && !key.modifiers.is_empty() {
@@ -1793,48 +1800,52 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
             let alt = key.modifiers.contains(KeyModifiers::ALT);
             let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-            let try_inject = |pane: &mut Pane| -> bool {
-                if let Some(pid) = pane.child_pid {
-                    crate::platform::mouse_inject::send_modified_enter_event(pid, ctrl, alt, shift)
-                } else {
-                    false
-                }
-            };
+            // Only use native injection when Ctrl is involved.
+            if ctrl {
+                let try_inject = |pane: &mut Pane| -> bool {
+                    if let Some(pid) = pane.child_pid {
+                        crate::platform::mouse_inject::send_modified_enter_event(pid, ctrl, alt, shift)
+                    } else {
+                        false
+                    }
+                };
 
-            if app.sync_input {
-                let win = &mut app.windows[app.active_idx];
-                fn inject_all(node: &mut Node, ctrl: bool, alt: bool, shift: bool) {
-                    match node {
-                        Node::Leaf(p) if !p.dead => {
-                            if let Some(pid) = p.child_pid {
-                                if !crate::platform::mouse_inject::send_modified_enter_event(pid, ctrl, alt, shift) {
-                                    // Fallback: VT encoding for non-console apps
-                                    let m: u8 = 1 + (shift as u8) + (alt as u8) * 2 + (ctrl as u8) * 4;
-                                    let bytes = if m > 1 { format!("\x1b[13;{}~", m).into_bytes() } else { b"\r".to_vec() };
-                                    let _ = p.writer.write_all(&bytes);
-                                    let _ = p.writer.flush();
+                if app.sync_input {
+                    let win = &mut app.windows[app.active_idx];
+                    fn inject_all(node: &mut Node, ctrl: bool, alt: bool, shift: bool) {
+                        match node {
+                            Node::Leaf(p) if !p.dead => {
+                                if let Some(pid) = p.child_pid {
+                                    if !crate::platform::mouse_inject::send_modified_enter_event(pid, ctrl, alt, shift) {
+                                        // Fallback: xterm CSI encoding for non-console apps
+                                        let m: u8 = 1 + (shift as u8) + (alt as u8) * 2 + (ctrl as u8) * 4;
+                                        let bytes = if m > 1 { format!("\x1b[13;{}~", m).into_bytes() } else { b"\r".to_vec() };
+                                        let _ = p.writer.write_all(&bytes);
+                                        let _ = p.writer.flush();
+                                    }
                                 }
                             }
-                        }
-                        Node::Leaf(_) => {}
-                        Node::Split { children, .. } => {
-                            for c in children { inject_all(c, ctrl, alt, shift); }
+                            Node::Leaf(_) => {}
+                            Node::Split { children, .. } => {
+                                for c in children { inject_all(c, ctrl, alt, shift); }
+                            }
                         }
                     }
-                }
-                inject_all(&mut win.root, ctrl, alt, shift);
-                return Ok(());
-            } else {
-                let win = &mut app.windows[app.active_idx];
-                if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    if !active.dead {
-                        if try_inject(active) {
-                            return Ok(());
+                    inject_all(&mut win.root, ctrl, alt, shift);
+                    return Ok(());
+                } else {
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
+                        if !active.dead {
+                            if try_inject(active) {
+                                return Ok(());
+                            }
+                            // Fallback: VT encoding (falls through below)
                         }
-                        // Fallback: VT encoding for non-console apps (Claude Code, etc.)
                     }
                 }
             }
+            // Shift/Alt+Enter (no Ctrl): fall through to VT encoding below.
         }
     }
 
@@ -3043,9 +3054,10 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     let _ = p.writer.write_all(&[0x1b, ctrl_char]);
                 }
             }
-            // Modified Enter: try native console injection first (WriteConsoleInputW)
-            // so PSReadLine sees the correct modifier flags.  If injection fails,
-            // fall back to VT encoding.
+            // Modified Enter: for Ctrl combos, try native console injection
+            // (WriteConsoleInputW) so PSReadLine sees the correct modifier flags.
+            // For Shift/Alt-only combos, use VT encoding to avoid ConPTY
+            // translating the injected KEY_EVENT back to plain \r (double Enter).
             #[cfg(windows)]
             s if {
                 let u = s.to_uppercase();
@@ -3056,8 +3068,13 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 let has_shift = upper.contains("S-");
                 let has_ctrl = upper.contains("C-");
                 let has_alt = upper.contains("M-");
-                let injected = if let Some(pid) = p.child_pid {
-                    crate::platform::mouse_inject::send_modified_enter_event(pid, has_ctrl, has_alt, has_shift)
+                let injected = if has_ctrl {
+                    // Only use native injection for Ctrl combos.
+                    if let Some(pid) = p.child_pid {
+                        crate::platform::mouse_inject::send_modified_enter_event(pid, has_ctrl, has_alt, has_shift)
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 };

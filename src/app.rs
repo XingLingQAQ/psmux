@@ -422,6 +422,10 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
     let mut quit = false;
     #[cfg(windows)]
     let mut bp_state = bracket_paste_detect::State::new();
+    // Track whether a modified Enter Press was already handled this keypress
+    // cycle (same logic as client.rs — see Fix #2 / #4 in issue #121).
+    #[cfg(windows)]
+    let mut modified_enter_press_handled: bool = false;
     // Cache last-sent DECSCUSR code to avoid redundant writes that
     // reset Windows Terminal's cursor blink timer every frame.
     let mut last_cursor_style: u8 = 255;
@@ -882,12 +886,40 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         let poll_ms = if bp_pending { 1 } else if has_pty_data { 1 } else { 20 };
         if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
+                // ── Suppress phantom modified-Enter Release (Windows Terminal) ──
+                #[cfg(windows)]
+                Event::Key(key) if key.kind == KeyEventKind::Release
+                    && matches!(key.code, crossterm::event::KeyCode::Enter)
+                    && modified_enter_press_handled =>
+                {
+                    // drop the phantom Release
+                }
+                // ── WezTerm: Shift+Enter arrives as Release-only ──
+                #[cfg(windows)]
+                Event::Key(mut key) if key.kind == KeyEventKind::Release
+                    && matches!(key.code, crossterm::event::KeyCode::Enter)
+                    && !key.modifiers.is_empty() =>
+                {
+                    key.kind = KeyEventKind::Press;
+                    crate::platform::augment_enter_shift(&mut key);
+                    modified_enter_press_handled = true;
+                    if handle_key(&mut app, key)? { quit = true; }
+                }
                 Event::Key(mut key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
                     // On Windows, ConPTY interprets Shift+Enter's ESC+CR as
                     // Alt+Enter.  Poll the physical keyboard to detect the
                     // real modifier — same fix as client.rs.
                     #[cfg(windows)]
                     crate::platform::augment_enter_shift(&mut key);
+                    // Clear/set the modified Enter dedup flag.
+                    #[cfg(windows)]
+                    {
+                        if matches!(key.code, crossterm::event::KeyCode::Enter) && !key.modifiers.is_empty() {
+                            modified_enter_press_handled = true;
+                        } else {
+                            modified_enter_press_handled = false;
+                        }
+                    }
                     // On Windows, crossterm does not emit Event::Paste — bracket
                     // paste sequences arrive as individual Key events.  Feed each
                     // key through the detector; when a complete paste is found,

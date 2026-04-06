@@ -2247,17 +2247,31 @@ pub fn augment_enter_shift(key: &mut crossterm::event::KeyEvent) {
     }
 
     const VK_SHIFT: i32 = 0x10;
+    const VK_CONTROL: i32 = 0x11;
     const VK_MENU: i32 = 0x12; // Alt
 
     unsafe {
         let shift_down = GetAsyncKeyState(VK_SHIFT) < 0;
+        let ctrl_down = GetAsyncKeyState(VK_CONTROL) < 0;
         let alt_down = GetAsyncKeyState(VK_MENU) < 0;
 
-        if shift_down && !alt_down {
-            key.modifiers.remove(KeyModifiers::ALT);
+        if shift_down {
             key.modifiers.insert(KeyModifiers::SHIFT);
-        } else if shift_down {
-            key.modifiers.insert(KeyModifiers::SHIFT);
+            // Windows Terminal + crossterm sometimes reports a phantom CONTROL
+            // modifier on the Press event for Shift+Enter while the physical
+            // Ctrl key is not held.  Remove it.
+            if !ctrl_down && key.modifiers.contains(KeyModifiers::CONTROL) {
+                key.modifiers.remove(KeyModifiers::CONTROL);
+            }
+            if !alt_down && key.modifiers.contains(KeyModifiers::ALT) {
+                key.modifiers.remove(KeyModifiers::ALT);
+            }
+        } else if !shift_down && !ctrl_down && !alt_down {
+            // No physical modifiers held; ConPTY may have injected a phantom
+            // ALT from ESC+CR.  Already handled by the early return for SHIFT
+            // above, but guard plain Enter too.
+        } else if !shift_down && alt_down {
+            // Physical Alt is held, leave as is.
         }
     }
 }

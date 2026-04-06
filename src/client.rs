@@ -446,6 +446,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     #[cfg(windows)]
     let mut paste_suppress_until: Option<Instant> = None;
 
+    // Track whether a modified Enter Press was already handled this keypress
+    // cycle.  WezTerm sends Shift+Enter as Release-only (no Press), so we
+    // accept Release events for modified Enter and promote them to Press.
+    // Windows Terminal, however, generates a real Press followed by a phantom
+    // Release ~80ms later.  This flag suppresses that phantom duplicate.
+    #[cfg(windows)]
+    let mut modified_enter_press_handled: bool = false;
+
     // list-keys overlay state (C-b ?)
     let mut keys_viewer = false;
     let mut keys_viewer_lines: Vec<String> = Vec::new();
@@ -983,6 +991,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 }
                 match _cur_evt {
                     // ── Windows Ctrl+V paste interception ────────────────
+                    // ── Suppress phantom modified-Enter Release (Windows Terminal) ──
+                    // Windows Terminal fires a real Press then a phantom Release
+                    // ~80ms later for Shift+Enter.  If we already handled the
+                    // Press, drop the Release so it does not trigger the WezTerm
+                    // Release-only acceptance path and produce a double newline.
+                    #[cfg(windows)]
+                    Event::Key(key) if key.kind == KeyEventKind::Release
+                        && matches!(key.code, KeyCode::Enter)
+                        && modified_enter_press_handled =>
+                    {
+                        // drop the phantom Release
+                    }
                     // On Windows, Windows Terminal intercepts Ctrl+V Press,
                     // reads the clipboard, and injects the paste content as
                     // a byte stream into the ConPTY input pipe — bypassing
@@ -1002,6 +1022,29 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         }
                         paste_confirmed = true;
                     }
+                    // ── WezTerm: Shift+Enter arrives as Release-only ──
+                    // WezTerm generates only KeyEventKind::Release for Shift+Enter
+                    // (no Press, no Repeat).  Accept and promote to Press.
+                    #[cfg(windows)]
+                    Event::Key(mut key) if key.kind == KeyEventKind::Release
+                        && matches!(key.code, KeyCode::Enter)
+                        && !key.modifiers.is_empty() =>
+                    {
+                        key.kind = KeyEventKind::Press;
+                        crate::platform::augment_enter_shift(&mut key);
+                        modified_enter_press_handled = true;
+                        // Skip paste buffering — forward directly like a Press.
+                        let is_prefix = (key.code, key.modifiers) == prefix_key
+                            || prefix_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c))
+                            || prefix2_key.map_or(false, |p2| (key.code, key.modifiers) == p2)
+                            || prefix2_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c));
+                        if !is_prefix {
+                            if let Some(encoded) = crate::input::encode_key_event(&key) {
+                                cmd_batch.push(format!("send-key-raw {}\n",
+                                    encoded.iter().map(|b| format!("{:02x}", b)).collect::<String>()));
+                            }
+                        }
+                    }
                     Event::Key(mut key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
                         // On Windows, VS Code's xterm.js sends ESC+CR for
                         // Shift+Enter.  ConPTY interprets the ESC as Alt, so
@@ -1009,6 +1052,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         // keyboard to detect the real modifier.
                         #[cfg(windows)]
                         crate::platform::augment_enter_shift(&mut key);
+                        // Clear the WezTerm dedup flag on any non-Enter key; set
+                        // it when a modified Enter Press is being processed.
+                        #[cfg(windows)]
+                        {
+                            if matches!(key.code, KeyCode::Enter) && !key.modifiers.is_empty() {
+                                modified_enter_press_handled = true;
+                            } else {
+                                modified_enter_press_handled = false;
+                            }
+                        }
                         // Flush pending paste buffer before processing any non-bufferable key.
                         // Bufferable keys are: plain Char, Space, Enter (if pend non-empty), Tab (if pend non-empty).
                         #[cfg(windows)]

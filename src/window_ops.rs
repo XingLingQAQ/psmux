@@ -1010,13 +1010,19 @@ pub fn resize_pane_vertical(app: &mut AppState, amount: i16) {
             if *kind == LayoutKind::Vertical {
                 let idx = win.active_path[depth];
                 if idx < sizes.len() {
-                    let new_size = (sizes[idx] as i16 + amount).max(1) as u16;
-                    let diff = new_size as i16 - sizes[idx] as i16;
-                    sizes[idx] = new_size;
                     if idx + 1 < sizes.len() {
+                        let new_size = (sizes[idx] as i16 + amount).max(1) as u16;
+                        let diff = new_size as i16 - sizes[idx] as i16;
+                        sizes[idx] = new_size;
                         sizes[idx + 1] = (sizes[idx + 1] as i16 - diff).max(1) as u16;
                     } else if idx > 0 {
-                        sizes[idx - 1] = (sizes[idx - 1] as i16 - diff).max(1) as u16;
+                        // tmux parity (#81): last child has no bottom border.
+                        // Resize the previous sibling with the same amount so
+                        // the border moves in the arrow direction.
+                        let new_size = (sizes[idx - 1] as i16 + amount).max(1) as u16;
+                        let diff = new_size as i16 - sizes[idx - 1] as i16;
+                        sizes[idx - 1] = new_size;
+                        sizes[idx] = (sizes[idx] as i16 - diff).max(1) as u16;
                     }
                 }
                 return;
@@ -1035,13 +1041,19 @@ pub fn resize_pane_horizontal(app: &mut AppState, amount: i16) {
             if *kind == LayoutKind::Horizontal {
                 let idx = win.active_path[depth];
                 if idx < sizes.len() {
-                    let new_size = (sizes[idx] as i16 + amount).max(1) as u16;
-                    let diff = new_size as i16 - sizes[idx] as i16;
-                    sizes[idx] = new_size;
                     if idx + 1 < sizes.len() {
+                        let new_size = (sizes[idx] as i16 + amount).max(1) as u16;
+                        let diff = new_size as i16 - sizes[idx] as i16;
+                        sizes[idx] = new_size;
                         sizes[idx + 1] = (sizes[idx + 1] as i16 - diff).max(1) as u16;
                     } else if idx > 0 {
-                        sizes[idx - 1] = (sizes[idx - 1] as i16 - diff).max(1) as u16;
+                        // tmux parity (#81): last child has no right border.
+                        // Resize the previous sibling with the same amount so
+                        // the border moves in the arrow direction.
+                        let new_size = (sizes[idx - 1] as i16 + amount).max(1) as u16;
+                        let diff = new_size as i16 - sizes[idx - 1] as i16;
+                        sizes[idx - 1] = new_size;
+                        sizes[idx] = (sizes[idx] as i16 - diff).max(1) as u16;
                     }
                 }
                 return;
@@ -1216,3 +1228,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue81_resize_direction.rs"]
+mod test_issue81_resize_direction;

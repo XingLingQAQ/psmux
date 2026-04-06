@@ -2186,6 +2186,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "L" | "R" => { resize_pane_horizontal(&mut app, if dir == "L" { -(amount as i16) } else { amount as i16 }); }
                         _ => {}
                     }
+                    resize_all_panes(&mut app); meta_dirty = true;
                     hook_event = Some("after-resize-pane");
                 }
                 CtrlReq::SetBuffer(content) => {

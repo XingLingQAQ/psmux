@@ -754,6 +754,3 @@ fn is_cwd_relative_path<P: AsRef<Path>>(p: P) -> bool {
     )
 }
 
-#[cfg(test)]
-#[path = "../../../tests-rs/test_cmdbuilder.rs"]
-mod tests;

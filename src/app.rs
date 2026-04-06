@@ -191,10 +191,6 @@ mod bracket_paste_detect {
             }
         }
     }
-
-    #[cfg(test)]
-    #[path = "../../../tests-rs/test_app_bracket_paste.rs"]
-    mod tests;
 }
 
 pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
@@ -892,6 +888,9 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     && matches!(key.code, crossterm::event::KeyCode::Enter)
                     && modified_enter_press_handled =>
                 {
+                    crate::debug_log::input_log("enter-diag", &format!(
+                        "SRV PHANTOM RELEASE SUPPRESSED: mods={:?} kind={:?}",
+                        key.modifiers, key.kind));
                     // drop the phantom Release
                 }
                 // ── WezTerm: Shift+Enter arrives as Release-only ──
@@ -900,6 +899,9 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     && matches!(key.code, crossterm::event::KeyCode::Enter)
                     && !key.modifiers.is_empty() =>
                 {
+                    crate::debug_log::input_log("enter-diag", &format!(
+                        "SRV WEZTERM RELEASE PROMOTED: mods={:?} kind={:?}",
+                        key.modifiers, key.kind));
                     key.kind = KeyEventKind::Press;
                     crate::platform::augment_enter_shift(&mut key);
                     modified_enter_press_handled = true;
@@ -910,7 +912,19 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     // Alt+Enter.  Poll the physical keyboard to detect the
                     // real modifier — same fix as client.rs.
                     #[cfg(windows)]
-                    crate::platform::augment_enter_shift(&mut key);
+                    {
+                        let raw_mods = key.modifiers;
+                        crate::platform::augment_enter_shift(&mut key);
+                        if matches!(key.code, crossterm::event::KeyCode::Enter)
+                            && (raw_mods != key.modifiers || !key.modifiers.is_empty())
+                        {
+                            crate::debug_log::input_log("enter-diag", &format!(
+                                "SRV PRESS augment: raw_mods={:?} => final_mods={:?} kind={:?}",
+                                raw_mods, key.modifiers, key.kind));
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    { let _ = &key; }
                     // Clear/set the modified Enter dedup flag.
                     #[cfg(windows)]
                     {

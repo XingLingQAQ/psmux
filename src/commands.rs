@@ -1039,10 +1039,13 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
         }
         "source-file" | "source" => {
+            // Always apply locally first for immediate visual feedback,
+            // then forward to server for authoritative state update.
+            if let Some(path) = parts.get(1) {
+                crate::config::source_file(app, path);
+            }
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-            } else if let Some(path) = parts.get(1) {
-                crate::config::source_file(app, path);
             }
         }
         "send-keys" | "send" => {

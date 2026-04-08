@@ -99,6 +99,10 @@ pub fn load_config(app: &mut AppState) {
 }
 
 pub fn parse_config_content(app: &mut AppState, content: &str) {
+    // Strip UTF-8 BOM if present (common on Windows when files are saved
+    // with Notepad or other editors that prepend EF BB BF).
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+
     // Process %if / %elif / %else / %endif conditional blocks.
     // These are tmux config-level directives that control which lines are parsed.
     //
@@ -1525,3 +1529,7 @@ mod tests_issue137_env_leak;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue157_bind_key_case.rs"]
 mod tests_issue157_bind_key_case;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue145_source_file.rs"]
+mod tests_issue145_source_file;

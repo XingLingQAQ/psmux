@@ -1115,9 +1115,13 @@ match cmd {
         }
     }
     "unbind-key" | "unbind" => {
-        let non_flag_args: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-        if let Some(key) = non_flag_args.first() {
-            let _ = tx.send(CtrlReq::UnbindKey(key.to_string()));
+        if args.iter().any(|a| *a == "-a" || a.contains('a') && a.starts_with('-')) {
+            let _ = tx.send(CtrlReq::UnbindAll);
+        } else {
+            let non_flag_args: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+            if let Some(key) = non_flag_args.first() {
+                let _ = tx.send(CtrlReq::UnbindKey(key.to_string()));
+            }
         }
     }
     "list-keys" | "lsk" => {
@@ -2212,7 +2216,9 @@ fn dispatch_control_command(
             true
         }
         "unbind-key" | "unbind" => {
-            if let Some(key) = args.iter().find(|a| !a.starts_with('-')) {
+            if args.iter().any(|a| *a == "-a" || a.contains('a') && a.starts_with('-')) {
+                let _ = tx.send(CtrlReq::UnbindAll);
+            } else if let Some(key) = args.iter().find(|a| !a.starts_with('-')) {
                 let _ = tx.send(CtrlReq::UnbindKey(key.to_string()));
             }
             let _ = resp_tx.send(String::new());

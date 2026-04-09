@@ -901,6 +901,7 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
     
     if unbind_all {
         app.key_tables.clear();
+        app.defaults_suppressed = true;
         return;
     }
     

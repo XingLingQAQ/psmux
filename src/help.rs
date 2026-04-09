@@ -483,6 +483,7 @@ pub fn mouse_lines() -> Vec<String> {
 /// binding in the prefix table are automatically excluded.
 pub fn build_overlay_lines(
     user_bindings: &[(bool, String, String, String)],
+    defaults_suppressed: bool,
 ) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
@@ -493,11 +494,13 @@ pub fn build_overlay_lines(
         .map(|(_, _, k, _)| k.as_str())
         .collect();
 
-    // ── 1. Prefix defaults (excluding overridden) ──
+    // ── 1. Prefix defaults (excluding overridden, skip if suppressed) ──
     lines.push("── prefix table (C-b + key) ───────────────────────────────".into());
-    for (k, cmd) in PREFIX_DEFAULTS {
-        if !overridden.contains(k) {
-            lines.push(format!("bind-key -T prefix {} {}", k, cmd));
+    if !defaults_suppressed {
+        for (k, cmd) in PREFIX_DEFAULTS {
+            if !overridden.contains(k) {
+                lines.push(format!("bind-key -T prefix {} {}", k, cmd));
+            }
         }
     }
 
@@ -527,8 +530,10 @@ pub fn build_overlay_lines(
 /// Build the output for the CLI `list-keys` command (server-side).
 ///
 /// `user_tables` — iterator of `(table_name, key_str, action_str, repeat)`.
+/// `defaults_suppressed` — when true, skip PREFIX_DEFAULTS (set by unbind-key -a).
 pub fn build_list_keys_output<'a>(
     user_tables: impl Iterator<Item = (&'a str, String, String, bool)>,
+    defaults_suppressed: bool,
 ) -> String {
     let mut output = String::new();
     let mut overridden: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -541,10 +546,12 @@ pub fn build_list_keys_output<'a>(
         }
     }
 
-    // Defaults
-    for (k, cmd) in PREFIX_DEFAULTS {
-        if !overridden.contains(*k) {
-            output.push_str(&format!("bind-key -T prefix {} {}\n", k, cmd));
+    // Defaults (skip if suppressed by unbind-key -a)
+    if !defaults_suppressed {
+        for (k, cmd) in PREFIX_DEFAULTS {
+            if !overridden.contains(*k) {
+                output.push_str(&format!("bind-key -T prefix {} {}\n", k, cmd));
+            }
         }
     }
 

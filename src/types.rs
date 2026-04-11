@@ -950,7 +950,10 @@ pub enum CtrlReq {
     ListClients(mpsc::Sender<String>),
     ListClientsFormat(mpsc::Sender<String>, String),
     ForceDetachClient(u64),
-    SwitchClient(String),
+    /// switch-client -t <target> / -n / -p / -l: switch the attached client to another session.
+    /// The String carries the resolved target session name (or "" for -n/-p/-l to be
+    /// resolved server-side), and the second field carries the flag: 't', 'n', 'p', or 'l'.
+    SwitchClient(String, char),
     LockClient,
     RefreshClient,
     /// `refresh-client -B name:what:format` subscription management.
@@ -1103,6 +1106,7 @@ pub fn shutdown_client_stream(client_id: u64) {
     if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
         v.retain(|(cid, _)| *cid != client_id);
     }
+    remove_directive_channel(client_id);
 }
 
 /// Server-push frame slots for persistent (attached) clients.
@@ -1154,6 +1158,50 @@ pub fn push_frame(frame: &str) {
 /// Check if any persistent clients are registered for push.
 pub fn has_frame_receivers() -> bool {
     FRAME_PUSH_SLOTS.lock().map_or(false, |v| !v.is_empty())
+}
+
+/// Per-client directive channels (queued, not overwritten like frame slots).
+/// Used for sending commands/directives (e.g. SWITCH) to specific persistent clients
+/// without risk of being overwritten by frame pushes.
+static DIRECTIVE_CHANNELS: std::sync::Mutex<Vec<(u64, std::sync::mpsc::Sender<String>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Register a directive channel for a persistent client. Returns the receiver
+/// for the writer thread to poll.
+pub fn register_directive_channel(client_id: u64) -> std::sync::mpsc::Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if let Ok(mut v) = DIRECTIVE_CHANNELS.lock() {
+        v.push((client_id, tx));
+    }
+    rx
+}
+
+/// Send a directive to a specific persistent client. Returns true if sent.
+pub fn send_directive_to_client(client_id: u64, directive: &str) -> bool {
+    if let Ok(channels) = DIRECTIVE_CHANNELS.lock() {
+        for (cid, tx) in channels.iter() {
+            if *cid == client_id {
+                return tx.send(directive.to_string()).is_ok();
+            }
+        }
+    }
+    false
+}
+
+/// Send a directive to ALL persistent clients.
+pub fn send_directive_to_all_clients(directive: &str) {
+    if let Ok(channels) = DIRECTIVE_CHANNELS.lock() {
+        for (_, tx) in channels.iter() {
+            let _ = tx.send(directive.to_string());
+        }
+    }
+}
+
+/// Remove a client's directive channel (called on disconnect).
+pub fn remove_directive_channel(client_id: u64) {
+    if let Ok(mut v) = DIRECTIVE_CHANNELS.lock() {
+        v.retain(|(cid, _)| *cid != client_id);
+    }
 }
 
 /// Global counter for control mode client IDs.

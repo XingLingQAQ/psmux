@@ -100,9 +100,19 @@ if line.trim() == "PERSISTENT" {
     // unconsumed frame, bounding memory to O(1) per client instead of O(frames).
     let frame_slot = crate::types::register_frame_slot(client_id);
 
+    // Register a directive channel for queued directives (e.g. SWITCH).
+    // Directives use a separate mpsc channel so they cannot be overwritten
+    // by frame pushes (which always replace the previous pending frame).
+    let directive_rx = crate::types::register_directive_channel(client_id);
+
     std::thread::spawn(move || {
         let (frame_lock, _frame_cvar) = &*frame_slot;
         loop {
+            // 0. Check for queued directives (non-blocking) — these take priority
+            while let Ok(directive) = directive_rx.try_recv() {
+                if write!(ws_bg, "{}\n", directive).is_err() { return; }
+                if ws_bg.flush().is_err() { return; }
+            }
             // 1. Drain all pending command responses (non-blocking after first)
             match resp_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(rrx) => {
@@ -1337,13 +1347,27 @@ match cmd {
         if !persistent { break; }
     }
     "switch-client" | "switchc" => {
-        let has_t_flag = args.windows(2).any(|w| w[0] == "-T");
-        if has_t_flag {
+        let has_big_t = args.windows(2).any(|w| w[0] == "-T");
+        if has_big_t {
             let table = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].to_string()).unwrap_or_default();
             let _ = tx.send(CtrlReq::SwitchClientTable(table));
+        } else if args.contains(&"-n") {
+            let _ = tx.send(CtrlReq::SwitchClient(String::new(), 'n'));
+        } else if args.contains(&"-p") {
+            let _ = tx.send(CtrlReq::SwitchClient(String::new(), 'p'));
+        } else if args.contains(&"-l") {
+            let _ = tx.send(CtrlReq::SwitchClient(String::new(), 'l'));
         } else {
-            let target = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"").to_string();
-            let _ = tx.send(CtrlReq::SwitchClient(target));
+            // -t <target> was already extracted into raw_target by the global -t parser.
+            // Use raw_target which holds the original -t value (session name, not window id).
+            let target = raw_target.clone().unwrap_or_default();
+            // Strip any window/pane suffix (e.g. "session:window.pane" -> "session")
+            let session_target = if let Some(pos) = target.find(':') {
+                target[..pos].to_string()
+            } else {
+                target
+            };
+            let _ = tx.send(CtrlReq::SwitchClient(session_target, 't'));
         }
     }
     "lock-client" | "lockc" => {

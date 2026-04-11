@@ -2894,10 +2894,78 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         std::process::exit(0);
                     }
                 }
-                CtrlReq::SwitchClient(_target) => {
-                    // switch-client: single-session model, show feedback
-                    app.status_message = Some(("switch-client: only one session available".to_string(), std::time::Instant::now()));
-                    state_dirty = true;
+                CtrlReq::SwitchClient(target, flag) => {
+                    // Resolve the target session name based on the flag
+                    let current = app.port_file_base();
+                    let all_sessions = crate::session::list_session_names();
+                    let resolved = match flag {
+                        't' => {
+                            // Direct target: validate it exists
+                            if target.is_empty() {
+                                None
+                            } else if all_sessions.contains(&target) {
+                                Some(target.clone())
+                            } else {
+                                // Try partial match (prefix)
+                                all_sessions.iter().find(|s| s.starts_with(&target)).cloned()
+                            }
+                        }
+                        'n' => {
+                            // Next session (alphabetically after current)
+                            let pos = all_sessions.iter().position(|s| s == &current);
+                            match pos {
+                                Some(i) if i + 1 < all_sessions.len() => Some(all_sessions[i + 1].clone()),
+                                Some(_) => all_sessions.first().cloned(), // wrap around
+                                None => all_sessions.first().cloned(),
+                            }
+                        }
+                        'p' => {
+                            // Previous session (alphabetically before current)
+                            let pos = all_sessions.iter().position(|s| s == &current);
+                            match pos {
+                                Some(0) => all_sessions.last().cloned(), // wrap around
+                                Some(i) => Some(all_sessions[i - 1].clone()),
+                                None => all_sessions.last().cloned(),
+                            }
+                        }
+                        'l' => {
+                            // Last session (read from last_session file)
+                            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                            let last_path = format!("{}\\.psmux\\last_session", home);
+                            std::fs::read_to_string(&last_path).ok()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty() && s != &current && all_sessions.contains(s))
+                        }
+                        _ => None,
+                    };
+                    match resolved {
+                        Some(ref sess) if sess != &current => {
+                            // Signal the attached client to switch by sending a directive
+                            if let Some(cid) = app.latest_client_id {
+                                crate::types::send_directive_to_client(cid, &format!("SWITCH {}", sess));
+                            } else {
+                                // No specific client ID, send to all attached clients
+                                crate::types::send_directive_to_all_clients(&format!("SWITCH {}", sess));
+                            }
+                        }
+                        Some(_) => {
+                            // Target is the same as current session
+                            app.status_message = Some(("switch-client: already on that session".to_string(), std::time::Instant::now()));
+                            state_dirty = true;
+                        }
+                        None => {
+                            if flag == 't' && !target.is_empty() {
+                                app.status_message = Some((format!("switch-client: session not found: {}", target), std::time::Instant::now()));
+                            } else if flag == 'l' {
+                                app.status_message = Some(("switch-client: no last session".to_string(), std::time::Instant::now()));
+                            } else if all_sessions.len() <= 1 {
+                                app.status_message = Some(("switch-client: only one session available".to_string(), std::time::Instant::now()));
+                            } else {
+                                app.status_message = Some(("switch-client: no target session".to_string(), std::time::Instant::now()));
+                            }
+                            state_dirty = true;
+                        }
+                    }
                 }
                 CtrlReq::SwitchClientTable(table) => {
                     app.current_key_table = Some(table);
@@ -3959,3 +4027,7 @@ mod test_issue169;
 #[cfg(test)]
 #[path = "../../tests-rs/test_pane_title.rs"]
 mod test_pane_title;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue202_switch_client.rs"]
+mod test_issue202;

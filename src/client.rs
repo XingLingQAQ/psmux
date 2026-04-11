@@ -801,6 +801,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         if key_send_instant.is_some() {
                             force_dump = true;
                         }
+                    } else if line.trim().starts_with("SWITCH ") {
+                        // Server is telling us to switch to another session
+                        let target_session = line.trim().strip_prefix("SWITCH ").unwrap_or("").to_string();
+                        if !target_session.is_empty() {
+                            env::set_var("PSMUX_SWITCH_TO", &target_session);
+                            let _ = writer.write_all(b"client-detach\n");
+                            let _ = writer.flush();
+                            quit = true;
+                        }
                     } else {
                         if client_log_enabled() {
                             client_log("frame", &format!("received {} bytes", line.len()));

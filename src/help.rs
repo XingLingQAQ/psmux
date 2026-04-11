@@ -84,6 +84,10 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("i",       "display-message"),
     ("t",       "clock-mode"),
     ("s",       "choose-session"),
+    ("(",       "switch-client -p"),
+    (")",       "switch-client -n"),
+    ("v",       "rectangle-toggle"),
+    ("y",       "copy-yank"),
 ];
 
 // ─────────────────────────────────────────────────────────────────────

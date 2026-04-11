@@ -1211,7 +1211,7 @@ fn parse_action_direct_commands() {
     assert!(matches!(parse_command_to_action("renamew"), Some(Action::RenameWindow)));
     assert!(matches!(parse_command_to_action("choose-tree"), Some(Action::WindowChooser)));
     assert!(matches!(parse_command_to_action("choose-window"), Some(Action::WindowChooser)));
-    assert!(matches!(parse_command_to_action("choose-session"), Some(Action::WindowChooser)));
+    assert!(matches!(parse_command_to_action("choose-session"), Some(Action::SessionChooser)));
     assert!(matches!(parse_command_to_action("zoom-pane"), Some(Action::ZoomPane)));
     assert!(matches!(parse_command_to_action("resize-pane -Z"), Some(Action::ZoomPane)));
 }

@@ -321,7 +321,8 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "paste-buffer" | "pasteb" => Some(Action::Paste),
         "detach-client" | "detach" => Some(Action::Detach),
         "rename-window" | "renamew" => Some(Action::RenameWindow),
-        "choose-window" | "choose-tree" | "choose-session" => Some(Action::WindowChooser),
+        "choose-window" | "choose-tree" => Some(Action::WindowChooser),
+        "choose-session" => Some(Action::SessionChooser),
         "resize-pane" | "resizep" if parts.iter().any(|p| *p == "-Z") => Some(Action::ZoomPane),
         "zoom-pane" => Some(Action::ZoomPane),
         "select-pane" | "selectp" => {
@@ -440,6 +441,7 @@ pub fn format_action(action: &Action) -> String {
         Action::Detach => "detach-client".to_string(),
         Action::RenameWindow => "rename-window".to_string(),
         Action::WindowChooser => "choose-window".to_string(),
+        Action::SessionChooser => "choose-session".to_string(),
         Action::ZoomPane => "resize-pane -Z".to_string(),
         Action::MoveFocus(dir) => {
             let flag = match dir {
@@ -668,7 +670,7 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
         Action::RenameWindow => {
             app.mode = Mode::RenamePrompt { input: String::new() };
         }
-        Action::WindowChooser => {
+        Action::WindowChooser | Action::SessionChooser => {
             let tree = build_choose_tree(app);
             let selected = tree.iter().position(|e| e.is_current_session && e.is_active_window && !e.is_session_header).unwrap_or(0);
             app.mode = Mode::WindowChooser { selected, tree };

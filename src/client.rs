@@ -1345,27 +1345,59 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             }
                         }
                         else if prefix_armed {
-                            // Check user-defined synced bindings FIRST (like server-side input.rs).
-                            // This lets users override any default hardcoded key binding.
+                            // Pending flags for complex client-side UI commands
+                            // (shared between synced_bindings dispatch and pre-sync hardcoded fallback)
+                            let mut do_choose_tree = false;
+                            let mut do_choose_session = false;
+                            let mut do_session_nav: Option<bool> = None; // Some(true)=next, Some(false)=prev
+
+                            // Check synced bindings from server (includes defaults from PREFIX_DEFAULTS)
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             let user_binding = synced_bindings.iter().find(|b| {
                                 b.t == "prefix" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
                             });
                             if let Some(entry) = user_binding {
-                                // User-defined binding takes priority
-                                if entry.c == "detach-client" || entry.c == "detach" {
+                                // Dispatch binding (handles both defaults and user overrides).
+                                // Client-side UI commands need special handling here since
+                                // they set local overlay state rather than sending to server.
+                                let cmd = &entry.c;
+                                if cmd == "detach-client" || cmd == "detach" {
                                     quit = true;
-                                } else if entry.c.starts_with("confirm-before") || entry.c == "kill-pane" {
-                                    confirm_cmd = Some(entry.c.clone());
+                                } else if cmd == "kill-pane" || cmd == "kill-window" {
+                                    confirm_cmd = Some(cmd.clone());
+                                } else if cmd.starts_with("confirm-before") {
+                                    confirm_cmd = Some(cmd.clone());
+                                } else if cmd == "rename-window" {
+                                    renaming = true; rename_buf.clear();
+                                } else if cmd == "rename-session" {
+                                    renaming = true; rename_buf.clear(); session_renaming = true;
+                                } else if cmd == "command-prompt" {
+                                    command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len();
+                                } else if cmd == "list-keys" {
+                                    keys_viewer_scroll = 0;
+                                    let user_binds: Vec<(bool, String, String, String)> = synced_bindings
+                                        .iter()
+                                        .map(|b| (b.r, b.t.clone(), b.k.clone(), b.c.clone()))
+                                        .collect();
+                                    keys_viewer_lines = help::build_overlay_lines(&user_binds, defaults_suppressed);
+                                    keys_viewer = true;
+                                } else if cmd == "select-window-index" {
+                                    window_idx_input = true; window_idx_buf.clear();
+                                } else if cmd == "choose-tree" || cmd == "choose-window" {
+                                    do_choose_tree = true;
+                                } else if cmd == "choose-session" {
+                                    do_choose_session = true;
+                                } else if cmd.starts_with("switch-client") {
+                                    do_session_nav = Some(cmd.contains("-n"));
                                 } else {
-                                    // Split on \; to support command chaining (issue #192)
+                                    // Generic: split on \; for command chaining (issue #192)
                                     let sub_cmds = crate::config::split_chained_commands_pub(&entry.c);
                                     for sub in &sub_cmds {
                                         cmd_batch.push(format!("{}\n", sub));
                                     }
                                 }
-                            } else if !defaults_suppressed {
-                            // Default hardcoded bindings (only reached if no user override and defaults not suppressed)
+                            } else if synced_bindings.is_empty() {
+                            // Pre-sync hardcoded fallback (only used before first server state sync)
                             match key.code {
                                 KeyCode::Char('c') => { cmd_batch.push("new-window\n".into()); }
                                 KeyCode::Char('%') => { cmd_batch.push("split-window -h\n".into()); }
@@ -1427,198 +1459,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char('=') => { cmd_batch.push("choose-buffer\n".into()); }
                                 KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
-                                KeyCode::Char('w') => {
-                                    tree_chooser = true;
-                                    tree_entries.clear();
-                                    tree_selected = 0;
-                                    tree_scroll = 0;
-                                    // Query ALL sessions (like tmux choose-tree)
-                                    let dir = format!("{}\\.psmux", home);
-                                    if let Ok(entries) = std::fs::read_dir(&dir) {
-                                        let mut sessions: Vec<(String, Vec<(usize, String, Vec<(usize, String)>)>)> = Vec::new();
-                                        for e in entries.flatten() {
-                                            if let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) {
-                                                if let Some((base, ext)) = fname.rsplit_once('.') {
-                                                    if ext == "port" {
-                                                        // Hide warm (standby) sessions from user
-                                                        if crate::session::is_warm_session(base) { continue; }
-                                                        if let Ok(port_str) = std::fs::read_to_string(e.path()) {
-                                                            if let Ok(p) = port_str.trim().parse::<u16>() {
-                                                                let sess_addr = format!("127.0.0.1:{}", p);
-                                                                let sess_key = read_session_key(base).unwrap_or_default();
-                                                                if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
-                                                                    &sess_addr.parse().unwrap(), Duration::from_millis(50)
-                                                                ) {
-                                                                    let _ = ss.set_read_timeout(Some(Duration::from_millis(100)));
-                                                                    let _ = write!(ss, "AUTH {}\n", sess_key);
-                                                                    let _ = ss.write_all(b"list-tree\n");
-                                                                    let _ = ss.flush();
-                                                                    let mut br = BufReader::new(ss);
-                                                                    let mut al = String::new();
-                                                                    let _ = br.read_line(&mut al); // AUTH OK
-                                                                    let mut tree_line = String::new();
-                                                                    if br.read_line(&mut tree_line).is_ok() {
-                                                                        // Parse JSON array of WinTree
-                                                                        if let Ok(wins) = serde_json::from_str::<Vec<WinTree>>(&tree_line.trim()) {
-                                                                            let mut win_data = Vec::new();
-                                                                            for w in &wins {
-                                                                                let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
-                                                                                win_data.push((w.id, w.name.clone(), panes));
-                                                                            }
-                                                                            sessions.push((base.to_string(), win_data));
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // Sort sessions: current session first, then alphabetical
-                                        sessions.sort_by(|a, b| {
-                                            if a.0 == current_session { std::cmp::Ordering::Less }
-                                            else if b.0 == current_session { std::cmp::Ordering::Greater }
-                                            else { a.0.cmp(&b.0) }
-                                        });
-                                        // Build tree entries: session > window > pane
-                                        // tree_entries format: (is_win, id, sub_id, label, session_name)
-                                        // For session headers: is_win=true with id=usize::MAX as sentinel
-                                        // For windows: is_win=true
-                                        // For panes: is_win=false
-                                        for (sess_name, wins) in &sessions {
-                                            let is_current = sess_name == &current_session;
-                                            let attached = if is_current { " (attached)" } else { "" };
-                                            let nw = wins.len();
-                                            // Session header line
-                                            tree_entries.push((true, usize::MAX, 0,
-                                                format!("{}: {} windows{}", sess_name, nw, attached),
-                                                sess_name.clone()));
-                                            if is_current {
-                                                // Show windows and panes for current session
-                                                for (wi, (wid, wname, panes)) in wins.iter().enumerate() {
-                                                    let flag = if panes.len() > 0 { "" } else { "" };
-                                                    tree_entries.push((true, *wid, 0,
-                                                        format!("  {}: {}{} ({} panes)", wi, wname, flag, panes.len()),
-                                                        sess_name.clone()));
-                                                    for (pid, ptitle) in panes {
-                                                        tree_entries.push((false, *wid, *pid,
-                                                            format!("    {}", ptitle),
-                                                            sess_name.clone()));
-                                                    }
-                                                }
-                                            } else {
-                                                // Show windows for other sessions (collapsed)
-                                                for (wi, (wid, wname, panes)) in wins.iter().enumerate() {
-                                                    tree_entries.push((true, *wid, 0,
-                                                        format!("  {}: {} ({} panes)", wi, wname, panes.len()),
-                                                        sess_name.clone()));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // Fallback: if no sessions found, use current session data
-                                    if tree_entries.is_empty() {
-                                        for wi in &last_tree {
-                                            tree_entries.push((true, wi.id, 0, wi.name.clone(), current_session.clone()));
-                                            for pi in &wi.panes {
-                                                tree_entries.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
-                                            }
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('s') => {
-                                    session_chooser = true;
-                                    session_entries.clear();
-                                    session_selected = 0;
-                                    let dir = format!("{}\\.psmux", home);
-                                    if let Ok(entries) = std::fs::read_dir(&dir) {
-                                        for e in entries.flatten() {
-                                            if let Some(fname) = e.file_name().to_str() {
-                                                if let Some((base, ext)) = fname.rsplit_once('.') {
-                                                    if ext == "port" {
-                                                        if crate::session::is_warm_session(base) { continue; }
-                                                        if let Ok(port_str) = std::fs::read_to_string(e.path()) {
-                                                            if let Ok(p) = port_str.trim().parse::<u16>() {
-                                                                let sess_addr = format!("127.0.0.1:{}", p);
-                                                                let sess_key = read_session_key(base).unwrap_or_default();
-                                                                let info = if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
-                                                                    &sess_addr.parse().unwrap(), Duration::from_millis(25)
-                                                                ) {
-                                                                    let _ = ss.set_read_timeout(Some(Duration::from_millis(25)));
-                                                                    let _ = write!(ss, "AUTH {}\n", sess_key);
-                                                                    let _ = ss.write_all(b"session-info\n");
-                                                                    let mut br = BufReader::new(ss);
-                                                                    let mut al = String::new();
-                                                                    let _ = br.read_line(&mut al);
-                                                                    let mut line = String::new();
-                                                                    if br.read_line(&mut line).is_ok() && !line.trim().is_empty() {
-                                                                        line.trim().to_string()
-                                                                    } else {
-                                                                        format!("{}: (no info)", base)
-                                                                    }
-                                                                } else {
-                                                                    format!("{}: (not responding)", base)
-                                                                };
-                                                                session_entries.push((base.to_string(), info));
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if session_entries.is_empty() {
-                                        session_entries.push((current_session.clone(), format!("{}: (current)", current_session)));
-                                    }
-                                    for (i, (sname, _)) in session_entries.iter().enumerate() {
-                                        if sname == &current_session { session_selected = i; break; }
-                                    }
-                                }
+                                KeyCode::Char('w') => { do_choose_tree = true; }
+                                KeyCode::Char('s') => { do_choose_session = true; }
                                 KeyCode::Char('q') => { cmd_batch.push("display-panes\n".into()); }
                                 KeyCode::Char('v') => { cmd_batch.push("rectangle-toggle\n".into()); }
                                 KeyCode::Char('y') => { cmd_batch.push("copy-yank\n".into()); }
                                 // Session navigation (like tmux prefix+( and prefix+))
                                 KeyCode::Char('(') | KeyCode::Char(')') => {
-                                    let dir_next = key.code == KeyCode::Char(')');
-                                    // Enumerate sessions
-                                    let dir = format!("{}\\.psmux", home);
-                                    let mut names: Vec<String> = Vec::new();
-                                    if let Ok(entries) = std::fs::read_dir(&dir) {
-                                        for e in entries.flatten() {
-                                            if let Some(fname) = e.file_name().to_str() {
-                                                if let Some((base, ext)) = fname.rsplit_once('.') {
-                                                    if ext == "port" {
-                                                        if crate::session::is_warm_session(base) { continue; }
-                                                        if let Ok(ps) = std::fs::read_to_string(e.path()) {
-                                                            if let Ok(p) = ps.trim().parse::<u16>() {
-                                                                let a = format!("127.0.0.1:{}", p);
-                                                                if std::net::TcpStream::connect_timeout(
-                                                                    &a.parse().unwrap(), Duration::from_millis(25)
-                                                                ).is_ok() {
-                                                                    names.push(base.to_string());
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    names.sort();
-                                    if names.len() > 1 {
-                                        if let Some(cur_pos) = names.iter().position(|n| *n == current_session) {
-                                            let next_pos = if dir_next {
-                                                (cur_pos + 1) % names.len()
-                                            } else {
-                                                (cur_pos + names.len() - 1) % names.len()
-                                            };
-                                            let next_name = names[next_pos].clone();
-                                            cmd_batch.push("client-detach\n".into());
-                                            env::set_var("PSMUX_SWITCH_TO", &next_name);
-                                            quit = true;
-                                        }
-                                    }
+                                    do_session_nav = Some(key.code == KeyCode::Char(')'));
                                 }
                                 // Meta+1..5 preset layouts (like tmux)
                                 KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::ALT) => { cmd_batch.push("select-layout even-horizontal\n".into()); }
@@ -1633,6 +1481,185 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                             }
                             } // end of else (no user binding override)
+
+                            // Dispatch pending flags for complex client-side UI commands.
+                            // These are shared between synced_bindings dispatch and pre-sync fallback.
+                            if do_choose_tree {
+                                tree_chooser = true;
+                                tree_entries.clear();
+                                tree_selected = 0;
+                                tree_scroll = 0;
+                                // Query ALL sessions (like tmux choose-tree)
+                                let dir = format!("{}\\.psmux", home);
+                                if let Ok(entries) = std::fs::read_dir(&dir) {
+                                    let mut sessions: Vec<(String, Vec<(usize, String, Vec<(usize, String)>)>)> = Vec::new();
+                                    for e in entries.flatten() {
+                                        if let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) {
+                                            if let Some((base, ext)) = fname.rsplit_once('.') {
+                                                if ext == "port" {
+                                                    if crate::session::is_warm_session(base) { continue; }
+                                                    if let Ok(port_str) = std::fs::read_to_string(e.path()) {
+                                                        if let Ok(p) = port_str.trim().parse::<u16>() {
+                                                            let sess_addr = format!("127.0.0.1:{}", p);
+                                                            let sess_key = read_session_key(base).unwrap_or_default();
+                                                            if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
+                                                                &sess_addr.parse().unwrap(), Duration::from_millis(50)
+                                                            ) {
+                                                                let _ = ss.set_read_timeout(Some(Duration::from_millis(100)));
+                                                                let _ = write!(ss, "AUTH {}\n", sess_key);
+                                                                let _ = ss.write_all(b"list-tree\n");
+                                                                let _ = ss.flush();
+                                                                let mut br = BufReader::new(ss);
+                                                                let mut al = String::new();
+                                                                let _ = br.read_line(&mut al); // AUTH OK
+                                                                let mut tree_line = String::new();
+                                                                if br.read_line(&mut tree_line).is_ok() {
+                                                                    if let Ok(wins) = serde_json::from_str::<Vec<WinTree>>(&tree_line.trim()) {
+                                                                        let mut win_data = Vec::new();
+                                                                        for w in &wins {
+                                                                            let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
+                                                                            win_data.push((w.id, w.name.clone(), panes));
+                                                                        }
+                                                                        sessions.push((base.to_string(), win_data));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    sessions.sort_by(|a, b| {
+                                        if a.0 == current_session { std::cmp::Ordering::Less }
+                                        else if b.0 == current_session { std::cmp::Ordering::Greater }
+                                        else { a.0.cmp(&b.0) }
+                                    });
+                                    for (sess_name, wins) in &sessions {
+                                        let is_current = sess_name == &current_session;
+                                        let attached = if is_current { " (attached)" } else { "" };
+                                        let nw = wins.len();
+                                        tree_entries.push((true, usize::MAX, 0,
+                                            format!("{}: {} windows{}", sess_name, nw, attached),
+                                            sess_name.clone()));
+                                        if is_current {
+                                            for (wi, (wid, wname, panes)) in wins.iter().enumerate() {
+                                                let flag = if panes.len() > 0 { "" } else { "" };
+                                                tree_entries.push((true, *wid, 0,
+                                                    format!("  {}: {}{} ({} panes)", wi, wname, flag, panes.len()),
+                                                    sess_name.clone()));
+                                                for (pid, ptitle) in panes {
+                                                    tree_entries.push((false, *wid, *pid,
+                                                        format!("    {}", ptitle),
+                                                        sess_name.clone()));
+                                                }
+                                            }
+                                        } else {
+                                            for (wi, (wid, wname, panes)) in wins.iter().enumerate() {
+                                                tree_entries.push((true, *wid, 0,
+                                                    format!("  {}: {} ({} panes)", wi, wname, panes.len()),
+                                                    sess_name.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                                if tree_entries.is_empty() {
+                                    for wi in &last_tree {
+                                        tree_entries.push((true, wi.id, 0, wi.name.clone(), current_session.clone()));
+                                        for pi in &wi.panes {
+                                            tree_entries.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                            if do_choose_session {
+                                session_chooser = true;
+                                session_entries.clear();
+                                session_selected = 0;
+                                let dir = format!("{}\\.psmux", home);
+                                if let Ok(entries) = std::fs::read_dir(&dir) {
+                                    for e in entries.flatten() {
+                                        if let Some(fname) = e.file_name().to_str() {
+                                            if let Some((base, ext)) = fname.rsplit_once('.') {
+                                                if ext == "port" {
+                                                    if crate::session::is_warm_session(base) { continue; }
+                                                    if let Ok(port_str) = std::fs::read_to_string(e.path()) {
+                                                        if let Ok(p) = port_str.trim().parse::<u16>() {
+                                                            let sess_addr = format!("127.0.0.1:{}", p);
+                                                            let sess_key = read_session_key(base).unwrap_or_default();
+                                                            let info = if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
+                                                                &sess_addr.parse().unwrap(), Duration::from_millis(25)
+                                                            ) {
+                                                                let _ = ss.set_read_timeout(Some(Duration::from_millis(25)));
+                                                                let _ = write!(ss, "AUTH {}\n", sess_key);
+                                                                let _ = ss.write_all(b"session-info\n");
+                                                                let mut br = BufReader::new(ss);
+                                                                let mut al = String::new();
+                                                                let _ = br.read_line(&mut al);
+                                                                let mut line = String::new();
+                                                                if br.read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                                                                    line.trim().to_string()
+                                                                } else {
+                                                                    format!("{}: (no info)", base)
+                                                                }
+                                                            } else {
+                                                                format!("{}: (not responding)", base)
+                                                            };
+                                                            session_entries.push((base.to_string(), info));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if session_entries.is_empty() {
+                                    session_entries.push((current_session.clone(), format!("{}: (current)", current_session)));
+                                }
+                                for (i, (sname, _)) in session_entries.iter().enumerate() {
+                                    if sname == &current_session { session_selected = i; break; }
+                                }
+                            }
+                            if let Some(dir_next) = do_session_nav {
+                                let dir = format!("{}\\.psmux", home);
+                                let mut names: Vec<String> = Vec::new();
+                                if let Ok(entries) = std::fs::read_dir(&dir) {
+                                    for e in entries.flatten() {
+                                        if let Some(fname) = e.file_name().to_str() {
+                                            if let Some((base, ext)) = fname.rsplit_once('.') {
+                                                if ext == "port" {
+                                                    if crate::session::is_warm_session(base) { continue; }
+                                                    if let Ok(ps) = std::fs::read_to_string(e.path()) {
+                                                        if let Ok(p) = ps.trim().parse::<u16>() {
+                                                            let a = format!("127.0.0.1:{}", p);
+                                                            if std::net::TcpStream::connect_timeout(
+                                                                &a.parse().unwrap(), Duration::from_millis(25)
+                                                            ).is_ok() {
+                                                                names.push(base.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                names.sort();
+                                if names.len() > 1 {
+                                    if let Some(cur_pos) = names.iter().position(|n| *n == current_session) {
+                                        let next_pos = if dir_next {
+                                            (cur_pos + 1) % names.len()
+                                        } else {
+                                            (cur_pos + names.len() - 1) % names.len()
+                                        };
+                                        let next_name = names[next_pos].clone();
+                                        cmd_batch.push("client-detach\n".into());
+                                        env::set_var("PSMUX_SWITCH_TO", &next_name);
+                                        quit = true;
+                                    }
+                                }
+                            }
+
                             // Arrow keys are repeatable by default (tmux -r flag).
                             // User-defined bindings also respect the repeat flag.
                             let is_repeatable_default = matches!(key.code,

@@ -809,6 +809,7 @@ pub enum Action {
     Detach,
     RenameWindow,
     WindowChooser,
+    SessionChooser,
     ZoomPane,
     /// Switch to a named key table (switch-client -T)
     SwitchTable(String),

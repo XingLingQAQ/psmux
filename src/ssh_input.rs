@@ -496,10 +496,19 @@ impl VtParser {
             emit(make_key(KeyCode::Esc, KeyModifiers::empty()));
             self.state = PS::Ground;
         }
-        // PasteDrain should also expire on timeout — if no residue
-        // characters arrived within one poll cycle, the drain is done.
+        // PasteDrain expires after a generous window (2 seconds) to absorb
+        // any residual close-sequence characters that arrive late due to
+        // SSH/ConPTY latency.  `paste_start` is reused as the drain
+        // deadline timestamp.
         if self.state == PS::PasteDrain {
-            self.state = PS::Ground;
+            let expired = match self.paste_start {
+                Some(start) => start.elapsed().as_millis() >= 2000,
+                None => true,
+            };
+            if expired {
+                self.state = PS::Ground;
+                self.paste_start = None;
+            }
         }
     }
 
@@ -567,8 +576,14 @@ impl VtParser {
                     // VT parser.  However, ConPTY may have stripped the
                     // CSI prefix (\x1b[201) and only leaked the final `~`.
                     // Transition to PasteDrain to absorb that residue.
+                    // Reuse paste_start as the drain deadline (500 ms window).
                     self.cur = 0;
+                    self.paste_start = Some(std::time::Instant::now());
                     self.state = PS::PasteDrain;
+                    ssh_debug_log(&format!(
+                        "flush_stale_paste: transitioning to PasteDrain (pre={:?} post={:?})",
+                        pre_flush_state, self.state,
+                    ));
                 }
                 PS::PasteEsc => {
                     // Already consumed \x1b.  Transition to Escape so the
@@ -1033,10 +1048,12 @@ impl VtParser {
                 // ESC could start a new close sequence that ConPTY partially
                 // passed through.  Transition to Escape to let the CSI
                 // parser handle it (dispatch_tilde ignores param 201).
+                self.paste_start = None;
                 self.state = PS::Escape;
             }
             _ => {
                 // Non-residue character: drain is done, process normally.
+                self.paste_start = None;
                 self.state = PS::Ground;
                 self.on_ground(ch, emit);
             }
@@ -1457,8 +1474,8 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
                 // or is inside a paste (need to detect stale paste quickly).
                 let wait_ms = if parser.has_pending_escape() {
                     ESC_TIMEOUT_MS
-                } else if parser.is_in_paste() {
-                    200 // check paste timeout frequently
+                } else if parser.is_in_paste() || parser.state == PS::PasteDrain {
+                    200 // check paste timeout / drain expiry frequently
                 } else {
                     500
                 };
@@ -1645,3 +1662,7 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
 
     Ok(rx)
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_ssh_vt_paste.rs"]
+mod tests;

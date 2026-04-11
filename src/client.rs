@@ -878,6 +878,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         }
                         let encoded = base64_encode(&paste_pend);
                         cmd_batch.push(format!("send-paste {}\n", encoded));
+                        // Suppress clipboard-read fallback
+                        paste_suppress_until = Some(Instant::now() + Duration::from_secs(2));
                     }
                     paste_pend.clear();
                     paste_pend_start = None;
@@ -971,6 +973,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         paste_pend_start = None;
                         paste_stage2 = false;
                         paste_stage2_last_len = 0;
+                        // Suppress the clipboard-read fallback that fires
+                        // when Ctrl+V Release arrives later (the paste was
+                        // already sent via stage2).
+                        paste_suppress_until = Some(Instant::now() + Duration::from_secs(2));
                     }
                 }
             }
@@ -1901,6 +1907,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
                                     cmd_batch.push(format!("send-key M-{}\n", c));
                                 }
+                                // On Windows, suppress Ctrl+V Press — the console host
+                                // already injected clipboard content as character events
+                                // and the paste mechanism handles them.  Forwarding C-v
+                                // to the PTY would cause PowerShell to paste a second time.
+                                #[cfg(windows)]
+                                KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {}
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     cmd_batch.push(format!("send-key C-{}\n", c.to_ascii_lowercase()));
                                 }
@@ -1982,6 +1994,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     Event::Paste(data) => {
                         let encoded = base64_encode(&data);
                         cmd_batch.push(format!("send-paste {}\n", encoded));
+                        // On Windows, crossterm with EnableBracketedPaste may
+                        // emit Event::Paste AND individual Event::Key events
+                        // for the same Ctrl+V paste.  Suppress the duplicate
+                        // Key events by clearing any partially accumulated
+                        // paste_pend chars and blocking accumulation briefly.
+                        #[cfg(windows)]
+                        {
+                            paste_pend.clear();
+                            paste_pend_start = None;
+                            paste_stage2 = false;
+                            paste_confirmed = false;
+                            paste_suppress_until = Some(Instant::now() + Duration::from_secs(2));
+                        }
                     }
                     Event::Mouse(me) => {
                         use crossterm::event::{MouseEventKind, MouseButton};
@@ -2316,15 +2341,29 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 paste_pend_start = None;
                 paste_stage2 = false;
                 paste_confirmed = false;
+                // Suppress subsequent char accumulation and clipboard-read
+                // fallback — the paste was already delivered.
+                paste_suppress_until = Some(Instant::now() + Duration::from_secs(2));
             } else if paste_confirmed && paste_pend.is_empty() {
-                // Ctrl+V with no buffered chars — read clipboard as fallback
-                if let Some(text) = read_from_system_clipboard() {
-                    if !text.is_empty() {
-                        if input_log_enabled() {
-                            input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", text.len()));
+                // Ctrl+V Release with no buffered chars.  If paste was
+                // already sent via stage2 timeout or Event::Paste, the
+                // suppress window prevents a redundant clipboard read.
+                let suppressed = paste_suppress_until
+                    .map_or(false, |t| Instant::now() < t);
+                if !suppressed {
+                    // No recent paste — read clipboard as fallback
+                    if let Some(text) = read_from_system_clipboard() {
+                        if !text.is_empty() {
+                            if input_log_enabled() {
+                                input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", text.len()));
+                            }
+                            let encoded = base64_encode(&text);
+                            cmd_batch.push(format!("send-paste {}\n", encoded));
+                            // Suppress subsequent char accumulation — the
+                            // clipboard chars may arrive later (async inject)
+                            // and would cause a duplicate paste via stage2.
+                            paste_suppress_until = Some(Instant::now() + Duration::from_secs(2));
                         }
-                        let encoded = base64_encode(&text);
-                        cmd_batch.push(format!("send-paste {}\n", encoded));
                     }
                 }
                 paste_confirmed = false;

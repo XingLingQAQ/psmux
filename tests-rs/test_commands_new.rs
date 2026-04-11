@@ -897,25 +897,26 @@ fn displayp_alias_works() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  19. new-session: cannot create from inside, must show feedback
+//  19. new-session: issue #200 fix, now actually creates sessions instead of blocking
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn new_session_blocked_with_feedback() {
+fn new_session_does_not_block_with_popup() {
+    // Issue #200: new-session should no longer show the blocking popup.
+    // It should attempt to create a session (which may fail in test env
+    // without a real server, but must NOT show the old blocking popup).
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "new-session").unwrap();
-    let (cmd, out) = extract_popup(&app);
-    assert_eq!(cmd, "new-session");
-    assert!(out.contains("cannot create"), "must explain why new-session is blocked");
-    assert!(out.contains("inside a session"), "must mention being inside a session");
+    let in_blocking_popup = matches!(&app.mode, Mode::PopupMode { output, .. } if output.contains("cannot create"));
+    assert!(!in_blocking_popup, "new-session should not show blocking popup after issue #200 fix");
 }
 
 #[test]
-fn new_alias_also_blocked() {
+fn new_alias_does_not_block() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "new").unwrap();
-    let (_, out) = extract_popup(&app);
-    assert!(out.contains("cannot create"));
+    let in_blocking_popup = matches!(&app.mode, Mode::PopupMode { output, .. } if output.contains("cannot create"));
+    assert!(!in_blocking_popup, "'new' alias should not show blocking popup after issue #200 fix");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1172,11 +1173,12 @@ fn prompt_delegates_list_keys() {
 }
 
 #[test]
-fn prompt_delegates_new_session_shows_feedback() {
+fn prompt_delegates_new_session_creates_session() {
+    // Issue #200: command prompt new-session should attempt creation, not block
     let mut app = mock_app_with_window();
     run_via_prompt(&mut app, "new-session");
-    let (_, out) = extract_popup(&app);
-    assert!(out.contains("cannot create"));
+    let in_blocking_popup = matches!(&app.mode, Mode::PopupMode { output, .. } if output.contains("cannot create"));
+    assert!(!in_blocking_popup, "command prompt new-session should not show blocking popup");
 }
 
 #[test]

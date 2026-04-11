@@ -1563,8 +1563,160 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "new-session" | "new" => {
-            // Cannot create a session from inside a session; show feedback
-            show_output_popup(app, "new-session", "(cannot create a new session from inside a session)\n".to_string());
+            // Issue #200: create a new session from inside a running session.
+            // Parse flags: -s name, -d (detached), -n windowname, -c startdir
+            let mut session_name: Option<String> = None;
+            let mut detached = false;
+            let mut window_name: Option<String> = None;
+            let mut start_dir: Option<String> = None;
+            {
+                let mut i = 1;
+                while i < parts.len() {
+                    match parts[i] {
+                        "-s" => { i += 1; if i < parts.len() { session_name = Some(parts[i].trim_matches('"').to_string()); } }
+                        "-n" => { i += 1; if i < parts.len() { window_name = Some(parts[i].trim_matches('"').to_string()); } }
+                        "-c" => { i += 1; if i < parts.len() { start_dir = Some(parts[i].trim_matches('"').to_string()); } }
+                        "-d" => { detached = true; }
+                        "-A" | "-D" | "-E" | "-P" | "-X" => { /* compatibility flags, ignored */ }
+                        "-e" | "-F" | "-f" | "-t" | "-x" | "-y" => { i += 1; /* skip value */ }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+
+            // Generate session name if not provided
+            let ns_prefix = app.socket_name.as_deref();
+            let name = session_name.unwrap_or_else(|| crate::session::next_session_name(ns_prefix));
+
+            // Build port file base (with namespace prefix if applicable)
+            let port_file_base = if let Some(ref sn) = app.socket_name {
+                format!("{}__{}", sn, name)
+            } else {
+                name.clone()
+            };
+
+            // Check if session already exists
+            let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+            let port_path = format!("{}\\.psmux\\{}.port", home, port_file_base);
+            if std::path::Path::new(&port_path).exists() {
+                if let Ok(port_str) = std::fs::read_to_string(&port_path) {
+                    if let Ok(port) = port_str.trim().parse::<u16>() {
+                        let addr = format!("127.0.0.1:{}", port);
+                        if std::net::TcpStream::connect_timeout(
+                            &addr.parse().unwrap(),
+                            std::time::Duration::from_millis(100),
+                        ).is_ok() {
+                            app.status_message = Some((format!("session '{}' already exists", name), Instant::now()));
+                            return Ok(());
+                        }
+                    }
+                }
+                // Stale port file, remove it
+                let _ = std::fs::remove_file(&port_path);
+            }
+
+            // Try to claim a warm server first (fast path)
+            let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
+                || crate::config::is_warm_disabled_by_config();
+            let claimed_warm = if !warm_disabled && start_dir.is_none() {
+                let warm_base = if let Some(ref sn) = app.socket_name {
+                    format!("{}____warm__", sn)
+                } else {
+                    "__warm__".to_string()
+                };
+                let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+                if std::path::Path::new(&warm_port_path).exists() {
+                    if let Ok(warm_port_str) = std::fs::read_to_string(&warm_port_path) {
+                        if let Ok(warm_port) = warm_port_str.trim().parse::<u16>() {
+                            let warm_addr = format!("127.0.0.1:{}", warm_port);
+                            if std::net::TcpStream::connect_timeout(
+                                &warm_addr.parse().unwrap(),
+                                std::time::Duration::from_millis(100),
+                            ).is_ok() {
+                                let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
+                                if !warm_key.is_empty() {
+                                    let claim_cmd = format!("claim-session {}\n", crate::util::quote_arg(&name));
+                                    match crate::session::send_auth_cmd_response(
+                                        &warm_addr, &warm_key,
+                                        claim_cmd.as_bytes(),
+                                    ) {
+                                        Ok(resp) if resp.contains("OK") => {
+                                            if let Some(ref wn) = window_name {
+                                                let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                let _ = crate::session::send_auth_cmd(
+                                                    &warm_addr, &new_key,
+                                                    format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
+                                                );
+                                            }
+                                            true
+                                        }
+                                        _ => false,
+                                    }
+                                } else { false }
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                } else { false }
+            } else { false };
+
+            if !claimed_warm {
+                // Cold path: spawn a background server process
+                let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
+                let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), name.clone()];
+                if let Some(ref sn) = app.socket_name {
+                    server_args.push("-L".into());
+                    server_args.push(sn.clone());
+                }
+                if let Some(ref dir) = start_dir {
+                    server_args.push("-d".into());
+                    server_args.push(dir.clone());
+                }
+                if let Some(ref wn) = window_name {
+                    server_args.push("-n".into());
+                    server_args.push(wn.clone());
+                }
+                // Pass current terminal dimensions
+                let area = app.last_window_area;
+                if area.width > 1 && area.height > 1 {
+                    server_args.push("-x".into());
+                    server_args.push(area.width.to_string());
+                    server_args.push("-y".into());
+                    server_args.push(area.height.to_string());
+                }
+                #[cfg(windows)]
+                { let _ = crate::platform::spawn_server_hidden(&exe, &server_args); }
+                #[cfg(not(windows))]
+                {
+                    let mut cmd_proc = std::process::Command::new(&exe);
+                    for a in &server_args { cmd_proc.arg(a); }
+                    cmd_proc.stdin(std::process::Stdio::null());
+                    cmd_proc.stdout(std::process::Stdio::null());
+                    cmd_proc.stderr(std::process::Stdio::null());
+                    let _ = cmd_proc.spawn();
+                }
+            }
+
+            // Wait for port file to appear (up to 5 seconds)
+            for _ in 0..500 {
+                if std::path::Path::new(&port_path).exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            if std::path::Path::new(&port_path).exists() {
+                if !detached {
+                    // Switch to the new session
+                    if let Some(port) = app.control_port {
+                        let switch_cmd = format!("switch-client -t {}\n", crate::util::quote_arg(&name));
+                        let _ = send_control_to_port(port, &switch_cmd, &app.session_key);
+                    }
+                }
+                app.status_message = Some((format!("created session '{}'", name), Instant::now()));
+            } else {
+                app.status_message = Some((format!("failed to create session '{}'", name), Instant::now()));
+            }
         }
         "lock-client" | "lockc" | "lock-server" | "lock" | "lock-session" | "locks" => {
             if let Some(port) = app.control_port {
@@ -1723,3 +1875,7 @@ mod tests_issue179_bind_key_uppercase;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue192_command_chaining.rs"]
 mod tests_issue192_command_chaining;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue200_new_session.rs"]
+mod tests_issue200_new_session;

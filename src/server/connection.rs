@@ -1792,8 +1792,106 @@ match cmd {
         // new-session -t target: set session group on this server
         if let Some(target) = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].to_string()) {
             let _ = tx.send(CtrlReq::SetSessionGroup(target));
+        } else {
+            // Issue #200: spawn a new session from inside a running session.
+            // Parse flags
+            let mut sess_name: Option<String> = None;
+            let mut detached = false;
+            let mut window_name: Option<String> = None;
+            let mut start_dir: Option<String> = None;
+            {
+                let mut i = 0;
+                while i < args.len() {
+                    match args[i] {
+                        "-s" => { i += 1; if i < args.len() { sess_name = Some(args[i].trim_matches('"').to_string()); } }
+                        "-n" => { i += 1; if i < args.len() { window_name = Some(args[i].trim_matches('"').to_string()); } }
+                        "-c" => { i += 1; if i < args.len() { start_dir = Some(args[i].trim_matches('"').to_string()); } }
+                        "-d" => { detached = true; }
+                        "-t" => { i += 1; /* already handled above */ }
+                        "-e" | "-F" | "-f" | "-x" | "-y" => { i += 1; /* skip value */ }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+
+            // Note: socket_name (from -L flag) is not directly available here;
+            // the client-side handler in commands.rs has it via app.socket_name.
+            let name = sess_name.unwrap_or_else(|| crate::session::next_session_name(None));
+
+            let port_file_base = name.clone();
+
+            let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+            let port_path = format!("{}\\.psmux\\{}.port", home, port_file_base);
+
+            // Check if session already exists
+            let already_exists = if std::path::Path::new(&port_path).exists() {
+                if let Ok(port_str) = std::fs::read_to_string(&port_path) {
+                    if let Ok(port) = port_str.trim().parse::<u16>() {
+                        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+                        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100)).is_ok()
+                    } else { false }
+                } else { false }
+            } else { false };
+
+            if already_exists {
+                if persistent {
+                    let _ = tx.send(CtrlReq::StatusMessage(format!("session '{}' already exists", name)));
+                } else {
+                    let _ = write!(write_stream, "session '{}' already exists\n", name);
+                    let _ = write_stream.flush();
+                }
+            } else {
+                // Spawn new server
+                let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
+                let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), name.clone()];
+
+                if let Some(ref dir) = start_dir {
+                    server_args.push("-d".into());
+                    server_args.push(dir.clone());
+                }
+                if let Some(ref wn) = window_name {
+                    server_args.push("-n".into());
+                    server_args.push(wn.clone());
+                }
+                #[cfg(windows)]
+                { let _ = crate::platform::spawn_server_hidden(&exe, &server_args); }
+                #[cfg(not(windows))]
+                {
+                    let mut cmd_proc = std::process::Command::new(&exe);
+                    for a in &server_args { cmd_proc.arg(a); }
+                    cmd_proc.stdin(std::process::Stdio::null());
+                    cmd_proc.stdout(std::process::Stdio::null());
+                    cmd_proc.stderr(std::process::Stdio::null());
+                    let _ = cmd_proc.spawn();
+                }
+
+                // Wait for port file
+                for _ in 0..500 {
+                    if std::path::Path::new(&port_path).exists() { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
+                if std::path::Path::new(&port_path).exists() {
+                    if !detached {
+                        let _ = tx.send(CtrlReq::SwitchClient(name.clone(), 't'));
+                    }
+                    if persistent {
+                        let _ = tx.send(CtrlReq::StatusMessage(format!("created session '{}'", name)));
+                    } else {
+                        let _ = write!(write_stream, "OK\n");
+                        let _ = write_stream.flush();
+                    }
+                } else {
+                    if persistent {
+                        let _ = tx.send(CtrlReq::StatusMessage(format!("failed to create session '{}'", name)));
+                    } else {
+                        let _ = write!(write_stream, "failed to create session '{}'\n", name);
+                        let _ = write_stream.flush();
+                    }
+                }
+            }
         }
-        // Full new-session requires a new process (handled by CLI)
     }
     "list-commands" | "lscm" => {
         let cmds = TMUX_COMMANDS.join("\n");

@@ -2080,9 +2080,9 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             // tmux parity: single click moves cursor without starting a selection.
             // Selection only starts when dragging (see Drag handler below).
             if in_copy {
+                app.copy_anchor = None;
                 if let Some(area) = active_area {
                     let (row, col) = copy_cell(area, me.column, me.row);
-                    app.copy_anchor = None;
                     app.copy_pos = Some((row, col));
                 }
                 return Ok(());
@@ -2249,7 +2249,14 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 if let Some(area) = active_area {
                     let (row, col) = copy_cell(area, me.column, me.row);
                     if app.copy_anchor.is_none() {
-                        app.copy_anchor = Some((row, col));
+                        // Only start a selection when the mouse actually moves
+                        // to a different cell than the click position.  This
+                        // prevents micro-drags (sub-cell jitter) from setting a
+                        // stale anchor that produces phantom selections (#199).
+                        if app.copy_pos == Some((row, col)) {
+                            return Ok(());
+                        }
+                        app.copy_anchor = Some(app.copy_pos.unwrap_or((row, col)));
                         app.copy_anchor_scroll_offset = app.copy_scroll_offset;
                         app.copy_selection_mode = crate::types::SelectionMode::Char;
                     }

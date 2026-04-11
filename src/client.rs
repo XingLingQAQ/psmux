@@ -3489,7 +3489,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 f.render_widget(line_widget, line_area);
             }
             if renaming {
-                let overlay = Block::default().borders(Borders::ALL).title("rename window");
+                let title = if session_renaming { "rename session" } else { "rename window" };
+                let overlay = Block::default().borders(Borders::ALL).title(title);
                 let oa = centered_rect(60, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);

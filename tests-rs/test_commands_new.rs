@@ -2015,3 +2015,82 @@ fn resolve_run_shell_returns_absolute_windows_shell_path() {
         prog
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Issue #201: prefix+$ should enter RenameSessionPrompt, NOT RenamePrompt
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn prefix_dollar_enters_rename_session_prompt_not_rename_window() {
+    let mut app = mock_app_with_window();
+    app.mode = Mode::Prefix { armed_at: std::time::Instant::now() };
+    handle_key(&mut app, press(KeyCode::Char('$'))).unwrap();
+    assert!(
+        matches!(app.mode, Mode::RenameSessionPrompt { .. }),
+        "prefix+$ must enter RenameSessionPrompt mode, got {:?}",
+        std::mem::discriminant(&app.mode)
+    );
+    // Crucially, it should NOT be RenamePrompt (window rename)
+    assert!(
+        !matches!(app.mode, Mode::RenamePrompt { .. }),
+        "prefix+$ must NOT enter RenamePrompt (window rename) mode"
+    );
+}
+
+#[test]
+fn prefix_comma_enters_rename_window_prompt_not_session() {
+    let mut app = mock_app_with_window();
+    app.mode = Mode::Prefix { armed_at: std::time::Instant::now() };
+    handle_key(&mut app, press(KeyCode::Char(','))).unwrap();
+    assert!(
+        matches!(app.mode, Mode::RenamePrompt { .. }),
+        "prefix+, must enter RenamePrompt (window) mode"
+    );
+    assert!(
+        !matches!(app.mode, Mode::RenameSessionPrompt { .. }),
+        "prefix+, must NOT enter RenameSessionPrompt mode"
+    );
+}
+
+#[test]
+fn rename_session_prompt_typing_and_enter_applies_session_name() {
+    let mut app = mock_app_with_window();
+    app.session_name = "old_session".to_string();
+    app.mode = Mode::RenameSessionPrompt { input: String::new() };
+    // Type "new_session"
+    for c in "new_session".chars() {
+        handle_key(&mut app, press(KeyCode::Char(c))).unwrap();
+    }
+    if let Mode::RenameSessionPrompt { ref input } = app.mode {
+        assert_eq!(input, "new_session");
+    } else {
+        panic!("should still be in RenameSessionPrompt while typing");
+    }
+    // Press Enter to apply
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.session_name, "new_session", "session name should be updated");
+    assert!(matches!(app.mode, Mode::Passthrough), "should return to Passthrough after Enter");
+}
+
+#[test]
+fn rename_window_prompt_typing_and_enter_applies_window_name() {
+    let mut app = mock_app_with_window();
+    app.windows[0].name = "old_win".to_string();
+    app.mode = Mode::RenamePrompt { input: String::new() };
+    for c in "new_win".chars() {
+        handle_key(&mut app, press(KeyCode::Char(c))).unwrap();
+    }
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.windows[0].name, "new_win", "window name should be updated");
+    assert!(matches!(app.mode, Mode::Passthrough), "should return to Passthrough after Enter");
+}
+
+#[test]
+fn rename_session_prompt_esc_cancels_without_changing_name() {
+    let mut app = mock_app_with_window();
+    app.session_name = "original".to_string();
+    app.mode = Mode::RenameSessionPrompt { input: "typed_but_cancelled".to_string() };
+    handle_key(&mut app, press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.session_name, "original", "session name must not change on Esc");
+    assert!(matches!(app.mode, Mode::Passthrough));
+}

@@ -33,6 +33,7 @@ pub fn enter_copy_mode(app: &mut AppState) {
     // Initialize copy_pos from the terminal cursor so the cursor is
     // visible immediately on entering copy mode (fixes #25).
     app.copy_pos = current_prompt_pos(app);
+    app.copy_mouse_down_cell = None;
     app.copy_find_char_pending = None;
     app.copy_text_object_pending = None;
     app.copy_register_pending = false;
@@ -49,6 +50,7 @@ pub fn exit_copy_mode(app: &mut AppState) {
     app.mode = Mode::Passthrough;
     app.copy_anchor = None;
     app.copy_pos = None;
+    app.copy_mouse_down_cell = None;
     app.copy_scroll_offset = 0;
     let win = &mut app.windows[app.active_idx];
     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {

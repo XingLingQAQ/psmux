@@ -2084,6 +2084,7 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 if let Some(area) = active_area {
                     let (row, col) = copy_cell(area, me.column, me.row);
                     app.copy_pos = Some((row, col));
+                    app.copy_mouse_down_cell = Some((row, col));
                 }
                 return Ok(());
             }
@@ -2187,6 +2188,18 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 if let Some(area) = active_area {
                     let (row, col) = copy_cell(area, me.column, me.row);
                     app.copy_pos = Some((row, col));
+                }
+                // If mouse-up is within 1 cell of mouse-down, it was a plain click
+                // (any anchor set by jittery drag events is spurious). Clear it. (#199)
+                let click_origin = app.copy_mouse_down_cell.take();
+                if let (Some((dr, dc)), Some((ur, uc))) = (click_origin, app.copy_pos) {
+                    if (dr as i32 - ur as i32).unsigned_abs() <= 1
+                        && (dc as i32 - uc as i32).unsigned_abs() <= 1
+                    {
+                        app.copy_anchor = None;
+                        app.copy_pos = Some((dr, dc)); // snap to original click position
+                        return Ok(());
+                    }
                 }
                 // Auto-yank if there is a selection (anchor != pos) — tmux parity
                 if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {

@@ -362,6 +362,8 @@ pub struct AppState {
     /// Scroll offset when copy_anchor was set (for viewport-relative adjustment)
     pub copy_anchor_scroll_offset: usize,
     pub copy_pos: Option<(u16,u16)>,
+    /// Cell where mouse was pressed down in copy mode (for click vs drag detection, #199)
+    pub copy_mouse_down_cell: Option<(u16,u16)>,
     pub copy_scroll_offset: usize,
     /// Selection mode: Char (default), Line (V), Rect (C-v)
     pub copy_selection_mode: SelectionMode,
@@ -633,6 +635,7 @@ impl AppState {
             copy_anchor: None,
             copy_anchor_scroll_offset: 0,
             copy_pos: None,
+            copy_mouse_down_cell: None,
             copy_scroll_offset: 0,
             copy_selection_mode: SelectionMode::Char,
             copy_count: None,

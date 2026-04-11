@@ -499,6 +499,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(area, x, y);
             app.copy_pos = Some((row, col));
+            app.copy_mouse_down_cell = Some((row, col));
         }
         return;
     }
@@ -590,7 +591,20 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
             let (row, col) = copy_cell_for_area(*area, x, y);
             app.copy_pos = Some((row, col));
         }
-        // Auto-yank if selection exists (anchor != pos), else clear stale anchor
+        // If mouse-up is within 1 cell of mouse-down, it was a plain click
+        // (any anchor set by jittery drag events is spurious). Clear it. (#199)
+        // Mouse jitter during a click can shift the cursor by 1 cell.
+        let click_origin = app.copy_mouse_down_cell.take();
+        if let (Some((dr, dc)), Some((ur, uc))) = (click_origin, app.copy_pos) {
+            let row_diff = (dr as i32 - ur as i32).unsigned_abs();
+            let col_diff = (dc as i32 - uc as i32).unsigned_abs();
+            if row_diff <= 1 && col_diff <= 1 {
+                app.copy_anchor = None;
+                app.copy_pos = Some((dr, dc)); // snap to the original click position
+                return;
+            }
+        }
+        // Auto-yank if real selection exists (anchor != pos), else clear stale anchor
         if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
             if a != p {
                 let _ = yank_selection(app);
@@ -855,21 +869,32 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // Left press: position cursor, clear selection
             app.copy_anchor = None;
             app.copy_pos = Some((r, c));
+            app.copy_mouse_down_cell = Some((r, c));
         } else if button == 32 {
-            // Left drag: extend selection
+            // Left drag: extend selection, but ignore same-cell micro-jitter (#199)
             if app.copy_anchor.is_none() {
-                app.copy_anchor = Some((r, c));
+                if app.copy_pos == Some((r, c)) {
+                    return; // same cell as click, ignore jitter
+                }
+                app.copy_anchor = Some(app.copy_pos.unwrap_or((r, c)));
                 app.copy_anchor_scroll_offset = app.copy_scroll_offset;
                 app.copy_selection_mode = crate::types::SelectionMode::Char;
             }
             app.copy_pos = Some((r, c));
         } else if button == 0 && !press {
-            // Left release: finalize, auto-yank if selection exists
-            if app.copy_anchor.is_none() {
-                app.copy_anchor = Some((r, c));
-                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-            }
+            // Left release: finalize position
             app.copy_pos = Some((r, c));
+            // If close to the original click, treat as click (no selection) (#199)
+            if let Some((dr, dc)) = app.copy_mouse_down_cell.take() {
+                if (dr as i32 - r as i32).unsigned_abs() <= 1
+                    && (dc as i32 - c as i32).unsigned_abs() <= 1
+                {
+                    app.copy_anchor = None;
+                    app.copy_pos = Some((dr, dc));
+                    return;
+                }
+            }
+            // Auto-yank if real selection exists (anchor != pos)
             if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                 if a != p { let _ = yank_selection(app); }
             }

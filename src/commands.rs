@@ -1604,7 +1604,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             let mut detached = false;
             let mut window_name: Option<String> = None;
             let mut start_dir: Option<String> = None;
-            let mut env_vars: Vec<String> = Vec::new();
+            let mut env_vars: Vec<(String, String)> = Vec::new();
             {
                 let mut i = 1;
                 while i < parts.len() {
@@ -1612,7 +1612,16 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         "-s" => { i += 1; if i < parts.len() { session_name = Some(parts[i].trim_matches('"').to_string()); } }
                         "-n" => { i += 1; if i < parts.len() { window_name = Some(parts[i].trim_matches('"').to_string()); } }
                         "-c" => { i += 1; if i < parts.len() { start_dir = Some(parts[i].trim_matches('"').to_string()); } }
-                        "-e" => { i += 1; if i < parts.len() { env_vars.push(parts[i].trim_matches('"').to_string()); } }
+                        "-e" => {
+                            i += 1;
+                            match crate::util::parse_new_session_e_value_token(parts.get(i).copied()) {
+                                Ok(p) => env_vars.push(p),
+                                Err(e) => {
+                                    app.status_message = Some((format!("psmux: {}", e), Instant::now()));
+                                    return Ok(());
+                                }
+                            }
+                        }
                         "-d" => { detached = true; }
                         "-A" | "-D" | "-E" | "-P" | "-X" => { /* compatibility flags, ignored */ }
                         "-F" | "-f" | "-t" | "-x" | "-y" => { i += 1; /* skip value */ }
@@ -1689,15 +1698,11 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                                             // Apply -e environment variables to the claimed warm session
                                             if !env_vars.is_empty() {
                                                 let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
-                                                for ev in &env_vars {
-                                                    if let Some(eq_pos) = ev.find('=') {
-                                                        let k = &ev[..eq_pos];
-                                                        let v = &ev[eq_pos+1..];
-                                                        let _ = crate::session::send_auth_cmd(
-                                                            &warm_addr, &new_key,
-                                                            format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
-                                                        );
-                                                    }
+                                                for (k, v) in &env_vars {
+                                                    let _ = crate::session::send_auth_cmd(
+                                                        &warm_addr, &new_key,
+                                                        format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
+                                                    );
                                                 }
                                             }
                                             true
@@ -1736,9 +1741,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     server_args.push(area.height.to_string());
                 }
                 // Pass -e environment variables to server
-                for ev in &env_vars {
+                for (k, v) in &env_vars {
                     server_args.push("-e".into());
-                    server_args.push(ev.clone());
+                    server_args.push(format!("{}={}", k, v));
                 }
                 #[cfg(windows)]
                 { let _ = crate::platform::spawn_server_hidden(&exe, &server_args); }

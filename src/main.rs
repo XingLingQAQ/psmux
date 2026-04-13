@@ -428,20 +428,9 @@ fn run_main() -> io::Result<()> {
                 // Parse session group target via -g flag
                 let srv_group_target = args.iter().position(|a| a == "-g").and_then(|i| args.get(i+1)).map(|s| s.clone());
                 // Parse -e environment variables (may appear multiple times)
-                let srv_env_vars: Vec<String> = {
-                    let mut evs = Vec::new();
-                    let mut idx = 0;
-                    while idx < args.len() {
-                        if args[idx] == "-e" {
-                            idx += 1;
-                            if idx < args.len() {
-                                evs.push(args[idx].clone());
-                            }
-                        }
-                        idx += 1;
-                    }
-                    evs
-                };
+                let srv_env_vars = crate::util::collect_server_session_env_args(&args).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
                 // Check for raw command after -- (direct execution)
                 let raw_cmd: Option<Vec<String>> = args.iter().position(|a| a == "--").map(|pos| {
                     args.iter().skip(pos + 1).cloned().collect()
@@ -475,7 +464,7 @@ fn run_main() -> io::Result<()> {
                 let mut init_width: Option<u16> = None;
                 let mut init_height: Option<u16> = None;
                 let mut group_target: Option<String> = None;
-                let mut env_vars: Vec<String> = Vec::new();
+                let mut env_vars: Vec<(String, String)> = Vec::new();
                 let mut positional_args: Vec<String> = Vec::new();
                 let mut raw_cmd_after_dd: Option<Vec<String>> = None;
 
@@ -518,7 +507,18 @@ fn run_main() -> io::Result<()> {
                             'c' => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } break; }
                             'x' => { i += 1; if i < cmd_args.len() { init_width = cmd_args[i].parse::<u16>().ok(); } break; }
                             'y' => { i += 1; if i < cmd_args.len() { init_height = cmd_args[i].parse::<u16>().ok(); } break; }
-                            'e' => { i += 1; if i < cmd_args.len() { env_vars.push(cmd_args[i].to_string()); } break; }
+                            'e' => {
+                                i += 1;
+                                match crate::util::parse_new_session_e_value_token(
+                                    cmd_args.get(i).map(|s| s.as_str()),
+                                ) {
+                                    Ok(pair) => env_vars.push(pair),
+                                    Err(msg) => {
+                                        return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
+                                    }
+                                }
+                                break;
+                            }
                             'f' => { i += 1; break; /* skip value */ }
                             't' => { i += 1; if i < cmd_args.len() { group_target = Some(cmd_args[i].to_string()); } break; }
                             // Boolean flags
@@ -636,15 +636,11 @@ fn run_main() -> io::Result<()> {
                                                 // Apply -e environment variables to the claimed warm session
                                                 if !env_vars.is_empty() {
                                                     let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
-                                                    for ev in &env_vars {
-                                                        if let Some(eq_pos) = ev.find('=') {
-                                                            let k = &ev[..eq_pos];
-                                                            let v = &ev[eq_pos+1..];
-                                                            let _ = crate::session::send_auth_cmd(
-                                                                &warm_addr, &new_key,
-                                                                format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
-                                                            );
-                                                        }
+                                                    for (k, v) in &env_vars {
+                                                        let _ = crate::session::send_auth_cmd(
+                                                            &warm_addr, &new_key,
+                                                            format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
+                                                        );
                                                     }
                                                 }
                                                 true
@@ -700,9 +696,9 @@ fn run_main() -> io::Result<()> {
                     server_args.push(gt.clone());
                 }
                 // Pass -e environment variables to server
-                for ev in &env_vars {
+                for (k, v) in &env_vars {
                     server_args.push("-e".into());
-                    server_args.push(ev.clone());
+                    server_args.push(format!("{}={}", k, v));
                 }
                 // Pass raw command args (direct execution) if -- was used
                 if let Some(ref raw_args) = raw_cmd_args {

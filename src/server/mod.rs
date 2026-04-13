@@ -295,7 +295,7 @@ fn drain_plugin_req(
     }
 }
 
-pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<String>) -> io::Result<()> {
+pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
     let panic_session_name = session_name.clone();
@@ -411,13 +411,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     // Apply -e environment variables BEFORE pane spawn so the first pane
     // inherits them via apply_user_environment().
-    for ev in &env_vars {
-        if let Some(eq_pos) = ev.find('=') {
-            let k = ev[..eq_pos].to_string();
-            let v = ev[eq_pos+1..].to_string();
-            app.environment.insert(k, v);
-        }
-    }
+    crate::util::merge_session_env_into_app(&mut app, &env_vars);
 
     // Pre-spawn a warm pane BEFORE loading config: the shell (pwsh) starts
     // loading immediately and runs in parallel with config parsing / plugin
@@ -4069,3 +4063,7 @@ mod test_pane_title;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue202_switch_client.rs"]
 mod test_issue202;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_new_session_env.rs"]
+mod test_new_session_env;

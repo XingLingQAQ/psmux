@@ -1033,6 +1033,7 @@ match cmd {
         let mut print_stdout = false;
         let mut parts: Vec<&str> = Vec::new();
         let mut end_of_opts = false;
+        let mut duration_ms: Option<u64> = None;
         let mut i = 0;
         while i < args.len() {
             let a = args[i];
@@ -1045,7 +1046,13 @@ match cmd {
                 "--" => { end_of_opts = true; }
                 "-p" => { print_stdout = true; }
                 "-F" => { /* format mode */ }
-                "-I" | "-d" => { i += 1; }
+                "-d" => {
+                    if i + 1 < args.len() {
+                        duration_ms = args[i + 1].parse::<u64>().ok();
+                    }
+                    i += 1;
+                }
+                "-I" => { i += 1; }
                 _ if a.starts_with('-') => { parts.push(a); }
                 _ => parts.push(a),
             }
@@ -1060,7 +1067,7 @@ match cmd {
         // Pass target pane index for PANE_POS_OVERRIDE (#113).
         let target_pane_idx: Option<usize> = if !pane_is_id { target_pane } else { None };
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_stdout));
+        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_stdout, duration_ms));
         if let Ok(text) = rrx.recv() {
             if print_stdout {
                 if persistent {
@@ -1823,7 +1830,7 @@ match cmd {
             let false_cmd = positional.get(2).copied();
             let success = if format_mode {
                 let (rtx, rrx) = std::sync::mpsc::channel::<String>();
-                let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false));
+                let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false, None));
                 let expanded = rrx.recv().unwrap_or_default();
                 !expanded.is_empty() && expanded != "0"
             } else if condition == "true" || condition == "1" {
@@ -1855,7 +1862,7 @@ match cmd {
         let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None, false));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None, false, None));
             if let Ok(text) = rrx.recv() {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("list-sessions".to_string(), text));
@@ -2171,7 +2178,7 @@ fn dispatch_control_command(
             };
             let target_pane_idx = if pane_is_id { None } else { target_pane };
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode, None));
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }

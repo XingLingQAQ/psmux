@@ -383,7 +383,15 @@ fn run_main() -> io::Result<()> {
                                                     line.clear();
                                                     let _ = br.read_line(&mut line);
                                                 }
-                                                if !line.trim().is_empty() && line.trim() != "ERROR: Authentication required" {
+                                                if line.trim() == "ERROR: Authentication required" {
+                                                    // Auth failed, skip this session
+                                                    continue;
+                                                }
+                                                // When -F format is provided, the server already
+                                                // expanded it; use the result even if empty (tmux
+                                                // prints an empty line for unknown format vars).
+                                                // Only fall back to display_name when no -F was given.
+                                                if format_str.is_some() || !line.trim().is_empty() {
                                                     let output = line.trim_end().to_string();
                                                     // Apply -f filter if provided
                                                     if let Some(ref flt) = filter_str {
@@ -1519,6 +1527,7 @@ fn run_main() -> io::Result<()> {
                 let mut message: Vec<String> = Vec::new();
                 let mut target: Option<String> = None;
                 let mut print_to_stdout = false;
+                let mut duration_ms: Option<u64> = None;
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
@@ -1529,7 +1538,13 @@ fn run_main() -> io::Result<()> {
                             }
                         }
                         "-p" => { print_to_stdout = true; }
-                        "-d" | "-I" => { i += 1; } // consume -d <ms> and -I <input>, skip value
+                        "-d" => {
+                            if let Some(val) = cmd_args.get(i + 1) {
+                                duration_ms = val.parse::<u64>().ok();
+                            }
+                            i += 1;
+                        }
+                        "-I" => { i += 1; } // consume -I <input>, skip value
                         s => { message.push(s.to_string()); }
                     }
                     i += 1;
@@ -1538,6 +1553,7 @@ fn run_main() -> io::Result<()> {
                 let mut cmd = "display-message".to_string();
                 if let Some(t) = target { cmd.push_str(&format!(" -t {}", t)); }
                 if print_to_stdout { cmd.push_str(" -p"); }
+                if let Some(d) = duration_ms { cmd.push_str(&format!(" -d {}", d)); }
                 cmd.push_str(&format!(" {}", msg));
                 cmd.push('\n');
                 if print_to_stdout {

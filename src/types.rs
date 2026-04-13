@@ -593,8 +593,8 @@ pub struct AppState {
     pub last_mouse_x: u16,
     pub last_mouse_y: u16,
     /// Transient status-bar message from display-message (without -p).
-    /// Tuple of (message_text, timestamp_when_set).
-    pub status_message: Option<(String, std::time::Instant)>,
+    /// Tuple of (message_text, timestamp_when_set, optional per_message_duration_ms).
+    pub status_message: Option<(String, std::time::Instant, Option<u64>)>,
     /// Whether warm pane/server pre-spawning is enabled (default: on).
     /// When off, new sessions/windows always cold-spawn a fresh shell.
     pub warm_enabled: bool,
@@ -924,7 +924,7 @@ pub enum CtrlReq {
     ShowBuffer(mpsc::Sender<String>),
     ShowBufferAt(mpsc::Sender<String>, usize),
     DeleteBuffer,
-    DisplayMessage(mpsc::Sender<String>, String, Option<usize>, bool),  // resp, format, target_pane_idx, set_status_bar
+    DisplayMessage(mpsc::Sender<String>, String, Option<usize>, bool, Option<u64>),  // resp, format, target_pane_idx, set_status_bar, duration_override_ms
     LastWindow,
     LastPane,
     RotateWindow(bool),

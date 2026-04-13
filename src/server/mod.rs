@@ -53,9 +53,9 @@ fn serialize_overlay_json(app: &AppState) -> String {
     let mut out = crate::popup::serialize_popup_overlay(app);
 
     // Include status_message for display-message without -p (#110)
-    if let Some((ref msg, since)) = app.status_message {
+    if let Some((ref msg, since, per_msg_duration)) = app.status_message {
         let elapsed = since.elapsed().as_millis() as u64;
-        let display_time = app.display_time_ms as u64;
+        let display_time = per_msg_duration.unwrap_or(app.display_time_ms);
         if elapsed < display_time {
             out.push_str(",\"status_message\":\"");
             out.push_str(&json_escape_string(msg));
@@ -2265,7 +2265,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DeleteBuffer => {
                     if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
                 }
-                CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar) => {
+                CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar, duration_ms) => {
                     let result = if let Some(pane_idx) = target_pane_idx {
                         // -t targeting: evaluate format for the specific pane
                         // using PANE_POS_OVERRIDE so #{pane_active} reflects
@@ -2275,7 +2275,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         expand_format(&fmt, &app)
                     };
                     if set_status_bar {
-                        app.status_message = Some((result.clone(), Instant::now()));
+                        app.status_message = Some((result.clone(), Instant::now(), duration_ms));
                         state_dirty = true;
                     }
                     let _ = resp.send(result);
@@ -2713,11 +2713,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 hook_event = Some("window-linked");
                             }
                             Err(_e) => {
-                                app.status_message = Some(("link-window: failed to create linked window".to_string(), std::time::Instant::now()));
+                                app.status_message = Some(("link-window: failed to create linked window".to_string(), std::time::Instant::now(), None));
                             }
                         }
                     } else {
-                        app.status_message = Some(("link-window: source window not found".to_string(), std::time::Instant::now()));
+                        app.status_message = Some(("link-window: source window not found".to_string(), std::time::Instant::now(), None));
                     }
                     state_dirty = true;
                 }
@@ -2985,18 +2985,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         Some(_) => {
                             // Target is the same as current session
-                            app.status_message = Some(("switch-client: already on that session".to_string(), std::time::Instant::now()));
+                            app.status_message = Some(("switch-client: already on that session".to_string(), std::time::Instant::now(), None));
                             state_dirty = true;
                         }
                         None => {
                             if flag == 't' && !target.is_empty() {
-                                app.status_message = Some((format!("switch-client: session not found: {}", target), std::time::Instant::now()));
+                                app.status_message = Some((format!("switch-client: session not found: {}", target), std::time::Instant::now(), None));
                             } else if flag == 'l' {
-                                app.status_message = Some(("switch-client: no last session".to_string(), std::time::Instant::now()));
+                                app.status_message = Some(("switch-client: no last session".to_string(), std::time::Instant::now(), None));
                             } else if all_sessions.len() <= 1 {
-                                app.status_message = Some(("switch-client: only one session available".to_string(), std::time::Instant::now()));
+                                app.status_message = Some(("switch-client: only one session available".to_string(), std::time::Instant::now(), None));
                             } else {
-                                app.status_message = Some(("switch-client: no target session".to_string(), std::time::Instant::now()));
+                                app.status_message = Some(("switch-client: no target session".to_string(), std::time::Instant::now(), None));
                             }
                             state_dirty = true;
                         }
@@ -3011,12 +3011,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(cmds);
                 }
                 CtrlReq::LockClient => {
-                    app.status_message = Some(("lock: not available on Windows".to_string(), std::time::Instant::now()));
+                    app.status_message = Some(("lock: not available on Windows".to_string(), std::time::Instant::now(), None));
                     state_dirty = true;
                 }
                 CtrlReq::RefreshClient => { state_dirty = true; meta_dirty = true; }
                 CtrlReq::SuspendClient => {
-                    app.status_message = Some(("suspend: not available on Windows".to_string(), std::time::Instant::now()));
+                    app.status_message = Some(("suspend: not available on Windows".to_string(), std::time::Instant::now(), None));
                     state_dirty = true;
                 }
                 CtrlReq::CopyModePageUp => {
@@ -3465,7 +3465,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::StatusMessage(msg) => {
-                    app.status_message = Some((msg, std::time::Instant::now()));
+                    app.status_message = Some((msg, std::time::Instant::now(), None));
                     state_dirty = true;
                 }
                 CtrlReq::ClearPromptHistory => {

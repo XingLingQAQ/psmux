@@ -177,8 +177,8 @@ if ("$keys" -notmatch "prefix.*z.*display-message") {
     Write-Fail "unbind z: z still in list-keys"
 }
 
-Write-Test "unbind-key F12"
-Psmux unbind-key -t bindtest F12 2>$null | Out-Null
+Write-Test "unbind-key -T root F12"
+Psmux unbind-key -t bindtest -T root F12 2>$null | Out-Null
 Start-Sleep -Milliseconds 500
 $keys = Psmux list-keys -t bindtest | Out-String
 if ("$keys" -notmatch "root.*F12") {

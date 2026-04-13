@@ -520,3 +520,91 @@ fn list_sessions_parses_both_f_and_f_flags() {
     assert_eq!(format_str, Some("#{session_name}".to_string()));
     assert_eq!(filter_str, Some("mysession".to_string()));
 }
+
+// ========================================================================
+// display-message -d: per-message duration override actually works
+// ========================================================================
+
+#[test]
+fn display_message_d_sets_duration_on_status_message() {
+    // Execute display-message with -d via the commands module
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message -d 5000 hello");
+    // The status_message should be set with the duration override
+    assert!(app.status_message.is_some(), "status_message should be set");
+    let (msg, _, duration) = app.status_message.as_ref().unwrap();
+    assert!(msg.contains("hello"), "message should contain 'hello', got: {}", msg);
+    assert_eq!(*duration, Some(5000), "duration override should be 5000ms");
+}
+
+#[test]
+fn display_message_without_d_has_no_duration_override() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message hello_no_d");
+    assert!(app.status_message.is_some());
+    let (msg, _, duration) = app.status_message.as_ref().unwrap();
+    assert!(msg.contains("hello_no_d"), "got: {}", msg);
+    assert_eq!(*duration, None, "no -d flag means no duration override");
+}
+
+#[test]
+fn display_message_d_zero_sets_zero_duration() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message -d 0 zero_test");
+    assert!(app.status_message.is_some());
+    let (_, _, duration) = app.status_message.as_ref().unwrap();
+    assert_eq!(*duration, Some(0), "duration of 0 should be passed through");
+}
+
+#[test]
+fn display_message_d_invalid_value_uses_none() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message -d notanumber test_invalid");
+    assert!(app.status_message.is_some());
+    let (_, _, duration) = app.status_message.as_ref().unwrap();
+    assert_eq!(*duration, None, "invalid -d value should result in None duration");
+}
+
+#[test]
+fn status_message_expiry_uses_per_message_duration() {
+    // Verify the status_message stores per-message duration correctly
+    let mut app = mock_app_with_window();
+    // Set a long duration: the tuple should contain the override
+    app.status_message = Some(("long_msg".to_string(), std::time::Instant::now(), Some(60000)));
+    let (_, _, dur) = app.status_message.as_ref().unwrap();
+    assert_eq!(*dur, Some(60000), "long duration should be stored");
+
+    // Set a very short duration
+    app.status_message = Some(("short_msg".to_string(), std::time::Instant::now(), Some(1)));
+    let (_, _, dur) = app.status_message.as_ref().unwrap();
+    assert_eq!(*dur, Some(1), "short duration should be stored");
+
+    // Verify unwrap_or logic: None should fall back to global
+    app.display_time_ms = 750;
+    app.status_message = Some(("no_override".to_string(), std::time::Instant::now(), None));
+    let (_, _, dur) = app.status_message.as_ref().unwrap();
+    let effective = dur.unwrap_or(app.display_time_ms);
+    assert_eq!(effective, 750, "None duration should use global display_time_ms");
+
+    // Verify with explicit override
+    app.status_message = Some(("with_override".to_string(), std::time::Instant::now(), Some(3000)));
+    let (_, _, dur) = app.status_message.as_ref().unwrap();
+    let effective = dur.unwrap_or(app.display_time_ms);
+    assert_eq!(effective, 3000, "explicit duration should override global");
+}
+
+#[test]
+fn status_message_expiry_without_override_uses_global() {
+    let mut app = mock_app_with_window();
+    app.display_time_ms = 750;
+    // Set message without duration override
+    app.status_message = Some(("global_test".to_string(), std::time::Instant::now(), None));
+    let (msg, _, dur) = app.status_message.as_ref().unwrap();
+    assert_eq!(msg, "global_test");
+    let effective = dur.unwrap_or(app.display_time_ms);
+    assert_eq!(effective, 750, "without -d, should use global display_time_ms (750)");
+}

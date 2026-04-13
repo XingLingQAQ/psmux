@@ -1311,14 +1311,36 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = send_control_to_port(port, &format!("{}\n", effective_cmd), &app.session_key);
             } else {
                 // Local: expand format string and show as status message
-                let msg = if parts.len() <= 1 {
+                // Parse flags from parts (same as CLI/server):
+                //   -d <ms>  per-message display duration
+                //   -I <val> consumed (not implemented locally)
+                //   -t <val> target (ignored locally)
+                //   -p       print to stdout (ignored locally, we show on status bar)
+                let mut msg_parts: Vec<&str> = Vec::new();
+                let mut duration_ms: Option<u64> = None;
+                let mut idx = 1;
+                while idx < parts.len() {
+                    match parts[idx] {
+                        "-d" => {
+                            if idx + 1 < parts.len() {
+                                duration_ms = parts[idx + 1].parse::<u64>().ok();
+                            }
+                            idx += 1;
+                        }
+                        "-I" | "-t" => { idx += 1; }
+                        "-p" => {}
+                        other => { msg_parts.push(other); }
+                    }
+                    idx += 1;
+                }
+                let raw = msg_parts.join(" ");
+                let msg = if raw.is_empty() {
                     DISPLAY_MESSAGE_DEFAULT_FMT.to_string()
                 } else {
-                    let raw = parts[1..].join(" ");
                     raw.trim_matches('"').trim_matches('\'').to_string()
                 };
                 let expanded = crate::format::expand_format(&msg, app);
-                app.status_message = Some((expanded, Instant::now()));
+                app.status_message = Some((expanded, Instant::now(), duration_ms));
             }
         }
         "show-messages" | "showmsgs" => {
@@ -1528,7 +1550,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         fire_hooks(app, "window-linked");
                     }
                 } else {
-                    app.status_message = Some(("link-window: source window not found".to_string(), Instant::now()));
+                    app.status_message = Some(("link-window: source window not found".to_string(), Instant::now(), None));
                 }
             }
         }
@@ -1617,7 +1639,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                             match crate::util::parse_new_session_e_value_token(parts.get(i).copied()) {
                                 Ok(p) => env_vars.push(p),
                                 Err(e) => {
-                                    app.status_message = Some((format!("psmux: {}", e), Instant::now()));
+                                    app.status_message = Some((format!("psmux: {}", e), Instant::now(), None));
                                     return Ok(());
                                 }
                             }
@@ -1653,7 +1675,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                             &addr.parse().unwrap(),
                             std::time::Duration::from_millis(100),
                         ).is_ok() {
-                            app.status_message = Some((format!("session '{}' already exists", name), Instant::now()));
+                            app.status_message = Some((format!("session '{}' already exists", name), Instant::now(), None));
                             return Ok(());
                         }
                     }
@@ -1774,32 +1796,32 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         let _ = send_control_to_port(port, &switch_cmd, &app.session_key);
                     }
                 }
-                app.status_message = Some((format!("created session '{}'", name), Instant::now()));
+                app.status_message = Some((format!("created session '{}'", name), Instant::now(), None));
             } else {
-                app.status_message = Some((format!("failed to create session '{}'", name), Instant::now()));
+                app.status_message = Some((format!("failed to create session '{}'", name), Instant::now(), None));
             }
         }
         "lock-client" | "lockc" | "lock-server" | "lock" | "lock-session" | "locks" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "lock-server\n", &app.session_key);
             }
-            app.status_message = Some(("lock: not available on Windows".to_string(), Instant::now()));
+            app.status_message = Some(("lock: not available on Windows".to_string(), Instant::now(), None));
         }
         "refresh-client" | "refresh" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "refresh-client\n", &app.session_key);
             }
             // Trigger redraw in all modes
-            app.status_message = Some(("client refreshed".to_string(), Instant::now()));
+            app.status_message = Some(("client refreshed".to_string(), Instant::now(), None));
         }
         "suspend-client" | "suspendc" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "suspend-client\n", &app.session_key);
             }
-            app.status_message = Some(("suspend: not available on Windows".to_string(), Instant::now()));
+            app.status_message = Some(("suspend: not available on Windows".to_string(), Instant::now(), None));
         }
         "choose-client" => {
-            app.status_message = Some(("choose-client: single-client model (you are the only client)".to_string(), Instant::now()));
+            app.status_message = Some(("choose-client: single-client model (you are the only client)".to_string(), Instant::now(), None));
         }
         "customize-mode" => {
             // tmux 3.2+ customize-mode: interactive options editor
@@ -1834,6 +1856,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 app.status_message = Some((
                     "usage: run-shell [-b] shell-command".to_string(),
                     Instant::now(),
+                    None,
                 ));
             } else {
                 // Expand ~ to home directory + XDG fallback for plugin paths
@@ -1891,6 +1914,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     app.status_message = Some((
                         format!("running: {}", shell_cmd_display),
                         Instant::now(),
+                        None,
                     ));
                 }
             }

@@ -1923,7 +1923,7 @@ fn run_shell_no_args_shows_usage() {
     let _ = execute_command_string(&mut app, "run-shell");
     // Should show usage on status bar, not enter popup
     assert!(!matches!(app.mode, Mode::PopupMode { .. }), "run-shell with no args should not show popup");
-    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    let msg = app.status_message.as_ref().map(|(m, ..)| m.as_str()).unwrap_or("");
     assert!(msg.contains("usage"), "expected usage message on status bar, got: {}", msg);
 }
 
@@ -1932,7 +1932,7 @@ fn run_alias_no_args_shows_usage() {
     let mut app = mock_app();
     let _ = execute_command_string(&mut app, "run");
     assert!(!matches!(app.mode, Mode::PopupMode { .. }));
-    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    let msg = app.status_message.as_ref().map(|(m, ..)| m.as_str()).unwrap_or("");
     assert!(msg.contains("usage"), "expected usage message for 'run' alias, got: {}", msg);
 }
 
@@ -1942,7 +1942,7 @@ fn display_message_no_args_uses_default_format() {
     // Ensure control_port is None so the local handler runs
     app.control_port = None;
     let _ = execute_command_string(&mut app, "display-message");
-    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    let msg = app.status_message.as_ref().map(|(m, ..)| m.as_str()).unwrap_or("");
     // Default format should contain session name
     assert!(!msg.is_empty(), "display-message with no args should produce a non-empty status message");
     assert!(msg.contains("test_session"), "default format should expand session_name, got: {}", msg);
@@ -1953,7 +1953,7 @@ fn display_alias_no_args_uses_default_format() {
     let mut app = mock_app();
     app.control_port = None;
     let _ = execute_command_string(&mut app, "display");
-    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    let msg = app.status_message.as_ref().map(|(m, ..)| m.as_str()).unwrap_or("");
     assert!(!msg.is_empty(), "display alias with no args should produce a non-empty status message");
 }
 
@@ -1962,7 +1962,7 @@ fn display_message_with_args_still_works() {
     let mut app = mock_app();
     app.control_port = None;
     let _ = execute_command_string(&mut app, "display-message \"hello world\"");
-    let msg = app.status_message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    let msg = app.status_message.as_ref().map(|(m, ..)| m.as_str()).unwrap_or("");
     assert!(msg.contains("hello world"), "display-message with explicit text should show it, got: {}", msg);
 }
 

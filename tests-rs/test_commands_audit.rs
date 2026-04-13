@@ -56,7 +56,7 @@ fn extract_popup(app: &AppState) -> (&str, &str) {
 /// Extract status message text, panicking if not set.
 fn extract_status_message(app: &AppState) -> &str {
     match &app.status_message {
-        Some((msg, _)) => msg.as_str(),
+        Some((msg, ..)) => msg.as_str(),
         None => panic!("expected status_message to be set"),
     }
 }

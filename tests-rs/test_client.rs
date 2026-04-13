@@ -178,3 +178,183 @@ fn status_format_json_roundtrip_preserves_styles() {
     assert_eq!(spans2[0].style.fg, Some(Color::Green));
     assert_eq!(spans2[0].style.bg, Some(Color::Blue));
 }
+
+// ── Issue #211: pwsh-mouse-selection helpers ──
+
+/// Helper to create a CellRunJson for tests.
+#[cfg(windows)]
+fn make_run(text: &str, width: u16) -> crate::layout::CellRunJson {
+    crate::layout::CellRunJson {
+        text: text.to_string(),
+        fg: String::new(),
+        bg: String::new(),
+        flags: 0,
+        width,
+    }
+}
+
+/// Helper to create a RowRunsJson for tests.
+#[cfg(windows)]
+fn make_row(runs: Vec<crate::layout::CellRunJson>) -> crate::layout::RowRunsJson {
+    crate::layout::RowRunsJson { runs }
+}
+
+#[cfg(windows)]
+#[test]
+fn normalize_selection_reading_order() {
+    // Start before end: no swap
+    let (r0, c0, r1, c1) = normalize_selection((2, 1), (5, 3), false);
+    assert_eq!((r0, c0, r1, c1), (1, 2, 3, 5));
+
+    // Start after end: swapped
+    let (r0, c0, r1, c1) = normalize_selection((5, 3), (2, 1), false);
+    assert_eq!((r0, c0, r1, c1), (1, 2, 3, 5));
+}
+
+#[cfg(windows)]
+#[test]
+fn normalize_selection_block_mode() {
+    // Block mode: min/max of each axis independently
+    let (r0, c0, r1, c1) = normalize_selection((8, 5), (3, 2), true);
+    assert_eq!((r0, c0, r1, c1), (2, 3, 5, 8));
+}
+
+#[cfg(windows)]
+#[test]
+fn row_chars_basic() {
+    let runs = vec![
+        make_run("AB", 2),
+        make_run("C", 1),
+        make_run(" ", 3),
+    ];
+    let chars = row_chars(&runs, 6);
+    assert_eq!(chars, vec!['A', 'B', 'C', ' ', ' ', ' ']);
+}
+
+#[cfg(windows)]
+#[test]
+fn row_chars_width_clamp() {
+    let runs = vec![make_run("ABCDE", 5)];
+    let chars = row_chars(&runs, 3);
+    assert_eq!(chars, vec!['A', 'B', 'C']);
+}
+
+#[cfg(windows)]
+#[test]
+fn is_word_char_basics() {
+    assert!(is_word_char('a'));
+    assert!(is_word_char('Z'));
+    assert!(is_word_char('0'));
+    assert!(is_word_char('_'));
+    assert!(!is_word_char(' '));
+    assert!(!is_word_char('-'));
+    assert!(!is_word_char('.'));
+}
+
+#[cfg(windows)]
+#[test]
+fn char_at_col_basics() {
+    let runs = vec![
+        make_run("He", 2),
+        make_run("llo", 3),
+    ];
+    assert_eq!(char_at_col(&runs, 0), 'H');
+    assert_eq!(char_at_col(&runs, 1), 'e');
+    assert_eq!(char_at_col(&runs, 2), 'l');
+    assert_eq!(char_at_col(&runs, 3), 'l');
+    assert_eq!(char_at_col(&runs, 4), 'o');
+    // Out of range returns space
+    assert_eq!(char_at_col(&runs, 10), ' ');
+}
+
+#[cfg(windows)]
+#[test]
+fn extract_selection_text_block_mode() {
+    use ratatui::layout::Rect as Rect;
+    // A single leaf pane 10 cols wide, 3 rows
+    let layout = crate::layout::LayoutJson::Leaf {
+        id: 0,
+        rows: 3,
+        cols: 10,
+        cursor_row: 0,
+        cursor_col: 0,
+        alternate_screen: false,
+        hide_cursor: false,
+        cursor_shape: 0,
+        active: true,
+        copy_mode: false,
+        scroll_offset: 0,
+        sel_start_row: None,
+        sel_start_col: None,
+        sel_end_row: None,
+        sel_end_col: None,
+        sel_mode: None,
+        copy_cursor_row: None,
+        copy_cursor_col: None,
+        content: Vec::new(),
+        rows_v2: vec![
+            make_row(vec![make_run("0123456789", 10)]),
+            make_row(vec![make_run("abcdefghij", 10)]),
+            make_row(vec![make_run("ABCDEFGHIJ", 10)]),
+        ],
+        title: None,
+    };
+
+    // Block select cols 2..5, rows 0..2
+    let text = extract_selection_text(&layout, 10, 3, (2, 0), (5, 2), true);
+    assert_eq!(text, "2345\ncdef\nCDEF");
+
+    // Non-block (reading order) same coordinates should give full intermediate rows
+    let text_normal = extract_selection_text(&layout, 10, 3, (2, 0), (5, 2), false);
+    assert_eq!(text_normal, "23456789\nabcdefghij\nABCDEF");
+}
+
+#[cfg(windows)]
+#[test]
+fn word_bounds_at_finds_word() {
+    let layout = crate::layout::LayoutJson::Leaf {
+        id: 0,
+        rows: 1,
+        cols: 20,
+        cursor_row: 0,
+        cursor_col: 0,
+        alternate_screen: false,
+        hide_cursor: false,
+        cursor_shape: 0,
+        active: true,
+        copy_mode: false,
+        scroll_offset: 0,
+        sel_start_row: None,
+        sel_start_col: None,
+        sel_end_row: None,
+        sel_end_col: None,
+        sel_mode: None,
+        copy_cursor_row: None,
+        copy_cursor_col: None,
+        content: Vec::new(),
+        rows_v2: vec![
+            make_row(vec![make_run("hello world_test   ", 19), make_run(" ", 1)]),
+        ],
+        title: None,
+    };
+
+    let pane_rect = ratatui::layout::Rect { x: 0, y: 0, width: 20, height: 1 };
+
+    // Click on 'h' (col 0): word is "hello" -> (0, 4)
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 0, 0), Some((0, 4)));
+    // Click on 'l' (col 3): still "hello" -> (0, 4)
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 3, 0), Some((0, 4)));
+    // Click on space (col 5): no word
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 5, 0), None);
+    // Click on 'w' (col 6): "world_test" -> (6, 15)
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 6, 0), Some((6, 15)));
+    // Click on '_' (col 11): still "world_test" since _ is a word char -> (6, 15)
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 11, 0), Some((6, 15)));
+}
+
+#[cfg(windows)]
+#[test]
+fn pwsh_mouse_selection_option_default_off() {
+    let state = crate::types::AppState::new("test-session".to_string());
+    assert!(!state.pwsh_mouse_selection, "pwsh_mouse_selection should default to off");
+}

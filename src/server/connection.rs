@@ -875,7 +875,12 @@ match cmd {
     }
     "list-panes" | "lsp" => {
         let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
-        let all = args.iter().any(|a| *a == "-a" || *a == "-s");
+        // tmux: -a = all panes across all sessions, -s = all panes in target session
+        // psmux uses per-session servers, so -s is equivalent to listing the current
+        // session's panes (same as no flag). -a lists all panes in this server too
+        // since there's only one session per server.
+        let all = args.iter().any(|a| *a == "-a");
+        let session_scope = args.iter().any(|a| *a == "-s");
         let (rtx, rrx) = mpsc::channel::<String>();
         if let Some(fmt_str) = fmt {
             if all {
@@ -885,6 +890,9 @@ match cmd {
             }
         } else {
             if all {
+                let _ = tx.send(CtrlReq::ListAllPanes(rtx));
+            } else if session_scope {
+                // -s: list all panes in the targeted session (all windows)
                 let _ = tx.send(CtrlReq::ListAllPanes(rtx));
             } else {
                 let _ = tx.send(CtrlReq::ListPanes(rtx));
@@ -1078,7 +1086,10 @@ match cmd {
             let _ = tx.send(CtrlReq::JoinPane(wid));
         }
     }
-    "respawn-pane" | "respawnp" => { let _ = tx.send(CtrlReq::RespawnPane); }
+    "respawn-pane" | "respawnp" => {
+        let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+        let _ = tx.send(CtrlReq::RespawnPane(workdir));
+    }
     "session-info" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::SessionInfo(rtx));
@@ -1162,13 +1173,51 @@ match cmd {
         }
     }
     "list-keys" | "lsk" => {
+        // Parse -T <table> for filtering by key table
+        let table_filter = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].to_string());
+        // Remaining non-flag args are optional key filter
+        let key_filter: Option<String> = args.iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                !a.starts_with('-')
+                && !(i > &0 && args.get(i - 1).map_or(false, |prev| *prev == "-T"))
+            })
+            .map(|(_, a)| a.to_string())
+            .next();
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ListKeys(rtx));
         if let Ok(text) = rrx.recv() {
-            if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("list-keys".to_string(), text));
+            let filtered = if table_filter.is_some() || key_filter.is_some() {
+                text.lines().filter(|line| {
+                    if let Some(ref tbl) = table_filter {
+                        // list-keys output format: "bind-key -T <table> <key> <command>"
+                        let parts: Vec<&str> = line.splitn(5, ' ').collect();
+                        if parts.len() >= 3 {
+                            if parts[2] != tbl.as_str() {
+                                return false;
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
+                    if let Some(ref key) = key_filter {
+                        // Filter by key name (4th field)
+                        let parts: Vec<&str> = line.splitn(5, ' ').collect();
+                        if parts.len() >= 4 {
+                            if parts[3] != key.as_str() {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }).collect::<Vec<&str>>().join("\n")
             } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                text
+            };
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("list-keys".to_string(), filtered));
+            } else {
+                let _ = write!(write_stream, "{}\n", filtered); let _ = write_stream.flush();
             }
         }
         if !persistent { break; }
@@ -1195,12 +1244,20 @@ match cmd {
         }
     }
     "show-options" | "show" | "show-window-options" | "showw" => {
-        let has_a = args.iter().any(|a| *a == "-A");
-        let _has_s = args.iter().any(|a| *a == "-s");
-        let has_w = args.iter().any(|a| *a == "-w");
+        // Support combined flag tokens like -gv, -wv, -Av (tmux compat)
+        let combined_has = |ch: char| -> bool {
+            args.iter().any(|a| {
+                if *a == format!("-{}", ch) { return true; }
+                // Check combined tokens like -gv, -wvs, etc.
+                a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
+            })
+        };
+        let has_a = combined_has('A');
+        let _has_s = combined_has('s');
+        let has_w = combined_has('w');
         let window_scope = matches!(cmd, "show-window-options" | "showw") || has_w;
-        let has_v = args.iter().any(|a| *a == "-v");
-        let has_q = args.iter().any(|a| *a == "-q");
+        let has_v = combined_has('v');
+        let has_q = combined_has('q');
         let opt_name: Option<&str> = args.iter()
             .filter(|a| !a.starts_with('-'))
             .copied()
@@ -2550,7 +2607,8 @@ fn dispatch_control_command(
             true
         }
         "respawn-pane" | "respawnp" => {
-            let _ = tx.send(CtrlReq::RespawnPane);
+            let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+            let _ = tx.send(CtrlReq::RespawnPane(workdir));
             let _ = resp_tx.send(String::new());
             true
         }

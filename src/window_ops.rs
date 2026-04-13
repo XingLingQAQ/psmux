@@ -1197,7 +1197,7 @@ pub fn break_pane_to_window(app: &mut AppState) {
     }
 }
 
-pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>) -> io::Result<()> {
+pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>) -> io::Result<()> {
     // Reuse provided PTY system or create one as fallback
     let owned_pty;
     let pty_system: &dyn portable_pty::PtySystem = if let Some(ps) = pty_system_ref {
@@ -1223,6 +1223,14 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     };
     set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     crate::pane::apply_user_environment(&mut shell_cmd, &app.environment);
+    if let Some(dir) = workdir {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_default();
+        let expanded = dir.replace("~/", &format!("{}/", home))
+            .replace("~\\", &format!("{}\\", home));
+        shell_cmd.cwd(std::path::Path::new(&expanded));
+    }
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – required for ConPTY.
     drop(pair.slave);

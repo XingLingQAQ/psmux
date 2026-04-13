@@ -22,7 +22,6 @@ mod format;
 mod help;
 mod server;
 mod client;
-mod app;
 mod ssh_input;
 mod debug_log;
 mod control;
@@ -313,6 +312,30 @@ fn run_main() -> io::Result<()> {
             return Ok(());
         }
         "ls" | "list-sessions" => {
+                // Parse -F (format) and -f (filter) flags
+                let mut format_str: Option<String> = None;
+                let mut filter_str: Option<String> = None;
+                {
+                    let mut i = 1;
+                    while i < cmd_args.len() {
+                        match cmd_args[i].as_str() {
+                            "-F" => {
+                                if let Some(f) = cmd_args.get(i + 1) {
+                                    format_str = Some(f.to_string());
+                                    i += 1;
+                                }
+                            }
+                            "-f" => {
+                                if let Some(f) = cmd_args.get(i + 1) {
+                                    filter_str = Some(f.to_string());
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
                 let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                 let dir = format!("{}\\.psmux", home);
                 // Compute namespace prefix for -L filtering
@@ -345,7 +368,13 @@ fn run_main() -> io::Result<()> {
                                                 if let Ok(key) = std::fs::read_to_string(&key_path) {
                                                     let _ = std::io::Write::write_all(&mut s, format!("AUTH {}\n", key.trim()).as_bytes());
                                                 }
-                                                let _ = std::io::Write::write_all(&mut s, b"session-info\n");
+                                                // Use -F format if provided, otherwise session-info
+                                                let query = if let Some(ref fmt) = format_str {
+                                                    format!("list-sessions -F \"{}\"\n", fmt.replace('"', "\\\""))
+                                                } else {
+                                                    "session-info\n".to_string()
+                                                };
+                                                let _ = std::io::Write::write_all(&mut s, query.as_bytes());
                                                 let mut br = std::io::BufReader::new(s);
                                                 let mut line = String::new();
                                                 // Skip "OK" response from AUTH
@@ -354,8 +383,17 @@ fn run_main() -> io::Result<()> {
                                                     line.clear();
                                                     let _ = br.read_line(&mut line);
                                                 }
-                                                if !line.trim().is_empty() && line.trim() != "ERROR: Authentication required" { 
-                                                    println!("{}", line.trim_end()); 
+                                                if !line.trim().is_empty() && line.trim() != "ERROR: Authentication required" {
+                                                    let output = line.trim_end().to_string();
+                                                    // Apply -f filter if provided
+                                                    if let Some(ref flt) = filter_str {
+                                                        // Simple filter: check if the output contains the filter string
+                                                        // tmux uses format expansion for -f, but we do substring match
+                                                        if !output.contains(flt.as_str()) {
+                                                            continue;
+                                                        }
+                                                    }
+                                                    println!("{}", output);
                                                 } else {
                                                     // Strip namespace prefix for display (e.g. "foo__dev" -> "dev")
                                                     let display_name = if let Some(ref pfx) = ns_prefix {
@@ -363,6 +401,11 @@ fn run_main() -> io::Result<()> {
                                                     } else {
                                                         base
                                                     };
+                                                    if let Some(ref flt) = filter_str {
+                                                        if !display_name.contains(flt.as_str()) {
+                                                            continue;
+                                                        }
+                                                    }
                                                     println!("{}", display_name); 
                                                 }
                                             } else {
@@ -976,13 +1019,15 @@ fn run_main() -> io::Result<()> {
             // send-keys - Send keys to a pane (critical for scripting)
             "send-keys" | "send" | "send-key" => {
                 let mut literal = false;
+                let mut has_x = false;
                 let mut keys: Vec<String> = Vec::new();
-                // Getopt-style parsing: -t consumes next arg, -l/-R are boolean
+                // Getopt-style parsing: -t consumes next arg, -l/-R/-X are flags
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
                         "-l" => { literal = true; }
                         "-R" => { keys.push("__RESET__".to_string()); }
+                        "-X" => { has_x = true; }
                         "-t" => { i += 1; } // consume target value (already handled globally)
                         "-N" => { i += 1; } // repeat count, consume value
                         _ => { keys.push(cmd_args[i].to_string()); }
@@ -991,6 +1036,7 @@ fn run_main() -> io::Result<()> {
                 }
                 let mut cmd = "send-keys".to_string();
                 if literal { cmd.push_str(" -l"); }
+                if has_x { cmd.push_str(" -X"); }
                 // Quote arguments that contain spaces to preserve them
                 for k in keys { 
                     if k.contains(' ') || k.contains('\t') || k.contains('"') {
@@ -1483,6 +1529,7 @@ fn run_main() -> io::Result<()> {
                             }
                         }
                         "-p" => { print_to_stdout = true; }
+                        "-d" | "-I" => { i += 1; } // consume -d <ms> and -I <input>, skip value
                         s => { message.push(s.to_string()); }
                     }
                     i += 1;
@@ -1539,13 +1586,19 @@ fn run_main() -> io::Result<()> {
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
                         "-k" => { cmd.push_str(" -k"); }
+                        "-c" => {
+                            if let Some(d) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" -c {}", d));
+                                i += 1;
+                            }
+                        }
                         "-t" => {
                             if let Some(t) = cmd_args.get(i + 1) {
                                 cmd.push_str(&format!(" -t {}", t));
                                 i += 1;
                             }
                         }
-                        _ => {}
+                        _ => { cmd.push_str(&format!(" {}", cmd_args[i])); }
                     }
                     i += 1;
                 }
@@ -1702,7 +1755,23 @@ fn run_main() -> io::Result<()> {
             }
             // list-keys - List all key bindings
             "list-keys" | "lsk" => {
-                let resp = send_control_with_response("list-keys\n".to_string())?;
+                let mut cmd = "list-keys".to_string();
+                let mut i = 1;
+                while i < cmd_args.len() {
+                    match cmd_args[i].as_str() {
+                        "-T" => {
+                            if let Some(t) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" -T {}", t));
+                                i += 1;
+                            }
+                        }
+                        "-t" => { i += 1; } // target handled globally
+                        _ => { cmd.push_str(&format!(" {}", cmd_args[i])); }
+                    }
+                    i += 1;
+                }
+                cmd.push('\n');
+                let resp = send_control_with_response(cmd)?;
                 print!("{}", resp);
                 return Ok(());
             }
@@ -2457,9 +2526,26 @@ fn run_main() -> io::Result<()> {
                 // No-op on Windows — no terminal locking concept
                 return Ok(());
             }
-            // resize-window - Resize window (no-op on Windows)
+            // resize-window - Resize window
             "resize-window" | "resizew" => {
-                // On Windows, window size is controlled by the terminal emulator
+                let mut cmd = "resize-window".to_string();
+                let mut i = 1;
+                while i < cmd_args.len() {
+                    match cmd_args[i].as_str() {
+                        "-x" | "-y" => {
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" {} {}", cmd_args[i], v));
+                                i += 1;
+                            }
+                        }
+                        "-t" => { i += 1; } // target handled globally
+                        "-A" | "-D" | "-U" => { cmd.push_str(&format!(" {}", cmd_args[i])); }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                cmd.push('\n');
+                send_control(cmd)?;
                 return Ok(());
             }
             // customize-mode - tmux 3.2+ customize mode

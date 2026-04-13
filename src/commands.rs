@@ -1094,7 +1094,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "respawn-pane\n", &app.session_key);
             } else {
-                crate::window_ops::respawn_active_pane(app, None)?;
+                crate::window_ops::respawn_active_pane(app, None, None)?;
             }
         }
         "toggle-sync" => {
@@ -1944,3 +1944,7 @@ mod tests_issue200_new_session;
 #[cfg(test)]
 #[path = "../tests-rs/test_run_shell_resolve.rs"]
 mod tests_run_shell_resolve;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue209_tmux_compat.rs"]
+mod tests_issue209_tmux_compat;

@@ -295,7 +295,7 @@ fn drain_plugin_req(
     }
 }
 
-pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>) -> io::Result<()> {
+pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<String>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
     let panic_session_name = session_name.clone();
@@ -407,6 +407,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // uses the correct terminal size.
     if let Some((w, h)) = init_size {
         app.last_window_area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
+    }
+
+    // Apply -e environment variables BEFORE pane spawn so the first pane
+    // inherits them via apply_user_environment().
+    for ev in &env_vars {
+        if let Some(eq_pos) = ev.find('=') {
+            let k = ev[..eq_pos].to_string();
+            let v = ev[eq_pos+1..].to_string();
+            app.environment.insert(k, v);
+        }
     }
 
     // Pre-spawn a warm pane BEFORE loading config: the shell (pwsh) starts

@@ -71,6 +71,37 @@ pub fn resolve_run_shell() -> (String, Vec<String>) {
     }
 }
 
+/// Resolve a shell binary name to an available executable path.
+/// Handles fallback between `pwsh` and `powershell` when one is not installed.
+/// For `cmd`/`cmd.exe` or already-resolved paths, returns the input unchanged.
+#[cfg(windows)]
+fn resolve_shell_binary(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let is_pwsh = lower == "pwsh" || lower == "pwsh.exe";
+    let is_powershell = lower == "powershell" || lower == "powershell.exe";
+
+    if is_pwsh {
+        // Requested pwsh: verify it exists, fall back to powershell
+        if which::which("pwsh").is_ok() {
+            return name.to_string();
+        }
+        if let Ok(p) = which::which("powershell") {
+            return p.to_string_lossy().into_owned();
+        }
+    } else if is_powershell {
+        // Requested powershell: verify it exists, fall back to pwsh
+        if which::which("powershell").is_ok() {
+            return name.to_string();
+        }
+        if let Ok(p) = which::which("pwsh") {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+
+    // cmd, cmd.exe, or already a full path: use as-is
+    name.to_string()
+}
+
 /// Build a `std::process::Command` for a run-shell invocation.
 ///
 /// Avoids double-wrapping when the command already starts with a shell binary
@@ -83,13 +114,17 @@ pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
 
         // Case 1: Command already starts with a shell binary (pwsh, powershell, cmd).
         // Run it directly to avoid nesting `pwsh -Command "pwsh -File ..."`.
+        // If the specified shell isn't found, fall back to the alternative
+        // (e.g. pwsh -> powershell) so plugin configs work on systems that
+        // only have one of the two installed.
         if lower.starts_with("pwsh ") || lower.starts_with("pwsh.exe ")
             || lower.starts_with("powershell ") || lower.starts_with("powershell.exe ")
             || lower.starts_with("cmd ") || lower.starts_with("cmd.exe ")
         {
             let parts = parse_command_line(shell_cmd);
             if parts.len() >= 2 {
-                let mut c = std::process::Command::new(&parts[0]);
+                let prog = resolve_shell_binary(&parts[0]);
+                let mut c = std::process::Command::new(&prog);
                 for p in &parts[1..] { c.arg(p); }
                 return c;
             }
@@ -1564,11 +1599,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "new-session" | "new" => {
             // Issue #200: create a new session from inside a running session.
-            // Parse flags: -s name, -d (detached), -n windowname, -c startdir
+            // Parse flags: -s name, -d (detached), -n windowname, -c startdir, -e env
             let mut session_name: Option<String> = None;
             let mut detached = false;
             let mut window_name: Option<String> = None;
             let mut start_dir: Option<String> = None;
+            let mut env_vars: Vec<String> = Vec::new();
             {
                 let mut i = 1;
                 while i < parts.len() {
@@ -1576,9 +1612,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         "-s" => { i += 1; if i < parts.len() { session_name = Some(parts[i].trim_matches('"').to_string()); } }
                         "-n" => { i += 1; if i < parts.len() { window_name = Some(parts[i].trim_matches('"').to_string()); } }
                         "-c" => { i += 1; if i < parts.len() { start_dir = Some(parts[i].trim_matches('"').to_string()); } }
+                        "-e" => { i += 1; if i < parts.len() { env_vars.push(parts[i].trim_matches('"').to_string()); } }
                         "-d" => { detached = true; }
                         "-A" | "-D" | "-E" | "-P" | "-X" => { /* compatibility flags, ignored */ }
-                        "-e" | "-F" | "-f" | "-t" | "-x" | "-y" => { i += 1; /* skip value */ }
+                        "-F" | "-f" | "-t" | "-x" | "-y" => { i += 1; /* skip value */ }
                         _ => {}
                     }
                     i += 1;
@@ -1619,7 +1656,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // Try to claim a warm server first (fast path)
             let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
                 || crate::config::is_warm_disabled_by_config();
-            let claimed_warm = if !warm_disabled && start_dir.is_none() {
+            let claimed_warm = if !warm_disabled && start_dir.is_none() && env_vars.is_empty() {
                 let warm_base = if let Some(ref sn) = app.socket_name {
                     format!("{}____warm__", sn)
                 } else {
@@ -1648,6 +1685,20 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                                                     &warm_addr, &new_key,
                                                     format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
                                                 );
+                                            }
+                                            // Apply -e environment variables to the claimed warm session
+                                            if !env_vars.is_empty() {
+                                                let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                for ev in &env_vars {
+                                                    if let Some(eq_pos) = ev.find('=') {
+                                                        let k = &ev[..eq_pos];
+                                                        let v = &ev[eq_pos+1..];
+                                                        let _ = crate::session::send_auth_cmd(
+                                                            &warm_addr, &new_key,
+                                                            format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
+                                                        );
+                                                    }
+                                                }
                                             }
                                             true
                                         }
@@ -1683,6 +1734,11 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     server_args.push(area.width.to_string());
                     server_args.push("-y".into());
                     server_args.push(area.height.to_string());
+                }
+                // Pass -e environment variables to server
+                for ev in &env_vars {
+                    server_args.push("-e".into());
+                    server_args.push(ev.clone());
                 }
                 #[cfg(windows)]
                 { let _ = crate::platform::spawn_server_hidden(&exe, &server_args); }
@@ -1879,3 +1935,7 @@ mod tests_issue192_command_chaining;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue200_new_session.rs"]
 mod tests_issue200_new_session;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_run_shell_resolve.rs"]
+mod tests_run_shell_resolve;

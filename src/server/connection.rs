@@ -1799,6 +1799,7 @@ match cmd {
             let mut detached = false;
             let mut window_name: Option<String> = None;
             let mut start_dir: Option<String> = None;
+            let mut env_vars: Vec<String> = Vec::new();
             {
                 let mut i = 0;
                 while i < args.len() {
@@ -1806,9 +1807,10 @@ match cmd {
                         "-s" => { i += 1; if i < args.len() { sess_name = Some(args[i].trim_matches('"').to_string()); } }
                         "-n" => { i += 1; if i < args.len() { window_name = Some(args[i].trim_matches('"').to_string()); } }
                         "-c" => { i += 1; if i < args.len() { start_dir = Some(args[i].trim_matches('"').to_string()); } }
+                        "-e" => { i += 1; if i < args.len() { env_vars.push(args[i].trim_matches('"').to_string()); } }
                         "-d" => { detached = true; }
                         "-t" => { i += 1; /* already handled above */ }
-                        "-e" | "-F" | "-f" | "-x" | "-y" => { i += 1; /* skip value */ }
+                        "-F" | "-f" | "-x" | "-y" => { i += 1; /* skip value */ }
                         _ => {}
                     }
                     i += 1;
@@ -1853,6 +1855,11 @@ match cmd {
                 if let Some(ref wn) = window_name {
                     server_args.push("-n".into());
                     server_args.push(wn.clone());
+                }
+                // Pass -e environment variables to server
+                for ev in &env_vars {
+                    server_args.push("-e".into());
+                    server_args.push(ev.clone());
                 }
                 #[cfg(windows)]
                 { let _ = crate::platform::spawn_server_hidden(&exe, &server_args); }

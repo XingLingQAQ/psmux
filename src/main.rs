@@ -427,11 +427,26 @@ fn run_main() -> io::Result<()> {
                 };
                 // Parse session group target via -g flag
                 let srv_group_target = args.iter().position(|a| a == "-g").and_then(|i| args.get(i+1)).map(|s| s.clone());
+                // Parse -e environment variables (may appear multiple times)
+                let srv_env_vars: Vec<String> = {
+                    let mut evs = Vec::new();
+                    let mut idx = 0;
+                    while idx < args.len() {
+                        if args[idx] == "-e" {
+                            idx += 1;
+                            if idx < args.len() {
+                                evs.push(args[idx].clone());
+                            }
+                        }
+                        idx += 1;
+                    }
+                    evs
+                };
                 // Check for raw command after -- (direct execution)
                 let raw_cmd: Option<Vec<String>> = args.iter().position(|a| a == "--").map(|pos| {
                     args.iter().skip(pos + 1).cloned().collect()
                 }).filter(|v: &Vec<String>| !v.is_empty());
-                return run_server(name, server_socket_name, initial_cmd, raw_cmd, srv_start_dir, srv_window_name, srv_init_size, srv_group_target);
+                return run_server(name, server_socket_name, initial_cmd, raw_cmd, srv_start_dir, srv_window_name, srv_init_size, srv_group_target, srv_env_vars);
             }
             "new-session" | "new" => {
                 // Prevent nesting: block new-session inside an existing psmux session
@@ -460,6 +475,7 @@ fn run_main() -> io::Result<()> {
                 let mut init_width: Option<u16> = None;
                 let mut init_height: Option<u16> = None;
                 let mut group_target: Option<String> = None;
+                let mut env_vars: Vec<String> = Vec::new();
                 let mut positional_args: Vec<String> = Vec::new();
                 let mut raw_cmd_after_dd: Option<Vec<String>> = None;
 
@@ -502,7 +518,8 @@ fn run_main() -> io::Result<()> {
                             'c' => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } break; }
                             'x' => { i += 1; if i < cmd_args.len() { init_width = cmd_args[i].parse::<u16>().ok(); } break; }
                             'y' => { i += 1; if i < cmd_args.len() { init_height = cmd_args[i].parse::<u16>().ok(); } break; }
-                            'e' | 'f' => { i += 1; break; /* skip value */ }
+                            'e' => { i += 1; if i < cmd_args.len() { env_vars.push(cmd_args[i].to_string()); } break; }
+                            'f' => { i += 1; break; /* skip value */ }
                             't' => { i += 1; if i < cmd_args.len() { group_target = Some(cmd_args[i].to_string()); } break; }
                             // Boolean flags
                             'd' => { detached = true; }
@@ -579,7 +596,7 @@ fn run_main() -> io::Result<()> {
                 // Skipped when PSMUX_NO_WARM=1 is set or config has 'set -g warm off'.
                 let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
                     || crate::config::is_warm_disabled_by_config();
-                let claimed_warm = if !warm_disabled && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() {
+                let claimed_warm = if !warm_disabled && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() {
                     let warm_base = if let Some(ref l) = l_socket_name {
                         format!("{}____warm__", l)
                     } else {
@@ -615,6 +632,20 @@ fn run_main() -> io::Result<()> {
                                                         &warm_addr, &new_key,
                                                         format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
                                                     );
+                                                }
+                                                // Apply -e environment variables to the claimed warm session
+                                                if !env_vars.is_empty() {
+                                                    let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                    for ev in &env_vars {
+                                                        if let Some(eq_pos) = ev.find('=') {
+                                                            let k = &ev[..eq_pos];
+                                                            let v = &ev[eq_pos+1..];
+                                                            let _ = crate::session::send_auth_cmd(
+                                                                &warm_addr, &new_key,
+                                                                format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                                 true
                                             }
@@ -667,6 +698,11 @@ fn run_main() -> io::Result<()> {
                 if let Some(ref gt) = group_target {
                     server_args.push("-g".into());
                     server_args.push(gt.clone());
+                }
+                // Pass -e environment variables to server
+                for ev in &env_vars {
+                    server_args.push("-e".into());
+                    server_args.push(ev.clone());
                 }
                 // Pass raw command args (direct execution) if -- was used
                 if let Some(ref raw_args) = raw_cmd_args {

@@ -189,3 +189,126 @@ fn session_name_from_target_plain() {
     };
     assert_eq!(session, "alpha");
 }
+
+// ============================================================================
+// PR #214 routing guard tests
+//
+// These replicate the exact logic added to main.rs by PR #214:
+//
+//   let is_switch_client = args.iter().any(|a| a == "switch-client" || a == "switchc");
+//   if has_explicit_session && !is_switch_client {
+//       env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
+//   }
+//
+// The rule: for switch-client, -t means "switch TO this session" (destination),
+// not "route the command to this session's server" (routing). So when the command
+// is switch-client or switchc, we must NOT set PSMUX_TARGET_SESSION from -t,
+// allowing the TMUX env var fallback to resolve the *current* (source) session.
+// ============================================================================
+
+/// Simulate the routing decision from main.rs:
+/// returns true if PSMUX_TARGET_SESSION should be set from the -t argument.
+fn should_set_target_session(args: &[&str], has_explicit_session: bool) -> bool {
+    let is_switch_client = args.iter().any(|a| *a == "switch-client" || *a == "switchc");
+    has_explicit_session && !is_switch_client
+}
+
+/// PR #214: switch-client -t <session> must NOT set PSMUX_TARGET_SESSION.
+/// Before the fix, this would have been true (routing to destination server).
+#[test]
+fn pr214_switch_client_t_does_not_set_target_session() {
+    let args = vec!["psmux", "switch-client", "-t", "beta"];
+    let result = should_set_target_session(&args, /*has_explicit_session=*/true);
+    assert!(
+        !result,
+        "switch-client -t should NOT set PSMUX_TARGET_SESSION (would route to wrong server)"
+    );
+}
+
+/// PR #214: switchc alias also must NOT set PSMUX_TARGET_SESSION.
+#[test]
+fn pr214_switchc_alias_does_not_set_target_session() {
+    let args = vec!["psmux", "switchc", "-t", "beta"];
+    let result = should_set_target_session(&args, true);
+    assert!(
+        !result,
+        "switchc -t should NOT set PSMUX_TARGET_SESSION"
+    );
+}
+
+/// Other commands WITH -t MUST still set PSMUX_TARGET_SESSION (routing).
+/// This ensures the guard is narrowly scoped to switch-client only.
+#[test]
+fn pr214_other_commands_still_set_target_session() {
+    for cmd in &["select-window", "selectw", "send-keys", "display-message",
+                 "capture-pane", "kill-pane", "split-window", "new-window"] {
+        let args = vec!["psmux", cmd, "-t", "beta"];
+        let result = should_set_target_session(&args, true);
+        assert!(
+            result,
+            "{} -t should still set PSMUX_TARGET_SESSION, got false",
+            cmd
+        );
+    }
+}
+
+/// When there is no explicit session in -t (e.g. -t %2, -t :1.0),
+/// has_explicit_session is false so routing doesn't happen regardless
+/// of whether it's switch-client or not.
+#[test]
+fn pr214_no_explicit_session_never_sets_target() {
+    // switch-client with pane-style target (no explicit session)
+    let args_sc = vec!["psmux", "switch-client", "-t", "%2"];
+    assert!(!should_set_target_session(&args_sc, false));
+
+    // regular command with pane-style target
+    let args_other = vec!["psmux", "send-keys", "-t", ":0.1"];
+    assert!(!should_set_target_session(&args_other, false));
+}
+
+/// switch-client -n (no -t flag at all): has_explicit_session=false,
+/// guard condition is irrelevant — routing falls through to TMUX env var.
+#[test]
+fn pr214_switch_client_n_no_explicit_session() {
+    let args = vec!["psmux", "switch-client", "-n"];
+    let result = should_set_target_session(&args, false);
+    assert!(!result, "switch-client -n has no explicit session, should not set target");
+}
+
+/// switch-client -p (previous): same — TMUX env var resolves source session.
+#[test]
+fn pr214_switch_client_p_no_explicit_session() {
+    let args = vec!["psmux", "switch-client", "-p"];
+    let result = should_set_target_session(&args, false);
+    assert!(!result);
+}
+
+/// switch-client -l (last): same — TMUX env var resolves source session.
+#[test]
+fn pr214_switch_client_l_no_explicit_session() {
+    let args = vec!["psmux", "switch-client", "-l"];
+    let result = should_set_target_session(&args, false);
+    assert!(!result);
+}
+
+/// Regression guard: the old buggy code was simply `if has_explicit_session { ... }`.
+/// Prove that the old code would have returned true for switch-client -t (the bug).
+#[test]
+fn pr214_regression_old_code_was_buggy() {
+    // Old code (no is_switch_client guard):
+    let old_logic = |has_explicit_session: bool| -> bool { has_explicit_session };
+
+    // Old code would have set PSMUX_TARGET_SESSION for switch-client -t beta
+    // causing the command to be sent to beta's server (wrong — should be alpha's).
+    assert!(
+        old_logic(true),
+        "This confirms the old code was broken: it returned true for switch-client -t"
+    );
+
+    // New code correctly returns false for switch-client:
+    let args = vec!["psmux", "switch-client", "-t", "beta"];
+    assert!(
+        !should_set_target_session(&args, true),
+        "New code correctly returns false for switch-client -t"
+    );
+}

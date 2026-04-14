@@ -935,8 +935,15 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "rename-window" | "renamew" => {
             if let Some(name) = parts.get(1) {
-                let win = &mut app.windows[app.active_idx];
-                win.name = name.to_string();
+                if app.active_idx < app.windows.len() {
+                    let win = &mut app.windows[app.active_idx];
+                    win.name = name.to_string();
+                    win.manual_rename = true;
+                }
+                // Forward to server so external queries (display-message, list-windows) see the new name
+                if let Some(port) = app.control_port {
+                    let _ = send_control_to_port(port, &format!("rename-window {}\n", crate::util::quote_arg(name)), &app.session_key);
+                }
             }
         }
         "list-windows" | "lsw" => {
@@ -1168,6 +1175,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         "rename-session" => {
             if let Some(name) = parts.get(1) {
                 app.session_name = name.to_string();
+                // Forward to server so external queries see the new session name
+                if let Some(port) = app.control_port {
+                    let _ = send_control_to_port(port, &format!("rename-session {}\n", crate::util::quote_arg(name)), &app.session_key);
+                }
             }
         }
         "select-layout" | "selectl" => {
@@ -1972,3 +1983,11 @@ mod tests_run_shell_resolve;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue209_tmux_compat.rs"]
 mod tests_issue209_tmux_compat;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_gastown_scenarios.rs"]
+mod tests_gastown_scenarios;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue210_gastown_fixes.rs"]
+mod tests_issue210_gastown_fixes;

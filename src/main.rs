@@ -400,13 +400,27 @@ fn run_main() -> io::Result<()> {
                                                 // Only fall back to display_name when no -F was given.
                                                 if format_str.is_some() || !line.trim().is_empty() {
                                                     let output = line.trim_end().to_string();
-                                                    // Apply -f filter if provided
+                                                    // Apply -f filter if provided.
+                                                    // tmux -f accepts format expressions; support
+                                                    // the common #{==:#{session_name},NAME} pattern
+                                                    // as well as a plain substring fallback.
                                                     if let Some(ref flt) = filter_str {
-                                                        // Simple filter: check if the output contains the filter string
-                                                        // tmux uses format expansion for -f, but we do substring match
-                                                        if !output.contains(flt.as_str()) {
-                                                            continue;
-                                                        }
+                                                        let passes = if let Some(target) = flt
+                                                            .strip_prefix("#{==:#{session_name},")
+                                                            .and_then(|s| s.strip_suffix('}'))
+                                                        {
+                                                            // Compare port-file display name against literal
+                                                            let display_name = if let Some(ref pfx) = ns_prefix {
+                                                                base.strip_prefix(pfx.as_str()).unwrap_or(base)
+                                                            } else {
+                                                                base
+                                                            };
+                                                            display_name == target
+                                                        } else {
+                                                            // Fallback: plain substring match
+                                                            output.contains(flt.as_str())
+                                                        };
+                                                        if !passes { continue; }
                                                     }
                                                     println!("{}", output);
                                                 } else {
@@ -417,9 +431,15 @@ fn run_main() -> io::Result<()> {
                                                         base
                                                     };
                                                     if let Some(ref flt) = filter_str {
-                                                        if !display_name.contains(flt.as_str()) {
-                                                            continue;
-                                                        }
+                                                        let passes = if let Some(target) = flt
+                                                            .strip_prefix("#{==:#{session_name},")
+                                                            .and_then(|s| s.strip_suffix('}'))
+                                                        {
+                                                            display_name == target
+                                                        } else {
+                                                            display_name.contains(flt.as_str())
+                                                        };
+                                                        if !passes { continue; }
                                                     }
                                                     println!("{}", display_name); 
                                                 }
@@ -634,8 +654,8 @@ fn run_main() -> io::Result<()> {
                             // Skip server creation, jump straight to attach
                             // (handled at the bottom of this match block)
                         } else {
-                            eprintln!("psmux: session '{}' already exists", name);
-                            return Ok(());
+                            eprintln!("duplicate session: {}", name);
+                            std::process::exit(1);
                         }
                     } else {
                         // Stale port file - remove it and continue
@@ -1778,24 +1798,47 @@ fn run_main() -> io::Result<()> {
             }
             // list-keys - List all key bindings
             "list-keys" | "lsk" => {
+                let mut table_filter: Option<String> = None;
+                let mut key_filter: Option<String> = None;
                 let mut cmd = "list-keys".to_string();
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
                         "-T" => {
                             if let Some(t) = cmd_args.get(i + 1) {
+                                table_filter = Some(t.to_string());
                                 cmd.push_str(&format!(" -T {}", t));
                                 i += 1;
                             }
                         }
                         "-t" => { i += 1; } // target handled globally
+                        arg if !arg.starts_with('-') => {
+                            // Positional: key name to filter
+                            if key_filter.is_none() {
+                                key_filter = Some(arg.to_string());
+                            }
+                            cmd.push_str(&format!(" {}", arg));
+                        }
                         _ => { cmd.push_str(&format!(" {}", cmd_args[i])); }
                     }
                     i += 1;
                 }
                 cmd.push('\n');
-                let resp = send_control_with_response(cmd)?;
-                print!("{}", resp);
+                match send_control_with_response(cmd) {
+                    Ok(resp) => { print!("{}", resp); }
+                    Err(_) => {
+                        // No running server — emit built-in defaults filtered by -T and key.
+                        // Real tmux supports this without a server for the prefix table.
+                        let table = table_filter.as_deref().unwrap_or("prefix");
+                        for (key, action) in crate::help::PREFIX_DEFAULTS {
+                            if table != "prefix" { break; }
+                            if let Some(ref kf) = key_filter {
+                                if *key != kf.as_str() { continue; }
+                            }
+                            println!("bind-key -T {} {} {}", table, key, action);
+                        }
+                    }
+                }
                 return Ok(());
             }
             // bind-key - Bind a key to a command

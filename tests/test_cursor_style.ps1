@@ -192,6 +192,63 @@ Write-Host -NoNewline "$esc[?1049l"
     Add-Result "Post-TUI: session start" $false "failed"
 }
 
+# ═══════════════════════════════════════════════════════════════
+# Win32 TUI VERIFICATION: Prove cursor style changes via real keys
+# ═══════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_CUR = "cur_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_CUR
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # TUI Test 1: Set cursor-style to block via CLI (visible TUI window)
+    Write-Host "  [TEST] TUI: Set cursor-style block (visible TUI proof)" -ForegroundColor White
+    & $PSMUX set-option -t $TUI_SESSION_CUR cursor-style block 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $style = & $PSMUX show-options -g -v cursor-style -t $TUI_SESSION_CUR 2>&1 | Out-String
+    $style = $style.Trim()
+    if ($style -match "block") {
+        Add-Result "TUI: cursor-style = block" $true "($style)"
+    } else {
+        Add-Result "TUI: cursor-style = block" $false "($style)"
+    }
+
+    # TUI Test 2: Change to underline via CLI
+    Write-Host "  [TEST] TUI: Set cursor-style underline (visible TUI proof)" -ForegroundColor White
+    & $PSMUX set-option -t $TUI_SESSION_CUR cursor-style underline 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $style2 = & $PSMUX show-options -g -v cursor-style -t $TUI_SESSION_CUR 2>&1 | Out-String
+    $style2 = $style2.Trim()
+    if ($style2 -match "underline") {
+        Add-Result "TUI: cursor-style = underline" $true "($style2)"
+    } else {
+        Add-Result "TUI: cursor-style = underline" $false "($style2)"
+    }
+
+    # TUI Test 3: Change to bar via CLI
+    Write-Host "  [TEST] TUI: Set cursor-style bar (visible TUI proof)" -ForegroundColor White
+    & $PSMUX set-option -t $TUI_SESSION_CUR cursor-style bar 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $style3 = & $PSMUX show-options -g -v cursor-style -t $TUI_SESSION_CUR 2>&1 | Out-String
+    $style3 = $style3.Trim()
+    if ($style3 -match "bar") {
+        Add-Result "TUI: cursor-style = bar" $true "($style3)"
+    } else {
+        Add-Result "TUI: cursor-style = bar" $false "($style3)"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_CUR
+    Write-Host ""
+} else {
+    Write-Host "  TUI verification skipped (could not launch window)" -ForegroundColor Yellow
+}
+
 # Cleanup
 Remove-Item "$env:TEMP\psmux_cursor_*.conf" -Force -ErrorAction SilentlyContinue
 Remove-Item $fakeTuiScript -Force -ErrorAction SilentlyContinue

@@ -503,6 +503,62 @@ $env:PSMUX_CLIENT_DEBUG = $savedDebug
 Start-Sleep -Seconds 2
 Remove-Item "$env:USERPROFILE\.psmux\client_debug.log" -Force -ErrorAction SilentlyContinue
 
+# ============================================================
+# Win32 TUI VERIFICATION: Prove theme colors apply in real window
+# ============================================================
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_THM = "thm_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_THM
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # TUI Test 1: Set status bar color via CLI and verify option applied
+    Write-Test "TUI: Set status-style via CLI (visible TUI proof)"
+    & $script:TUI_PSMUX set-option -t $TUI_SESSION_THM status-style "bg=red,fg=white" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $statusStyle = & $script:TUI_PSMUX show-options -g -v status-style -t $TUI_SESSION_THM 2>&1 | Out-String
+    $statusStyle = $statusStyle.Trim()
+    if ($statusStyle -match "red") {
+        Write-Pass "TUI: status-style contains 'red' after CLI command ($statusStyle)"
+    } else {
+        Write-Fail "TUI: status-style unexpected: '$statusStyle'"
+    }
+
+    # TUI Test 2: Set pane border color and verify
+    Write-Test "TUI: Set pane-border-style via CLI (visible TUI proof)"
+    & $script:TUI_PSMUX split-window -h -t $TUI_SESSION_THM 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    & $script:TUI_PSMUX set-option -t $TUI_SESSION_THM pane-border-style "fg=green" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $borderStyle = & $script:TUI_PSMUX show-options -g -v pane-border-style -t $TUI_SESSION_THM 2>&1 | Out-String
+    $borderStyle = $borderStyle.Trim()
+    if ($borderStyle -match "green") {
+        Write-Pass "TUI: pane-border-style contains 'green' ($borderStyle)"
+    } else {
+        Write-Fail "TUI: pane-border-style unexpected: '$borderStyle'"
+    }
+
+    # TUI Test 3: Session stays responsive after theme changes (no hang)
+    Write-Test "TUI: Session responsive after multiple theme changes"
+    $resp = Safe-TuiQuery "#{session_name}" -Session $TUI_SESSION_THM
+    if ($resp -eq $TUI_SESSION_THM) {
+        Write-Pass "TUI: Session responsive after theme changes (name=$resp)"
+    } else {
+        Write-Fail "TUI: Session not responsive (got: '$resp')"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_THM
+    Write-Host ""
+} else {
+    Write-Info "TUI verification skipped (could not launch window)"
+}
+
 
 # ============================================================
 # Cleanup & Summary

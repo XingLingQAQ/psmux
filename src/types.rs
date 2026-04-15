@@ -462,6 +462,8 @@ pub struct AppState {
     pub automatic_rename: bool,
     /// allow-rename: allow programs to set window title via escape sequences
     pub allow_rename: bool,
+    /// allow-set-title: allow programs to set pane title via OSC 0/2 escape sequences
+    pub allow_set_title: bool,
     /// monitor-activity / visual-activity: stored for compat
     pub monitor_activity: bool,
     pub visual_activity: bool,
@@ -697,6 +699,7 @@ impl AppState {
             renumber_windows: false,
             automatic_rename: true,
             allow_rename: true,
+            allow_set_title: false,
             monitor_activity: false,
             visual_activity: false,
             activity_action: "other".to_string(),

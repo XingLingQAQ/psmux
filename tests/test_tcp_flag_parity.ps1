@@ -501,8 +501,10 @@ Write-Host "`n=== 25. RENAME FLAGS ===" -ForegroundColor Cyan
 
 Send-TcpAndVerify "rename-window" 'rename-window tcp_renamed'
 Send-TcpAndVerify "rename-session" 'rename-session tcpflag_r'
-# Restore session name
-Send-TcpCommand $SESSION 'rename-session tcpflag' | Out-Null
+# Restore session name (use renamed session name since port/key files now use it)
+Start-Sleep -Milliseconds 500
+Send-TcpCommand "tcpflag_r" 'rename-session tcpflag' | Out-Null
+Start-Sleep -Milliseconds 500
 
 # ════════════════════════════════════════════════════════════════════════════════
 # 26. BUFFER OPERATIONS

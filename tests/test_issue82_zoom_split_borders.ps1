@@ -382,6 +382,64 @@ try {
     Cleanup-Session $SESSION
 }
 
+# ═══════════════════════════════════════════════════════════════
+# Win32 TUI VERIFICATION: Prove zoom/unzoom renders visually
+# ═══════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_Z82 = "z82_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_Z82
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # Create split for zoom testing
+    & $script:TUI_PSMUX split-window -h -t $TUI_SESSION_Z82 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    $paneCount = (& $script:TUI_PSMUX list-panes -t $TUI_SESSION_Z82 2>&1 | Measure-Object -Line).Lines
+    Write-Host "    Setup: $paneCount panes" -ForegroundColor DarkGray
+
+    # TUI Test 1: Zoom via CLI while visible window proves rendering
+    Write-Test "TUI: Zoom pane via resize-pane -Z (visible TUI proof)"
+    & $script:TUI_PSMUX resize-pane -Z -t $TUI_SESSION_Z82 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 300
+    $zoomFlag = Safe-TuiQuery "#{window_zoomed_flag}" -Session $TUI_SESSION_Z82
+    if ($zoomFlag -eq "1") {
+        Write-Pass "TUI: Zoom activated (flag=1, visible window rendering)"
+    } else {
+        Write-Fail "TUI: Zoom flag is '$zoomFlag' after zoom (expected 1)"
+    }
+
+    # TUI Test 2: Unzoom and verify visual state
+    Write-Test "TUI: Unzoom via resize-pane -Z (visible TUI proof)"
+    & $script:TUI_PSMUX resize-pane -Z -t $TUI_SESSION_Z82 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 300
+    $zoomFlag2 = Safe-TuiQuery "#{window_zoomed_flag}" -Session $TUI_SESSION_Z82
+    if ($zoomFlag2 -eq "0") {
+        Write-Pass "TUI: Unzoom successful (flag=0, visible window rendering)"
+    } else {
+        Write-Fail "TUI: Zoom flag is '$zoomFlag2' after unzoom (expected 0)"
+    }
+
+    # TUI Test 3: All panes still exist after zoom cycle
+    $paneCountAfter = (& $script:TUI_PSMUX list-panes -t $TUI_SESSION_Z82 2>&1 | Measure-Object -Line).Lines
+    if ($paneCountAfter -eq $paneCount) {
+        Write-Pass "TUI: All $paneCount panes intact after zoom cycle"
+    } else {
+        Write-Fail "TUI: Pane count changed ($paneCount -> $paneCountAfter) during zoom"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_Z82
+    Write-Host ""
+} else {
+    Write-Info "TUI verification skipped (could not launch window)"
+}
+
 # ══════════════════════════════════════════════════════════════════════
 & $PSMUX kill-server 2>$null
 

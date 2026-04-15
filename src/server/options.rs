@@ -48,6 +48,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "renumber-windows" => if app.renumber_windows { "on".into() } else { "off".into() },
         "automatic-rename" => if app.automatic_rename { "on".into() } else { "off".into() },
         "allow-rename" => if app.allow_rename { "on".into() } else { "off".into() },
+        "allow-set-title" => if app.allow_set_title { "on".into() } else { "off".into() },
         "monitor-activity" => if app.monitor_activity { "on".into() } else { "off".into() },
         "synchronize-panes" => if app.sync_input { "on".into() } else { "off".into() },
         "remain-on-exit" => if app.remain_on_exit { "on".into() } else { "off".into() },
@@ -59,7 +60,13 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "allow-predictions" => if app.allow_predictions { "on".into() } else { "off".into() },
         "cursor-style" => std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string()),
         "cursor-blink" => if std::env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0" { "on".into() } else { "off".into() },
-        "default-shell" | "default-command" => app.default_shell.clone(),
+        "default-shell" | "default-command" => {
+            if app.default_shell.is_empty() {
+                crate::pane::cached_shell().unwrap_or("pwsh.exe").to_string()
+            } else {
+                app.default_shell.clone()
+            }
+        }
         "default-terminal" => app.environment.get("TERM").cloned().unwrap_or_default(),
         "word-separators" => app.word_separators.clone(),
         "pane-border-style" => app.pane_border_style.clone(),
@@ -289,6 +296,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
             }
         }
         "allow-rename" => { app.allow_rename = matches!(value, "on" | "true" | "1"); }
+        "allow-set-title" => { app.allow_set_title = matches!(value, "on" | "true" | "1"); }
         "activity-action" => { app.activity_action = value.to_string(); }
         "silence-action" => { app.silence_action = value.to_string(); }
         "update-environment" => {

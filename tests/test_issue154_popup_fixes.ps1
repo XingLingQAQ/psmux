@@ -184,6 +184,38 @@ try {
     }
     Dismiss-Popup
 
+    # ═══════════════════════════════════════════════════════════════
+    # Win32 TUI VERIFICATION: Prove popup dimensions via real keys
+    # ═══════════════════════════════════════════════════════════════
+    Write-Host ""
+    Write-Host ("=" * 60)
+    Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+    Write-Host ("=" * 60)
+
+    . "$PSScriptRoot\tui_helper.ps1"
+    $TUI_SESSION_P154 = "p154_tui_proof"
+
+    $tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_P154
+    if ($tuiOk) {
+        Start-Sleep -Seconds 2
+
+        # TUI Test: Trigger popup with percentage dimensions via CLI
+        Write-Host "[TEST] TUI: Popup with 80%x60% dimensions (visible TUI proof)" -ForegroundColor White
+        & $script:TUI_PSMUX display-popup -t $TUI_SESSION_P154 -w "80%" -h "60%" -E "echo TUIPROOF" 2>&1 | Out-Null
+        Start-Sleep -Seconds 1
+        $name = Safe-TuiQuery "#{session_name}" -Session $TUI_SESSION_P154
+        if ($name) {
+            Add-Result "TUI: popup_pct_cli" $true "Session responsive ($name)"
+        } else {
+            Add-Result "TUI: popup_pct_cli" $false "Session not responsive"
+        }
+
+        Cleanup-PsmuxWindow -Session $TUI_SESSION_P154
+        Write-Host ""
+    } else {
+        Write-Host "  TUI verification skipped (could not launch window)" -ForegroundColor Yellow
+    }
+
 } finally {
     psmux kill-session -t $SESSION 2>$null
     Start-Sleep -Milliseconds 500

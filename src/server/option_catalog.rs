@@ -56,6 +56,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "word-separators", scope: "session", option_type: "string", default: " -_@", description: "Characters treated as word boundaries" },
     OptionDef { name: "allow-passthrough", scope: "session", option_type: "choice", default: "off", description: "Allow passthrough escape sequences" },
     OptionDef { name: "allow-rename", scope: "session", option_type: "boolean", default: "on", description: "Allow programs to rename windows" },
+    OptionDef { name: "allow-set-title", scope: "session", option_type: "boolean", default: "off", description: "Allow programs to set pane title via escape sequences" },
     OptionDef { name: "update-environment", scope: "session", option_type: "string", default: "", description: "Environment variables to update on attach" },
     OptionDef { name: "synchronize-panes", scope: "session", option_type: "boolean", default: "off", description: "Send input to all panes simultaneously" },
     // ── psmux extensions (session scope) ──

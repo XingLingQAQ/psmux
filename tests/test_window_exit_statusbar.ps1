@@ -101,6 +101,61 @@ $after = (Psmux list-windows -t wintest | Measure-Object -Line).Lines
 Write-Info "Before: $before -> After: $after"
 if ($after -eq ($before - 1)) { Write-Pass "Rapid cycle: window removed ($before -> $after)" } else { Write-Fail "Rapid cycle: expected $($before-1), got $after" }
 
+# ═══════════════════════════════════════════════════════════════
+# Win32 TUI VERIFICATION: Prove window list updates in real TUI
+# ═══════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_WES = "wes_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_WES
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # TUI Test 1: Create new window via CLI, verify window count increases
+    Write-Test "TUI: Create window via new-window (visible TUI proof)"
+    $winsBefore = (& $script:TUI_PSMUX list-windows -t $TUI_SESSION_WES 2>&1 | Measure-Object -Line).Lines
+    & $script:TUI_PSMUX new-window -t $TUI_SESSION_WES 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    $winsAfter = (& $script:TUI_PSMUX list-windows -t $TUI_SESSION_WES 2>&1 | Measure-Object -Line).Lines
+    if ($winsAfter -eq ($winsBefore + 1)) {
+        Write-Pass "TUI: Window created ($winsBefore -> $winsAfter)"
+    } else {
+        Write-Fail "TUI: Window count wrong ($winsBefore -> $winsAfter, expected $($winsBefore+1))"
+    }
+
+    # TUI Test 2: Kill window pane, verify window count decreases
+    Write-Test "TUI: Kill pane removes window from status bar"
+    $winsBefore2 = (& $script:TUI_PSMUX list-windows -t $TUI_SESSION_WES 2>&1 | Measure-Object -Line).Lines
+    & $script:TUI_PSMUX send-keys -t $TUI_SESSION_WES "exit" Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+
+    $winsAfter2 = (& $script:TUI_PSMUX list-windows -t $TUI_SESSION_WES 2>&1 | Measure-Object -Line).Lines
+    if ($winsAfter2 -eq ($winsBefore2 - 1)) {
+        Write-Pass "TUI: Window removed after pane exit ($winsBefore2 -> $winsAfter2)"
+    } else {
+        Write-Fail "TUI: Window count wrong after exit ($winsBefore2 -> $winsAfter2)"
+    }
+
+    # TUI Test 3: Window index in status bar updates correctly
+    Write-Test "TUI: Window index correct after operations"
+    $idx = Safe-TuiQuery "#{window_index}" -Session $TUI_SESSION_WES
+    if ($null -ne $idx -and $idx -match '^\d+$') {
+        Write-Pass "TUI: Current window index is $idx"
+    } else {
+        Write-Fail "TUI: Could not read window_index ($idx)"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_WES
+    Write-Host ""
+} else {
+    Write-Info "TUI verification skipped (could not launch window)"
+}
+
 # ============================================================
 # CLEANUP
 # ============================================================

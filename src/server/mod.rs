@@ -1175,6 +1175,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
                         let auto_rename = app.automatic_rename;
                         let allow_rename = app.allow_rename;
+                        let allow_set_title = app.allow_set_title;
                         if (auto_rename || allow_rename) && !in_copy {
                             for win in app.windows.iter_mut() {
                                 if win.manual_rename { continue; }
@@ -1184,6 +1185,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     p.last_title_check = std::time::Instant::now();
                                     if p.child_pid.is_none() {
                                         p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
+                                    }
+                                    // ── Propagate OSC 0/2 title to pane.title ──
+                                    // tmux updates pane_title whenever the child sends
+                                    // an OSC 0 or OSC 2 escape sequence.
+                                    if allow_set_title && !p.title_locked {
+                                        if let Ok(parser) = p.term.lock() {
+                                            let osc = parser.screen().title();
+                                            if !osc.is_empty() {
+                                                let osc_owned = osc.to_string();
+                                                drop(parser);
+                                                if p.title != osc_owned {
+                                                    p.title = osc_owned;
+                                                    state_dirty = true;
+                                                }
+                                            }
+                                        }
                                     }
                                     let new_name = if auto_rename {
                                         // automatic-rename: use foreground process name
@@ -1223,20 +1240,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // instead of cloning 50-100KB of JSON.
                     // Only allowed for persistent connections that already have
                     // the previous frame; one-shot connections always need full state.
-                    // Skip the fast-path while any pane in the active window still
-                    // has a default placeholder title — we need layout serialisation
-                    // to keep running infer_title_from_prompt until a real title is
-                    // resolved.
-                    let has_placeholder_title = app.windows.get(app.active_idx)
-                        .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
-                        .map_or(false, |p| p.title.starts_with("pane %"));
                     let has_squelch = app.windows.get(app.active_idx)
                         .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
                         .map_or(false, |p| p.squelch_until.is_some());
                     if allow_nc
                         && !state_dirty
                         && !app.bell_forward
-                        && !has_placeholder_title
                         && !has_squelch
                         && !cached_dump_state.is_empty()
                         && cached_data_version == combined_data_version(&app)
@@ -2592,8 +2601,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("allow-predictions {}\n", if app.allow_predictions { "on" } else { "off" }));
                     output.push_str(&format!("cursor-style {}\n", std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string())));
                     output.push_str(&format!("cursor-blink {}\n", if std::env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0" { "on" } else { "off" }));
-                    if !app.default_shell.is_empty() {
-                        output.push_str(&format!("default-shell {}\n", app.default_shell));
+                    {
+                        let shell_val = if app.default_shell.is_empty() {
+                            crate::pane::cached_shell().unwrap_or("pwsh.exe").to_string()
+                        } else {
+                            app.default_shell.clone()
+                        };
+                        output.push_str(&format!("default-shell {}\n", shell_val));
                     }
                     output.push_str(&format!("word-separators \"{}\"\n", app.word_separators));
                     if !app.pane_border_style.is_empty() {
@@ -2652,6 +2666,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         output.push_str(&format!("copy-command \"{}\"\n", app.copy_command));
                     }
                     output.push_str(&format!("allow-rename {}\n", if app.allow_rename { "on" } else { "off" }));
+                    output.push_str(&format!("allow-set-title {}\n", if app.allow_set_title { "on" } else { "off" }));
                     output.push_str(&format!("bell-action {}\n", app.bell_action));
                     output.push_str(&format!("activity-action {}\n", app.activity_action));
                     output.push_str(&format!("silence-action {}\n", app.silence_action));

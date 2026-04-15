@@ -152,12 +152,27 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     result.push_str(&n.to_string());
                     i += 2; continue;
                 }
-                b'W' | b'T' => {
+                b'W' => {
                     if let Some(w) = app.windows.get(win_idx) {
                         if has_strftime {
                             result.push_str(&escape_strftime_percent(&w.name));
                         } else {
                             result.push_str(&w.name);
+                        }
+                    }
+                    i += 2; continue;
+                }
+                b'T' => {
+                    if let Some(w) = app.windows.get(win_idx) {
+                        let title = active_pane(&w.root, &w.active_path)
+                            .map(|p| &p.title[..])
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or("");
+                        let title = if title.is_empty() { hostname_cached() } else { title.to_string() };
+                        if has_strftime {
+                            result.push_str(&escape_strftime_percent(&title));
+                        } else {
+                            result.push_str(&title);
                         }
                     }
                     i += 2; continue;
@@ -793,7 +808,11 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "mouse" => Some(if app.mouse_enabled { "on".into() } else { "off".into() }),
         "scroll-enter-copy-mode" => Some(if app.scroll_enter_copy_mode { "on".into() } else { "off".into() }),
         "mode-keys" => Some(app.mode_keys.clone()),
-        "default-command" | "default-shell" => Some(app.default_shell.clone()),
+        "default-command" | "default-shell" => Some(if app.default_shell.is_empty() {
+            crate::pane::cached_shell().unwrap_or("pwsh.exe").to_string()
+        } else {
+            app.default_shell.clone()
+        }),
         "word-separators" => Some(app.word_separators.clone()),
         "renumber-windows" => Some(if app.renumber_windows { "on".into() } else { "off".into() }),
         "automatic-rename" => Some(if app.automatic_rename { "on".into() } else { "off".into() }),
@@ -1072,8 +1091,8 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         }
         "pane_title" => {
             if let Some(p) = target_pane() {
-                if !p.title.is_empty() { p.title.clone() } else { win.name.clone() }
-            } else { win.name.clone() }
+                if !p.title.is_empty() { p.title.clone() } else { hostname_cached() }
+            } else { hostname_cached() }
         }
         "pane_width" => {
             if let Some(p) = target_pane() { p.last_cols.to_string() } else { "80".into() }
@@ -1579,7 +1598,7 @@ fn format_vt100_color(color: vt100::Color) -> String {
     }
 }
 
-fn hostname_cached() -> String {
+pub(crate) fn hostname_cached() -> String {
     use std::sync::OnceLock;
     static HOSTNAME: OnceLock<String> = OnceLock::new();
     HOSTNAME.get_or_init(|| {

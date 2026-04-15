@@ -84,6 +84,13 @@ Write-Host ("=" * 60)
 Write-Host "TEST SUITE: unbind-key -a"
 Write-Host ("=" * 60)
 
+# Ensure .psmux.conf does not shadow .tmux.conf for this test
+$psmuxConf = "$env:USERPROFILE\.psmux.conf"
+$psmuxConfBackup = "$env:USERPROFILE\.psmux.conf.unbind_bak"
+if (Test-Path $psmuxConf) {
+    Move-Item $psmuxConf $psmuxConfBackup -Force
+}
+
 # ============================================================
 # SCENARIO 1: WITH unbind-key -a (defaults should be suppressed)
 # ============================================================
@@ -395,6 +402,10 @@ Write-Host ""
 Write-Host ("=" * 60)
 Cleanup
 Remove-Item "$env:USERPROFILE\.tmux.conf" -Force -ErrorAction SilentlyContinue
+# Restore .psmux.conf if it was backed up
+if (Test-Path $psmuxConfBackup) {
+    Move-Item $psmuxConfBackup $psmuxConf -Force
+}
 
 Write-Host ""
 Write-Host ("=" * 60)

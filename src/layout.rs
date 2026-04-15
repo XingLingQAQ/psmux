@@ -5,7 +5,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::types::{AppState, Node, LayoutKind, Mode};
 use crate::tree::get_split_mut;
-use crate::util::infer_title_from_prompt;
 
 /// Serialize a vt100 screen region into run-length-encoded rows (rows_v2 format).
 ///
@@ -252,23 +251,6 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                     }
                     has_content
                 };
-                // Throttle infer_title_from_prompt — expensive scan, only needed for display.
-                // Use a shorter retry interval while the title is still the default placeholder
-                // so the prompt is picked up as soon as the shell renders it.
-                let now = std::time::Instant::now();
-                let has_placeholder_title = p.title.starts_with("pane %");
-                let throttle_ms = if has_placeholder_title { 80 } else { 500 };
-                if !p.title_locked && now.duration_since(p.last_infer_title).as_millis() >= throttle_ms {
-                    if let Some(t) = infer_title_from_prompt(&screen, p.last_rows, p.last_cols) {
-                        p.title = t;
-                        p.last_infer_title = now;
-                    } else if !has_placeholder_title {
-                        // Already has a real title — maintain the normal throttle
-                        p.last_infer_title = now;
-                    }
-                    // If still a placeholder and inference failed, don't update
-                    // last_infer_title — retry aggressively on the next frame.
-                }
                 let need_full_content = include_full_content && *cur_path == active_path;
                 let mut lines: Vec<Vec<CellJson>> = if need_full_content {
                     Vec::with_capacity(p.last_rows as usize)
@@ -665,20 +647,6 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                             })
                         })
                     };
-
-                    // Throttled title inference — use shorter retry while title is
-                    // still the default placeholder so the prompt is picked up quickly.
-                    let now = std::time::Instant::now();
-                    let has_placeholder_title = p.title.starts_with("pane %");
-                    let throttle_ms = if has_placeholder_title { 80 } else { 500 };
-                    if !p.title_locked && now.duration_since(p.last_infer_title).as_millis() >= throttle_ms {
-                        if let Some(t) = infer_title_from_prompt(screen, p.last_rows, p.last_cols) {
-                            p.title = t;
-                            p.last_infer_title = now;
-                        } else if !has_placeholder_title {
-                            p.last_infer_title = now;
-                        }
-                    }
 
                     // Snapshot rows_v2 (run-merged)
                     let mut snap_rows: Vec<RowSnap> = Vec::with_capacity(p.last_rows as usize);

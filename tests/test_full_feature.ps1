@@ -13,7 +13,7 @@ INFO "Binary: $P"
 
 function Cleanup {
     Stop-Process -Name psmux -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 1000
+    Start-Sleep -Milliseconds 2000
     Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -ErrorAction SilentlyContinue
     Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
 }
@@ -51,6 +51,13 @@ function DumpField {
 # ================================================================
 Cleanup
 Remove-Item "$env:USERPROFILE\.tmux.conf" -Force -ErrorAction SilentlyContinue
+
+# Ensure .psmux.conf does not shadow .tmux.conf for this test
+$psmuxConf = "$env:USERPROFILE\.psmux.conf"
+$psmuxConfBackup = "$env:USERPROFILE\.psmux.conf.fullfeat_bak"
+if (Test-Path $psmuxConf) {
+    Move-Item $psmuxConf $psmuxConfBackup -Force
+}
 
 Write-Host ""
 Write-Host ("=" * 70)
@@ -396,6 +403,10 @@ Write-Host ""
 Write-Host ("=" * 70)
 Cleanup
 Remove-Item "$env:USERPROFILE\.tmux.conf" -Force -ErrorAction SilentlyContinue
+# Restore .psmux.conf if it was backed up
+if (Test-Path $psmuxConfBackup) {
+    Move-Item $psmuxConfBackup $psmuxConf -Force
+}
 
 Write-Host ""
 Write-Host ("=" * 70)

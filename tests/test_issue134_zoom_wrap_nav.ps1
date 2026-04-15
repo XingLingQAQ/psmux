@@ -174,6 +174,59 @@ if ($paneBefore -eq "0" -and $paneAfter -eq "1" -and $zoomBefore -eq "1" -and $z
     Write-Fail "Expected pane 0->1 zoom 1->0, got pane $paneBefore->$paneAfter zoom $zoomBefore->$zoomAfter"
 }
 
+# ═══════════════════════════════════════════════════════════════
+# Win32 TUI VERIFICATION: Prove zoom wrap navigation via real keys
+# ═══════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_Z134 = "z134_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_Z134
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # Create 2-pane horizontal layout
+    & $script:TUI_PSMUX split-window -h -t $TUI_SESSION_Z134 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    # TUI Test 1: Zoom + navigate right wraps and unzooms (CLI with visible TUI)
+    Write-Test "TUI: Zoomed navigation wrap via CLI (visible TUI proof)"
+    # Zoom current pane
+    & $script:TUI_PSMUX resize-pane -Z -t $TUI_SESSION_Z134 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 300
+    $zoomBefore = Safe-TuiQuery "#{window_zoomed_flag}" -Session $TUI_SESSION_Z134
+    $paneBefore = Safe-TuiQuery "#{pane_index}" -Session $TUI_SESSION_Z134
+    Write-Host "    Before nav: pane=$paneBefore, zoom=$zoomBefore" -ForegroundColor DarkGray
+
+    # Navigate right (should wrap and unzoom)
+    & $script:TUI_PSMUX select-pane -R -t $TUI_SESSION_Z134 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 300
+    $paneAfter = Safe-TuiQuery "#{pane_index}" -Session $TUI_SESSION_Z134
+    $zoomAfter = Safe-TuiQuery "#{window_zoomed_flag}" -Session $TUI_SESSION_Z134
+    Write-Host "    After nav:  pane=$paneAfter, zoom=$zoomAfter" -ForegroundColor DarkGray
+
+    if ($paneAfter -ne $paneBefore) {
+        Write-Pass "TUI: Navigation moved pane ($paneBefore -> $paneAfter)"
+    } else {
+        Write-Fail "TUI: Navigation did not move pane (stayed at $paneBefore)"
+    }
+
+    if ($zoomAfter -eq "0") {
+        Write-Pass "TUI: Zoom cleared after navigation (zoom=$zoomAfter)"
+    } else {
+        Write-Fail "TUI: Zoom not cleared (zoom=$zoomAfter)"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_Z134
+    Write-Host ""
+} else {
+    Write-Host "  TUI verification skipped (could not launch window)" -ForegroundColor Yellow
+}
+
 # Cleanup
 & $PSMUX kill-session -t $SESSION 2>$null
 

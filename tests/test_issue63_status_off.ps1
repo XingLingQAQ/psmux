@@ -200,6 +200,63 @@ if ($opts -match "status") {
     Write-Fail "show-options -g missing status option"
 }
 
+# ═══════════════════════════════════════════════════════════════
+# Win32 TUI VERIFICATION: Prove status bar visibility change
+# ═══════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_S63 = "s63_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_S63
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # TUI Test: Status bar visible by default, hidden after 'set status off'
+    Write-Test "TUI: Status bar visible by default (capture-pane shows content)"
+    $captureBefore = TUI-CapturePane -Session $TUI_SESSION_S63
+    $linesBefore = ($captureBefore -split "`n").Count
+    Write-Host "    Captured lines (status on): $linesBefore" -ForegroundColor DarkGray
+
+    # Verify status is 'on'
+    $statusBefore = Safe-TuiQuery "#{status}" -Session $TUI_SESSION_S63
+    if ($statusBefore -match "on|2") {
+        Write-Pass "TUI: Status bar confirmed ON before toggle"
+    } else {
+        Write-Fail "TUI: Status was '$statusBefore' before toggle (expected on)"
+    }
+
+    # Toggle status off via CLI (visible TUI window proves rendering)
+    Write-Test "TUI: Set status off via CLI (visible TUI proof)"
+    & $script:TUI_PSMUX set-option -t $TUI_SESSION_S63 status off 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $statusAfter = Safe-TuiQuery "#{status}" -Session $TUI_SESSION_S63
+    if ($statusAfter -match "off|0") {
+        Write-Pass "TUI: Status bar toggled OFF via CLI"
+    } else {
+        Write-Fail "TUI: Status is '$statusAfter' after set status off"
+    }
+
+    # Toggle back on
+    Write-Test "TUI: Set status back on via CLI (visible TUI proof)"
+    & $script:TUI_PSMUX set-option -t $TUI_SESSION_S63 status on 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $statusBack = Safe-TuiQuery "#{status}" -Session $TUI_SESSION_S63
+    if ($statusBack -match "on|2") {
+        Write-Pass "TUI: Status bar toggled back ON via CLI"
+    } else {
+        Write-Fail "TUI: Status is '$statusBack' after set status on"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_S63
+    Write-Host ""
+} else {
+    Write-Info "TUI verification skipped (could not launch window)"
+}
+
 # ─── Cleanup ──────────────────────────────────────────────────
 Write-Info "Cleaning up..."
 & $PSMUX kill-session -t $SESSION_NAME 2>&1

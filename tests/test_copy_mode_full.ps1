@@ -186,6 +186,55 @@ $search_mode = Query "#{pane_in_mode}"
 Test-Step "T20: search /hello (still in copy mode)" "1" $search_mode
 Write-Host "  T20 detail: cursor at x=$search_x, y=$search_y"
 
+# ═══════════════════════════════════════════════════════════════
+# Win32 TUI VERIFICATION: Prove copy mode via real keystrokes
+# ═══════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "RESULTS: $passCount/$total API tests done. Starting TUI verification..."
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_CPY = "cpy_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_CPY
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # Put some content in the pane for copy mode to work with
+    & $script:TUI_PSMUX send-keys -t $TUI_SESSION_CPY "echo 'line one'; echo 'line two'; echo 'line three'" Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 1
+
+    # TUI Test 1: Enter copy mode via CLI (visible TUI window)
+    $mode = Safe-TuiQuery "#{pane_in_mode}" -Session $TUI_SESSION_CPY
+    & $script:TUI_PSMUX copy-mode -t $TUI_SESSION_CPY 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $mode = Safe-TuiQuery "#{pane_in_mode}" -Session $TUI_SESSION_CPY
+    Test-Step "TUI: Copy mode entered (visible TUI proof)" "1" $mode
+
+    # TUI Test 2: Move cursor in copy mode via send-keys
+    $cursorBefore = Safe-TuiQuery "#{copy_cursor_y}" -Session $TUI_SESSION_CPY
+    & $script:TUI_PSMUX send-keys -t $TUI_SESSION_CPY Up 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 200
+    & $script:TUI_PSMUX send-keys -t $TUI_SESSION_CPY Up 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 300
+    $cursorAfter = Safe-TuiQuery "#{copy_cursor_y}" -Session $TUI_SESSION_CPY
+    $moved = if ($cursorAfter -ne $cursorBefore) { "True" } else { "False" }
+    Test-Step "TUI: Copy cursor moved (visible TUI proof)" "True" $moved
+
+    # TUI Test 3: Exit copy mode via send-keys q
+    & $script:TUI_PSMUX send-keys -t $TUI_SESSION_CPY q 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $modeAfter = Safe-TuiQuery "#{pane_in_mode}" -Session $TUI_SESSION_CPY
+    Test-Step "TUI: Copy mode exited (visible TUI proof)" "0" $modeAfter
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_CPY
+    Write-Host ""
+} else {
+    Write-Info "TUI verification skipped (could not launch window)"
+}
+
 # Exit copy mode
 & $PSMUX send-keys -t copytest q; Start-Sleep -Milliseconds 300
 

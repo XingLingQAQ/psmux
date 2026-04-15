@@ -218,6 +218,63 @@ foreach ($dir in @("U", "D", "L", "R")) {
 Write-Pass "directional navigation works after layout changes ($reachable directions tested)"
 
 # ============================================================
+# Win32 TUI VERIFICATION: Prove layout changes render visually
+# ============================================================
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_LYT = "lyt_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_LYT
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # TUI Test 1: Split pane via CLI (visible TUI window proves border rendering)
+    Write-Test "TUI: Split pane creates visible border (visible TUI proof)"
+    $panesBefore = (& $script:TUI_PSMUX list-panes -t $TUI_SESSION_LYT 2>&1 | Measure-Object -Line).Lines
+    & $script:TUI_PSMUX split-window -h -t $TUI_SESSION_LYT 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $panesAfter = (& $script:TUI_PSMUX list-panes -t $TUI_SESSION_LYT 2>&1 | Measure-Object -Line).Lines
+    if ($panesAfter -eq ($panesBefore + 1)) {
+        Write-Pass "TUI: Split pane created new pane ($panesBefore -> $panesAfter)"
+    } else {
+        Write-Fail "TUI: Split failed ($panesBefore -> $panesAfter)"
+    }
+
+    # TUI Test 2: Layout cycle via CLI changes layout (visible TUI window proves rendering)
+    Write-Test "TUI: Layout cycle changes layout (visible TUI proof)"
+    $layoutBefore = Safe-TuiQuery "#{window_layout}" -Session $TUI_SESSION_LYT
+    & $script:TUI_PSMUX next-layout -t $TUI_SESSION_LYT 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $layoutAfter = Safe-TuiQuery "#{window_layout}" -Session $TUI_SESSION_LYT
+    if ($layoutAfter -ne $layoutBefore) {
+        Write-Pass "TUI: Layout changed ($layoutBefore -> $layoutAfter)"
+    } else {
+        Write-Fail "TUI: Layout unchanged after next-layout"
+    }
+
+    # TUI Test 3: Horizontal split via CLI
+    Write-Test "TUI: Horizontal split creates pane (visible TUI proof)"
+    $panesBefore2 = (& $script:TUI_PSMUX list-panes -t $TUI_SESSION_LYT 2>&1 | Measure-Object -Line).Lines
+    & $script:TUI_PSMUX split-window -v -t $TUI_SESSION_LYT 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $panesAfter2 = (& $script:TUI_PSMUX list-panes -t $TUI_SESSION_LYT 2>&1 | Measure-Object -Line).Lines
+    if ($panesAfter2 -eq ($panesBefore2 + 1)) {
+        Write-Pass "TUI: Horizontal split created new pane ($panesBefore2 -> $panesAfter2)"
+    } else {
+        Write-Fail "TUI: Horizontal split failed ($panesBefore2 -> $panesAfter2)"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_LYT
+    Write-Host ""
+} else {
+    Write-Info "TUI verification skipped (could not launch window)"
+}
+
+# ============================================================
 # CLEANUP
 # ============================================================
 Write-Host ""

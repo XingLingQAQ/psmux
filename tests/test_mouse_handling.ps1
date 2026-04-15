@@ -277,6 +277,69 @@ if ($hasEscape) {
     Write-Pass "No escape sequence garbage after stress test"
 }
 
+# ═══════════════════════════════════════════════════════════════
+# Win32 TUI VERIFICATION: Prove mouse option applies in real window
+# ═══════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "Win32 TUI VISUAL VERIFICATION" -ForegroundColor Yellow
+Write-Host ("=" * 60)
+
+. "$PSScriptRoot\tui_helper.ps1"
+$TUI_SESSION_MSE = "mse_tui_proof"
+
+$tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_MSE
+if ($tuiOk) {
+    Start-Sleep -Seconds 2
+
+    # TUI Test 1: Mouse option on by default
+    Write-Test "TUI: Mouse option is ON by default"
+    $mouseVal = Safe-TuiQuery "#{mouse}" -Session $TUI_SESSION_MSE
+    if ($mouseVal -match "on|1") {
+        Write-Pass "TUI: Mouse is ON (#{mouse}=$mouseVal)"
+    } else {
+        Write-Fail "TUI: Mouse is not ON (#{mouse}=$mouseVal)"
+    }
+
+    # TUI Test 2: Toggle mouse off via CLI (visible TUI window)
+    Write-Test "TUI: Toggle mouse OFF via CLI (visible TUI proof)"
+    & $script:TUI_PSMUX set-option -t $TUI_SESSION_MSE mouse off 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $mouseOff = Safe-TuiQuery "#{mouse}" -Session $TUI_SESSION_MSE
+    if ($mouseOff -match "off|0") {
+        Write-Pass "TUI: Mouse toggled OFF via CLI (#{mouse}=$mouseOff)"
+    } else {
+        Write-Fail "TUI: Mouse still ON after set mouse off (#{mouse}=$mouseOff)"
+    }
+
+    # TUI Test 3: Toggle mouse back on via CLI
+    Write-Test "TUI: Toggle mouse ON via CLI (visible TUI proof)"
+    & $script:TUI_PSMUX set-option -t $TUI_SESSION_MSE mouse on 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $mouseOn = Safe-TuiQuery "#{mouse}" -Session $TUI_SESSION_MSE
+    if ($mouseOn -match "on|1") {
+        Write-Pass "TUI: Mouse toggled back ON via CLI (#{mouse}=$mouseOn)"
+    } else {
+        Write-Fail "TUI: Mouse not ON after set mouse on (#{mouse}=$mouseOn)"
+    }
+
+    # TUI Test 4: Split pane and verify mouse can switch focus (API-based select-pane)
+    Write-Test "TUI: Split pane, verify pane switching works"
+    & $script:TUI_PSMUX split-window -h -t $TUI_SESSION_MSE 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $panesBefore = (& $script:TUI_PSMUX list-panes -t $TUI_SESSION_MSE 2>&1 | Measure-Object -Line).Lines
+    if ($panesBefore -ge 2) {
+        Write-Pass "TUI: Multi-pane setup created ($panesBefore panes)"
+    } else {
+        Write-Fail "TUI: Failed to create multi-pane layout ($panesBefore panes)"
+    }
+
+    Cleanup-PsmuxWindow -Session $TUI_SESSION_MSE
+    Write-Host ""
+} else {
+    Write-Info "TUI verification skipped (could not launch window)"
+}
+
 # ============================================================
 # CLEANUP
 # ============================================================

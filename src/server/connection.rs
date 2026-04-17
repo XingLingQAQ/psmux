@@ -2079,6 +2079,7 @@ match cmd {
             let mut init_height: Option<String> = None;
             let mut env_vars: Vec<(String, String)> = Vec::new();
             let mut env_parse_err: Option<String> = None;
+            let mut initial_command: Option<String> = None;
             {
                 let mut i = 0;
                 while i < args.len() {
@@ -2101,7 +2102,13 @@ match cmd {
                         "-d" => { detached = true; }
                         "-t" => { i += 1; /* already handled above */ }
                         "-F" | "-f" => { i += 1; /* skip value */ }
-                        _ => {}
+                        other => {
+                            // Positional arg: initial shell command (issue #229)
+                            if !other.starts_with('-') {
+                                initial_command = Some(args[i..].iter().map(|s| s.trim_matches('"').to_string()).collect::<Vec<_>>().join(" "));
+                                break;
+                            }
+                        }
                     }
                     i += 1;
                 }
@@ -2157,6 +2164,11 @@ match cmd {
                 if let Some(ref wn) = window_name {
                     server_args.push("-n".into());
                     server_args.push(wn.clone());
+                }
+                // Pass initial command to server (issue #229)
+                if let Some(ref cmd) = initial_command {
+                    server_args.push("-c".into());
+                    server_args.push(cmd.clone());
                 }
                 // Pass -x/-y initial dimensions to server
                 if let Some(ref w) = init_width {

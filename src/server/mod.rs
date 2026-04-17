@@ -1209,8 +1209,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     let new_name = if auto_rename {
                                         // automatic-rename: use foreground process name
                                         if let Some(pid) = p.child_pid {
-                                            crate::platform::process_info::get_foreground_process_name(pid)
-                                                .unwrap_or_else(|| "shell".into())
+                                            match crate::platform::process_info::get_foreground_process_name(pid) {
+                                                Some(name) => name,
+                                                None => {
+                                                    // No foreground child found.  Keep the current
+                                                    // window name to avoid flashing to the shell
+                                                    // name before a child process spawns (#229).
+                                                    // Once a child appears, auto-rename will pick
+                                                    // it up on the next tick.
+                                                    continue;
+                                                }
+                                            }
                                         } else if allow_rename && !p.title.is_empty() {
                                             p.title.clone()
                                         } else {

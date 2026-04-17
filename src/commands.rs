@@ -1911,6 +1911,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             let mut window_name: Option<String> = None;
             let mut start_dir: Option<String> = None;
             let mut env_vars: Vec<(String, String)> = Vec::new();
+            let mut initial_command: Option<String> = None;
             {
                 let mut i = 1;
                 while i < parts.len() {
@@ -1931,7 +1932,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         "-d" => { detached = true; }
                         "-A" | "-D" | "-E" | "-P" | "-X" => { /* compatibility flags, ignored */ }
                         "-F" | "-f" | "-t" | "-x" | "-y" => { i += 1; /* skip value */ }
-                        _ => {}
+                        other => {
+                            // Positional arg: initial shell command (issue #229)
+                            if !other.starts_with('-') {
+                                initial_command = Some(parts[i..].iter().map(|s| s.trim_matches('"').to_string()).collect::<Vec<_>>().join(" "));
+                                break;
+                            }
+                        }
                     }
                     i += 1;
                 }
@@ -1971,7 +1978,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // Try to claim a warm server first (fast path)
             let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
                 || crate::config::is_warm_disabled_by_config();
-            let claimed_warm = if !warm_disabled && start_dir.is_none() && env_vars.is_empty() {
+            let claimed_warm = if !warm_disabled && initial_command.is_none() && start_dir.is_none() && env_vars.is_empty() {
                 let warm_base = if let Some(ref sn) = app.socket_name {
                     format!("{}____warm__", sn)
                 } else {
@@ -2037,6 +2044,11 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 if let Some(ref wn) = window_name {
                     server_args.push("-n".into());
                     server_args.push(wn.clone());
+                }
+                // Pass initial command to server (issue #229)
+                if let Some(ref cmd) = initial_command {
+                    server_args.push("-c".into());
+                    server_args.push(cmd.clone());
                 }
                 // Pass current terminal dimensions
                 let area = app.last_window_area;

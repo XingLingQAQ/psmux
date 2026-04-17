@@ -102,6 +102,8 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `display-panes-time` | Int | `1000` | Pane overlay time (ms) |
 | `status-interval` | Int | `15` | Status refresh (seconds) |
 | `mouse` | Bool | `on` | Mouse support |
+| `scroll-enter-copy-mode` | Bool | `on` | Enter copy mode on mouse scroll (set `off` to disable) |
+| `pwsh-mouse-selection` | Bool | `off` | Windows 11 PowerShell-style word/line selection (double/triple-click) |
 | `status` | Bool/Int | `on` | Show status bar (number = line count) |
 | `status-position` | Str | `bottom` | `top` or `bottom` |
 | `status-justify` | Str | `left` | `left`, `centre`, `right`, `absolute-centre` |
@@ -131,6 +133,7 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `visual-bell` | Bool | `off` | Visual bell indicator |
 | `allow-passthrough` | Str | `off` | Allow terminal passthrough sequences (`on`/`off`/`all`) |
 | `allow-rename` | Bool | `on` | Allow programs to set window title via escape sequences |
+| `allow-set-title` | Bool | `off` | Allow programs to set pane title via OSC 0/2 escape sequences (see [pane-titles.md](pane-titles.md)) |
 | `allow-predictions` | Bool | `off` | Preserve PSReadLine prediction settings (see below) |
 | `default-terminal` | Str | | Terminal type string (sets `TERM` env var in panes) |
 | `update-environment` | Str | *(tmux defaults)* | Space-separated list of env vars to refresh on client attach |
@@ -195,7 +198,9 @@ set -g pane-border-format " #{pane_index}: #{pane_title} [#{pane_current_command
 set -g pane-border-status off
 ```
 
-Use `select-pane -T "title"` to set a pane title that appears in the border label.
+Use `select-pane -T "title"` to set a pane title that appears in the border label. Clear a title with `select-pane -T ""`. The default pane title is the hostname, matching tmux convention.
+
+> **Note:** PowerShell 7 automatically sets the pane title to the current working directory on every prompt via OSC escape sequences. If you see a file path in your pane border labels instead of the hostname, see [pane-titles.md](pane-titles.md) for details and options to control this.
 
 ### Bell
 
@@ -228,6 +233,62 @@ PowerShell example to test:
 Write-Host "`a"
 [Console]::Beep()
 [char]7
+```
+
+### Mouse Configuration
+
+Mouse support is enabled by default. You can customize how the mouse interacts with psmux:
+
+```tmux
+# Disable mouse entirely (no click, scroll, or drag)
+set -g mouse off
+
+# Disable entering copy mode on mouse scroll
+set -g scroll-enter-copy-mode off
+
+# Enable Windows 11 PowerShell-style word/line selection
+# Double-click selects a word, triple-click selects a line
+set -g pwsh-mouse-selection on
+```
+
+When `scroll-enter-copy-mode` is `off`, scrolling in a pane does not enter copy mode and instead passes scroll events directly to the running application.
+
+### Command Chaining
+
+psmux supports tmux-style command chaining with the `;` operator. Multiple commands on a single line are executed sequentially:
+
+```tmux
+# Split and move focus in one binding
+bind-key M-s split-window -h \; select-pane -L
+
+# Create a development layout
+bind-key D split-window -v -p 30 \; split-window -h \; select-pane -t 0
+```
+
+In config files, escape the semicolon with `\;` so it is not treated as a comment delimiter.
+
+### Case-Sensitive Key Bindings
+
+psmux distinguishes between lowercase and uppercase letters in key bindings, matching tmux behavior:
+
+```tmux
+# These are two different bindings:
+bind-key t clock-mode           # Prefix + t (lowercase)
+bind-key T choose-tree          # Prefix + Shift+T (uppercase)
+
+# Uppercase bindings for plugin managers
+bind-key I run-shell '~/.psmux/plugins/ppm/scripts/install_plugins.ps1'
+bind-key U run-shell '~/.psmux/plugins/ppm/scripts/update_plugins.ps1'
+```
+
+### Ctrl+Space as Prefix
+
+Multi-character key names like `Space`, `Enter`, `Tab`, and `Escape` are fully supported in prefix configuration:
+
+```tmux
+set -g prefix C-Space
+unbind-key C-b
+bind-key C-Space send-prefix
 ```
 
 ### psmux Extensions (Windows-specific)

@@ -722,7 +722,7 @@ impl AppState {
             renumber_windows: false,
             automatic_rename: true,
             allow_rename: true,
-            allow_set_title: true,
+            allow_set_title: false,
             monitor_activity: false,
             visual_activity: false,
             activity_action: "other".to_string(),

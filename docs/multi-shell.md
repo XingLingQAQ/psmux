@@ -227,3 +227,4 @@ Here are common shells and how to configure them:
 - **Changing default-shell at runtime** only affects new panes/windows. Existing ones keep their shell
 - **Each pane is independent**. Closing a bash pane does not affect your pwsh panes
 - **Environment variables** (`TMUX`, `PSMUX_SESSION`, `TERM`) are set correctly in all shell types
+- **Pane titles differ by shell**: PowerShell 7 sets the pane title to the CWD on every prompt, while cmd.exe and nushell do not. See [pane-titles.md](pane-titles.md) for how this affects your status bar and how to control it

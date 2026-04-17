@@ -118,6 +118,8 @@ psmux zoom-pane
 
 ## Pane Titles
 
+Programs running inside a pane can set the title via OSC escape sequences. PowerShell 7 does this automatically with the current working directory. See [pane-titles.md](pane-titles.md) for full details on how pane titles work, how to control them, and how different shells behave.
+
 ```powershell
 # Set a title on the active pane
 psmux select-pane -T "my build pane"
@@ -184,8 +186,44 @@ psmux has-session -t mysession
 # Rename session
 psmux rename-session newname
 
-# Respawn pane (restart shell)
+# Switch to another session
+psmux switch-client -t other-session
+
+# Cycle through sessions
+psmux switch-client -n          # Next session
+psmux switch-client -p          # Previous session
+psmux switch-client -l          # Last (most recently used) session
+
+# Create a session with environment variables
+psmux new-session -s work -e "MY_VAR=value"
+
+# Respawn pane (restart shell, or restart with a different command)
 psmux respawn-pane
+psmux respawn-pane -k           # Kill the current process first
+psmux respawn-pane -c /tmp      # Restart in a different directory
+```
+
+## Pane Reorganization
+
+```powershell
+# Break the current pane out into a new window
+psmux break-pane
+
+# Break a specific pane, keep it in background
+psmux break-pane -d -s %3
+
+# Join a pane from another window into the current window
+psmux join-pane -s :2           # Bring pane from window 2
+
+# Join horizontally or vertically
+psmux join-pane -h -s :2        # Join side by side
+psmux join-pane -v -s :3        # Join top/bottom
+
+# Move a pane (same as join-pane)
+psmux move-pane -s %5 -t %3
+
+# Find a window by name or content
+psmux find-window "search term"
 ```
 
 ## Environment Variables
@@ -207,7 +245,7 @@ psmux show-environment -g
 
 ## Format Variables
 
-The `display-message` command supports these variables:
+The `display-message` command supports 140+ variables. Common ones include:
 
 | Variable | Description |
 |----------|-------------|
@@ -217,6 +255,44 @@ The `display-message` command supports these variables:
 | `#P` | Pane ID |
 | `#T` | Pane title |
 | `#H` | Hostname |
+| `#{pane_current_path}` | Current working directory of the pane |
+| `#{pane_current_command}` | Foreground process name |
+| `#{pane_pid}` | PID of the pane's shell |
+| `#{pane_width}` | Width of the pane in columns |
+| `#{pane_height}` | Height of the pane in rows |
+| `#{pane_active}` | `1` if this pane is the active pane |
+| `#{pane_index}` | Pane index within the window |
+| `#{window_zoomed_flag}` | `1` if the window has a zoomed pane |
+| `#{window_panes}` | Number of panes in the window |
+| `#{window_active}` | `1` if this is the active window |
+| `#{session_windows}` | Number of windows in the session |
+| `#{session_attached}` | Number of clients attached to the session |
+| `#{client_prefix}` | `1` if the prefix key was pressed |
+| `#{client_width}` | Width of the client terminal |
+| `#{client_height}` | Height of the client terminal |
+
+### Format Modifiers
+
+```powershell
+# Conditional
+psmux display-message -p "#{?window_zoomed_flag,ZOOMED,normal}"
+
+# Comparison
+psmux display-message -p "#{==:#{pane_index},0}"
+
+# Regex substitution
+psmux display-message -p "#{s/old/new/:pane_title}"
+
+# Basename and dirname
+psmux display-message -p "#{b:pane_current_path}"
+psmux display-message -p "#{d:pane_current_path}"
+
+# Loop over all windows
+psmux display-message -p "#{W:#{window_index}:#{window_name} }"
+
+# Loop over all panes
+psmux display-message -p "#{P:#{pane_index} }"
+```
 
 ## Advanced Commands
 
@@ -237,17 +313,53 @@ psmux set-option -g status-left "[#S]"
 # Layout/history/stream control
 psmux next-layout
 psmux previous-layout
+psmux select-layout tiled         # Apply a specific layout
 psmux clear-history
 psmux pipe-pane -o "cat > pane.log"
 
-# Hooks
+# Hooks (event callbacks)
 psmux set-hook -g after-new-window "display-message created"
+psmux set-hook -g client-attached "run-shell 'echo attached'"
 psmux set-hook -gu after-new-window     # Unset (remove) a hook
 psmux show-hooks
 
-# Run shell commands (always non-blocking)
-psmux run-shell "echo hello"           # Async, output shown in status
-psmux run-shell -b "long-running.ps1"  # Fire-and-forget (detached stdin)
+# Run shell commands
+psmux run-shell "echo hello"           # Output shown in status bar
+psmux run-shell -b "long-running.ps1"  # Fire-and-forget (background)
+
+# Conditional execution
+psmux if-shell "test -f ~/.psmux.conf" "source-file ~/.psmux.conf"
+psmux if-shell -F "#{window_zoomed_flag}" "" "resize-pane -Z"
+
+# User confirmation dialogs
+psmux confirm-before -p "Kill this pane? (y/n)" kill-pane
+
+# Wait channels for cross-pane synchronization
+psmux wait-for -L mychannel             # Lock a channel
+psmux wait-for -S mychannel             # Signal (unlock) a channel
+psmux wait-for mychannel                # Wait until channel is signaled
+```
+
+## Interactive Choosers
+
+```powershell
+# Interactive session/window/pane tree browser
+psmux choose-tree
+
+# Show only sessions
+psmux choose-tree -s
+
+# Show only windows
+psmux choose-tree -w
+
+# Interactive buffer picker (enter=paste, d=delete)
+psmux choose-buffer
+
+# Interactive client picker
+psmux choose-client
+
+# Interactive options editor
+psmux customize-mode
 ```
 
 ## Target Syntax (`-t`)
@@ -255,17 +367,26 @@ psmux run-shell -b "long-running.ps1"  # Fire-and-forget (detached stdin)
 psmux supports tmux-style targets:
 
 ```powershell
-# window by index in session
+# Window by index in session
 psmux select-window -t work:2
 
-# specific pane by index
+# Window by name in session
+psmux select-window -t work:editor
+
+# Specific pane by index
 psmux send-keys -t work:2.1 "echo hi" Enter
 
-# pane by pane id
+# Pane by pane id
 psmux send-keys -t %3 "pwd" Enter
 
-# window by window id
+# Window by window id
 psmux select-window -t @4
+
+# Target a specific session
+psmux has-session -t mysession
+
+# Session:window.pane full path
+psmux send-keys -t dev:0.2 "make build" Enter
 ```
 
 ## Server Namespaces (`-L`)
@@ -289,6 +410,19 @@ psmux -L personal new-session -s play
 # Bind a key in the default prefix table
 psmux bind-key h split-window -h
 
+# Bind with format variable expansion (-F flag)
+psmux bind-key -F M-h "resize-pane -L #{pane_width}"
+
+# Bind with repeat (successive presses within repeat-time don't need prefix)
+psmux bind-key -r Left select-pane -L
+psmux bind-key -r Right select-pane -R
+
+# Bind in root table (no prefix needed)
+psmux bind-key -n M-Left select-pane -L
+
+# Bind in a specific key table
+psmux bind-key -T copy-mode-vi y send-keys -X copy-selection
+
 # Unbind a single key
 psmux unbind-key h
 
@@ -297,4 +431,53 @@ psmux unbind-key -a
 
 # Unbind all keys in a specific key table only
 psmux unbind-key -a -T copy-mode-vi
+psmux unbind-key -a -T prefix
+psmux unbind-key -a -T root
+psmux unbind-key -a -T copy-mode
+```
+
+## Command Chaining
+
+Chain multiple commands with `\;` in config files:
+
+```tmux
+# Split and select in one binding
+bind-key M-v split-window -v \; select-pane -U
+
+# Create a 3-pane layout
+bind-key M-d split-window -h \; split-window -v \; select-pane -t 0
+
+# Conditional chaining
+bind-key M-z if-shell -F "#{window_zoomed_flag}" "resize-pane -Z" ""
+```
+
+From the CLI, use `\;` or quote the command:
+
+```powershell
+psmux split-window -h `; select-pane -L
+```
+
+## Querying Lists with Custom Formats
+
+```powershell
+# List all sessions with custom format
+psmux list-sessions -F "#{session_name}:#{session_windows}"
+
+# List all windows with custom format
+psmux list-windows -F "#{window_index}:#{window_name}:#{window_panes}"
+
+# List all panes across the session (-s flag)
+psmux list-panes -s -F "#{window_index}.#{pane_index}: #{pane_current_command} [#{pane_width}x#{pane_height}]"
+
+# List all panes across all sessions (-a flag)
+psmux list-panes -a
+
+# Capture pane content to stdout
+psmux capture-pane -p -t %0
+
+# Capture with line range (negative = scrollback)
+psmux capture-pane -p -S -100 -E -1
+
+# Print a format variable
+psmux display-message -p "#{pane_current_path}"
 ```

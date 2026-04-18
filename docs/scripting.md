@@ -317,7 +317,7 @@ psmux select-layout tiled         # Apply a specific layout
 psmux clear-history
 psmux pipe-pane -o "cat > pane.log"
 
-# Hooks (event callbacks)
+# Hooks (event callbacks) - see Hooks section below for full reference
 psmux set-hook -g after-new-window "display-message created"
 psmux set-hook -g client-attached "run-shell 'echo attached'"
 psmux set-hook -gu after-new-window     # Unset (remove) a hook
@@ -338,6 +338,79 @@ psmux confirm-before -p "Kill this pane? (y/n)" kill-pane
 psmux wait-for -L mychannel             # Lock a channel
 psmux wait-for -S mychannel             # Signal (unlock) a channel
 psmux wait-for mychannel                # Wait until channel is signaled
+```
+
+## Hooks (Event Callbacks)
+
+Hooks let you run commands automatically when events occur. They are one of the most powerful scripting features in psmux.
+
+### Setting Hooks
+
+```powershell
+# Global hook (applies to all sessions)
+psmux set-hook -g after-new-window "display-message 'New window created'"
+
+# Session-scoped hook
+psmux set-hook after-split-window "select-layout tiled"
+
+# Chain multiple commands in a hook
+psmux set-hook -g after-new-session "set -g status-left '[#S] ' \; display-message 'Session ready'"
+```
+
+### Available Hook Events
+
+| Hook | Fires when... |
+|------|---------------|
+| `after-new-session` | A new session is created |
+| `after-new-window` | A new window is created |
+| `after-split-window` | A pane is split |
+| `client-attached` | A client attaches to a session |
+| `client-detached` | A client detaches from a session |
+| `after-select-window` | A different window is selected |
+| `after-select-pane` | A different pane is selected |
+| `after-resize-pane` | A pane is resized |
+| `pane-died` | A pane's process exits |
+| `alert-activity` | Activity detected in a monitored window |
+| `alert-silence` | Silence detected in a monitored window |
+| `alert-bell` | Bell received from a pane |
+| `after-kill-pane` | A pane is killed |
+
+### Removing Hooks
+
+```powershell
+# Remove a global hook
+psmux set-hook -gu after-new-window
+
+# View all active hooks
+psmux show-hooks
+```
+
+**Important:** If you repeatedly call `set-hook -g` for the same event, psmux appends duplicate entries. Use `set-hook -gu` to clear the old hook before setting a new one, or check `show-hooks` to verify no duplicates.
+
+## Display Panes
+
+Show numbered overlays on all panes, then type a number to jump to that pane:
+
+```powershell
+# Show pane number overlay (also: Prefix + q)
+psmux display-panes
+```
+
+The overlay shows each pane's number according to `pane-base-index`. Press a number key while the overlay is visible to switch to that pane. The overlay auto-dismisses after `display-panes-time` milliseconds.
+
+## Run Shell
+
+Run an external command and display the output:
+
+```powershell
+# Output appears in the status bar message area
+psmux run-shell "echo hello"
+
+# Run in background (fire-and-forget, no output displayed)
+psmux run-shell -b "long-running-script.ps1"
+
+# Use format variables in shell commands
+psmux run-shell "echo 'Current pane: #{pane_index}'"
 ```
 
 ## Interactive Choosers
@@ -481,3 +554,113 @@ psmux capture-pane -p -S -100 -E -1
 # Print a format variable
 psmux display-message -p "#{pane_current_path}"
 ```
+
+## Window and Pane Creation Options
+
+### new-window
+
+```powershell
+# Create a window with a name
+psmux new-window -n "logs"
+
+# Create a window in the background (don't switch to it)
+psmux new-window -d -n "background"
+
+# Create a window in a specific directory
+psmux new-window -c "C:\Projects\myapp"
+
+# Create a window running a command
+psmux new-window -n "build" -- cargo watch
+
+# Create a window at a specific index
+psmux new-window -t 5
+```
+
+When you set a window name with `-n`, automatic renaming is disabled for that window so the foreground process name does not overwrite your chosen name.
+
+### split-window
+
+```powershell
+# Split with percentage size
+psmux split-window -v -p 30            # Bottom pane gets 30%
+psmux split-window -h -p 70            # Right pane gets 70%
+
+# Split in the current pane's directory
+psmux split-window -h -c "#{pane_current_path}"
+
+# Split with a specific command
+psmux split-window -v -- python
+
+# Split a specific target pane
+psmux split-window -v -t %3
+
+# Split without switching focus
+psmux split-window -d -v
+```
+
+### new-session
+
+```powershell
+# Create a named session
+psmux new-session -s work
+
+# Create in a specific directory
+psmux new-session -s project -c "C:\Projects\myapp"
+
+# Create with environment variables
+psmux new-session -s dev -e "NODE_ENV=development"
+
+# Create in background (detached)
+psmux new-session -d -s background
+
+# Create with an initial command
+psmux new-session -s monitor -- htop
+
+# Create a session with a named first window
+psmux new-session -s work -n "editor"
+```
+
+## Target Syntax
+
+Many commands accept a `-t` flag to specify which session, window, or pane to act on:
+
+```powershell
+# Target a session by name
+psmux switch-client -t mysession
+
+# Target a window by index (within current session)
+psmux select-window -t 3
+
+# Target a window in a specific session
+psmux select-window -t mysession:2
+
+# Target a pane by ID (absolute, shown with %)
+psmux select-pane -t %5
+
+# Target a pane within a window
+psmux select-pane -t :2.1             # Window 2, pane 1
+
+# Special targets
+psmux select-pane -t +               # Next pane
+psmux select-pane -t -               # Previous pane
+psmux select-window -t !             # Last (previous) window
+```
+
+## Server Namespaces
+
+Run isolated psmux instances using the `-L` flag. Each namespace gets its own server process with its own sessions:
+
+```powershell
+# Start a session in a named namespace
+psmux -L work new-session -s dev
+
+# Attach to a session in that namespace
+psmux -L work attach
+
+# List sessions in a namespace
+psmux -L work list-sessions
+
+# Default namespace is used when -L is not specified
+```
+
+This is useful for running completely separate psmux environments, for example one for development and one for monitoring.

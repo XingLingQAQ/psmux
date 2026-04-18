@@ -91,6 +91,43 @@ See [scripting.md](scripting.md) for full command reference and examples.
 - Use [psmux-resurrect](https://github.com/psmux/psmux-plugins/tree/main/psmux-resurrect) to save/restore sessions across reboots
 - Use [psmux-continuum](https://github.com/psmux/psmux-plugins/tree/main/psmux-continuum) for automatic periodic save/restore
 
+## Session Switching
+
+- **Prefix + s** opens an interactive session/window/pane tree chooser
+- **Prefix + (** and **Prefix + )** cycle through sessions
+- `switch-client -t sessionname` switches to a named session
+- `switch-client -l` returns to the last (most recently used) session
+- Create multiple sessions with `new-session -s name` and switch freely between them
+
+## Display Panes Overlay
+
+- **Prefix + q** shows numbered overlays on all panes for quick selection
+- Press a number key to jump to that pane instantly
+- Numbers respect `pane-base-index` (e.g., starts from 1 if configured)
+- Overlay auto-dismisses after `display-panes-time` milliseconds (default: 1000ms)
+- Only single-digit pane numbers (0 through 9) can be selected by keypress
+
+## Nesting Prevention
+
+- psmux automatically detects when running inside an existing session
+- Prevents accidental creation of nested psmux instances
+- To create a new session from inside psmux, use the command prompt (`Prefix + :`)
+
+## Dead Pane Handling
+
+- `set -g remain-on-exit on` keeps panes visible after their process exits
+- Dead panes display their final output for inspection
+- `respawn-pane` restarts the shell or a new command in a dead pane
+- Useful for monitoring long-running processes that may crash
+
+## Command Prompt
+
+- **Prefix + :** opens a command prompt at the bottom of the screen
+- Full cursor movement (arrow keys, Home, End) within the command line
+- Command history (Up/Down arrows recall previous commands)
+- Any psmux/tmux command can be typed and executed interactively
+- Supports `source-file`, `set-option`, `split-window`, `list-commands`, and all 83 commands
+
 ## Claude Code Agent Teams
 
 - First-class support for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) teammate pane spawning

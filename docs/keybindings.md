@@ -105,6 +105,34 @@ This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensibl
 
 Navigation and resize bindings support **repeat mode**: after pressing the prefix key once, successive keypresses within the `repeat-time` window (default 500ms) trigger the action without needing to re-enter the prefix. This applies to arrow-based pane navigation and resize bindings by default.
 
+## Command Prompt
+
+Press `Prefix + :` to open the command prompt at the bottom of the screen. You can type any psmux/tmux command here.
+
+### Command Prompt Editing Keys
+
+| Key | Action |
+|-----|--------|
+| `Left` / `Right` | Move cursor within the command |
+| `Home` / `Ctrl+A` | Jump to start of line |
+| `End` / `Ctrl+E` | Jump to end of line |
+| `Backspace` | Delete character before cursor |
+| `Delete` | Delete character at cursor |
+| `Up` / `Down` | Browse command history (previous/next) |
+| `Tab` | Command name completion |
+| `Enter` | Execute the command |
+| `Escape` | Cancel and close the prompt |
+
+The command prompt remembers your history across the session. Use Up/Down arrows to recall previous commands.
+
+You can run any command from the prompt that you would run from the CLI. For example:
+
+- `:split-window -h` to split horizontally
+- `:new-window -n logs` to create a named window
+- `:source-file ~/.psmux.conf` to reload your config
+- `:set -g status-style "bg=blue"` to change a setting live
+- `:list-keys` to see all current key bindings
+
 ## Copy/Scroll Mode (Vi)
 
 Enter copy mode with `Prefix + [` to scroll through terminal history with vim-style keybindings.

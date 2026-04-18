@@ -383,3 +383,217 @@ To make it persistent for new shells:
 ```powershell
 setx PSMUX_DIM_PREDICTIONS 1
 ```
+
+## Reloading Configuration at Runtime
+
+You can reload your config file without restarting psmux. From the command prompt (`Prefix + :`), run:
+
+```tmux
+source-file ~/.psmux.conf
+```
+
+Or from outside psmux:
+
+```powershell
+psmux source-file ~/.psmux.conf
+```
+
+This re-executes every line in the config file, applying any changes to options, key bindings, hooks, and styles immediately.
+
+## Window and Pane Numbering
+
+By default, windows and panes are numbered starting from 0. You can change the starting index for both:
+
+```tmux
+# Start window numbering at 1
+set -g base-index 1
+
+# Start pane numbering at 1
+set -g pane-base-index 1
+```
+
+The `pane-base-index` setting affects:
+
+- **Display Panes overlay** (`Prefix + q`): The numbers shown on each pane start from your configured base index
+- **Pane targets**: When referencing panes by number (e.g. `select-pane -t 1`), numbering follows your base index
+- **Format variables**: `#{pane_index}` reflects the base index setting
+- **Status bar and border labels**: Pane numbers in format strings use the configured base
+
+A common setup for both windows and panes to start at 1:
+
+```tmux
+set -g base-index 1
+set -g pane-base-index 1
+```
+
+## Display Panes Overlay
+
+Press `Prefix + q` to show numbered overlays on each pane. While the overlay is visible, press any displayed number key to jump to that pane. The overlay auto-dismisses after `display-panes-time` milliseconds (default: 1000ms).
+
+```tmux
+# Show pane numbers for 3 seconds
+set -g display-panes-time 3000
+```
+
+The numbers shown respect your `pane-base-index` setting. For example, with `pane-base-index 1`, three panes show as 1, 2, 3 instead of 0, 1, 2.
+
+You can also trigger this overlay from the command line:
+
+```powershell
+psmux display-panes
+```
+
+## Split Window Options
+
+When splitting panes, you can control the size and starting directory of the new pane:
+
+```tmux
+# Split vertically, new pane takes 30% of the space
+split-window -v -p 30
+
+# Split horizontally, new pane takes 70% of the space
+split-window -h -p 70
+
+# Split and start in a specific directory
+split-window -v -c "C:\Projects\myapp"
+
+# Split and start in the current pane's directory
+split-window -h -c "#{pane_current_path}"
+
+# Split and run a specific command
+split-window -v -- python
+```
+
+These flags also work when creating new windows:
+
+```tmux
+# New window with a specific name
+new-window -n "logs"
+
+# New window in a specific directory
+new-window -c "C:\Projects"
+
+# New window running a specific command with a name
+new-window -n "build" -- cargo build --watch
+```
+
+When you set a window name with `-n`, the `automatic-rename` flag is turned off for that window so psmux does not overwrite your chosen name with the foreground process name. To re-enable automatic renaming for that window:
+
+```tmux
+set-option -w automatic-rename on
+```
+
+## Detach and Exit Policies
+
+Control what happens when clients disconnect or all windows close:
+
+```tmux
+# Exit the server when no clients are attached (default: off)
+set -g destroy-unattached on
+
+# Exit the server when the last window/session closes (default: on)
+set -g exit-empty on
+```
+
+With `destroy-unattached on`, the server process terminates as soon as the last client detaches. This is useful for single-use sessions.
+
+With `exit-empty off`, the server stays alive even after all sessions are closed, allowing new sessions to be created without restarting.
+
+## Dead Panes and Respawn
+
+When a process inside a pane exits, the pane normally closes. To keep the pane visible after its process exits:
+
+```tmux
+set -g remain-on-exit on
+```
+
+A pane with a dead process shows its last output and can be respawned:
+
+```powershell
+# Restart the default shell in the pane
+psmux respawn-pane
+
+# Kill any remaining process and restart
+psmux respawn-pane -k
+
+# Respawn in a different directory
+psmux respawn-pane -c "C:\Projects"
+
+# Respawn with a specific command
+psmux respawn-pane -- python app.py
+```
+
+This is useful for monitoring: if a long-running process crashes, you can see its final output and restart it without losing the pane layout.
+
+## Session Environment Variables
+
+You can set environment variables at the session or global level that get inherited by all new panes:
+
+```powershell
+# Set a global env var (all new panes in all sessions inherit this)
+psmux set-environment -g EDITOR vim
+
+# Set a session-scoped env var
+psmux set-environment MY_VAR value
+
+# Unset a global env var
+psmux set-environment -gu MY_VAR
+
+# View all environment variables
+psmux show-environment
+psmux show-environment -g
+```
+
+You can also pass environment variables when creating a new session:
+
+```powershell
+# Create a session with custom environment
+psmux new-session -s work -e "PROJECT=myapp" -e "ENV=production"
+```
+
+## Status Bar Time Updates
+
+The status bar supports time format variables that update in real time:
+
+```tmux
+# Show current time in the status bar (updates every second)
+set -g status-right "%H:%M:%S %d-%b-%y"
+
+# Common time format variables:
+#   %H   Hour (24-hour, 00-23)
+#   %I   Hour (12-hour, 01-12)
+#   %M   Minute (00-59)
+#   %S   Second (00-59)
+#   %p   AM/PM
+#   %r   Full time in 12-hour format (e.g. 02:30:45 PM)
+#   %R   Hour:Minute in 24-hour format (e.g. 14:30)
+#   %d   Day of month (01-31)
+#   %b   Abbreviated month name (Jan, Feb, ...)
+#   %Y   Full year (2025)
+#   %a   Abbreviated weekday (Mon, Tue, ...)
+```
+
+Time variables refresh based on the `status-interval` option (default: 15 seconds). For second-level precision, reduce the interval:
+
+```tmux
+# Update status bar every second (for live clock)
+set -g status-interval 1
+```
+
+## PSReadLine ListView
+
+psmux supports PSReadLine's ListView prediction style, which shows a dropdown list of suggestions:
+
+```powershell
+# In your PowerShell profile ($PROFILE)
+Set-PSReadLineOption -PredictionSource HistoryAndPlugin
+Set-PSReadLineOption -PredictionViewStyle ListView
+```
+
+For this to work inside psmux, enable `allow-predictions` in your psmux config:
+
+```tmux
+set -g allow-predictions on
+```
+
+Without `allow-predictions on`, psmux resets PSReadLine's prediction settings during initialization, which disables ListView mode.

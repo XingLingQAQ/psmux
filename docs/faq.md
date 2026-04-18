@@ -57,6 +57,42 @@ A: Yes, using the [psmux-resurrect](https://github.com/psmux/psmux-plugins/tree/
 **Q: Do sessions survive SSH disconnects?**
 A: Yes. The psmux session server persists even when your SSH connection drops. After reconnecting, run `psmux attach` to reattach to your sessions.
 
+**Q: How do I reload my config without restarting psmux?**
+A: Press `Prefix + :` to open the command prompt, then type `source-file ~/.psmux.conf`. You can also run `psmux source-file ~/.psmux.conf` from another terminal. This re-applies all options, key bindings, and styles immediately.
+
+**Q: How do I run commands from inside a psmux session?**
+A: Press `Prefix + :` to open the command prompt. Type any command (e.g. `split-window -h`, `new-window -n logs`, `set -g status-style "bg=blue"`). You can also run `list-commands` from the prompt to see all available commands.
+
+**Q: How do I switch between sessions?**
+A: Press `Prefix + s` to open the interactive session chooser. Use arrow keys to navigate and Enter to select. You can also use `Prefix + (` and `Prefix + )` to cycle through sessions, or `switch-client -t sessionname` from the command prompt.
+
+**Q: How do I split a pane with a specific size?**
+A: Use the `-p` flag with a percentage: `split-window -v -p 30` gives the new pane 30% of the space. This works with both `-v` (vertical) and `-h` (horizontal) splits.
+
+**Q: How do I open a new pane in the same directory?**
+A: Use `split-window -c "#{pane_current_path}"`. You can bind this in your config for convenience: `bind-key '"' split-window -v -c "#{pane_current_path}"`.
+
+**Q: How do I prevent psmux from nesting inside itself?**
+A: psmux automatically detects when it is already running inside a psmux session and prevents accidental nesting. If you try to start `psmux` inside an existing session, it will warn you instead of creating a nested instance. To explicitly create a new session from within psmux, use the command prompt (`Prefix + :`) and type `new-session`.
+
+**Q: How do I keep a pane open after its process exits?**
+A: Add `set -g remain-on-exit on` to your config. When a process exits, the pane stays visible with its last output. Use `respawn-pane` (or `respawn-pane -k`) to restart the process in that pane.
+
+**Q: How do I make pane numbers start from 1 instead of 0?**
+A: Add `set -g pane-base-index 1` to your config. This affects the `Prefix + q` display panes overlay and pane target numbering. For windows, use `set -g base-index 1`.
+
+**Q: How do I set a window name that does not get overwritten?**
+A: Use the `-n` flag when creating: `new-window -n "myname"`. This automatically disables `automatic-rename` for that window. If you renamed a window with `Prefix + ,` and it keeps getting overwritten, add `set -g automatic-rename off` to your config or set it per-window with `set -w automatic-rename off`.
+
+**Q: How do I use PSReadLine ListView (dropdown suggestions) inside psmux?**
+A: First, add `set -g allow-predictions on` to your `~/.psmux.conf`. Then in your PowerShell profile, set `Set-PSReadLineOption -PredictionViewStyle ListView`. Without `allow-predictions on`, psmux resets PSReadLine settings during initialization.
+
+**Q: How do I get a live updating clock in my status bar?**
+A: Use time format variables like `%H:%M:%S` in your status-right: `set -g status-right "%H:%M:%S %d-%b-%y"`. Then set `set -g status-interval 1` to refresh every second.
+
+**Q: What is the difference between psmux, pmux, and tmux executables?**
+A: They are all the same binary. psmux installs as `psmux.exe` with `pmux.exe` and `tmux.exe` as aliases. Use whichever name you prefer. The `tmux` alias lets existing tmux scripts and muscle memory work without changes.
+
 **Q: Can I prevent psmux from entering copy mode on mouse scroll?**
 A: Yes. Add `set -g scroll-enter-copy-mode off` to your config. Scroll events will be passed directly to the running application instead of entering copy mode.
 

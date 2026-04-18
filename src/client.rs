@@ -459,6 +459,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut session_chooser = false;
     let mut session_entries: Vec<(String, String)> = Vec::new();
     let mut session_selected: usize = 0;
+    let mut session_scroll: usize = 0;
     let mut confirm_cmd: Option<String> = None;  // pending kill confirmation
     let current_session = name.clone();
     let mut last_sent_size: (u16, u16) = (0, 0);
@@ -1672,6 +1673,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 session_chooser = true;
                                 session_entries.clear();
                                 session_selected = 0;
+                                session_scroll = 0;
                                 let dir = format!("{}\\.psmux", home);
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
                                     for e in entries.flatten() {
@@ -1829,6 +1831,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             match key.code {
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
                                 KeyCode::Down if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
+                                KeyCode::PageUp if session_chooser => { session_selected = session_selected.saturating_sub(10); }
+                                KeyCode::PageDown if session_chooser => { session_selected = (session_selected + 10).min(session_entries.len().saturating_sub(1)); }
+                                KeyCode::Home if session_chooser => { session_selected = 0; }
+                                KeyCode::End if session_chooser => { session_selected = session_entries.len().saturating_sub(1); }
                                 KeyCode::Enter if session_chooser => {
                                     if let Some((sname, _)) = session_entries.get(session_selected) {
                                         if sname != &current_session {
@@ -3680,11 +3686,25 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             if session_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
                 let overlay = Block::default().borders(Borders::ALL).title("choose-session (enter=switch, x=kill, esc=close)").border_style(sel_style);
-                let oa = centered_rect(70, 20, content_chunk);
+                // Dynamic height: content lines + 2 (borders), capped to
+                // available space so the overlay never exceeds the terminal.
+                let sess_h = ((session_entries.len() as u16).saturating_add(2))
+                    .max(5)
+                    .min(content_chunk.height.saturating_sub(2));
+                let oa = centered_rect(70, sess_h, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
+                let inner = overlay.inner(oa);
+                let visible_h = inner.height as usize;
+                // Keep session_selected in view
+                if session_selected >= session_scroll + visible_h {
+                    session_scroll = session_selected.saturating_sub(visible_h - 1);
+                }
+                if session_selected < session_scroll {
+                    session_scroll = session_selected;
+                }
                 let mut lines: Vec<Line> = Vec::new();
-                for (i, (sname, info)) in session_entries.iter().enumerate() {
+                for (i, (sname, info)) in session_entries.iter().enumerate().skip(session_scroll).take(visible_h) {
                     let marker = if sname == &current_session { "*" } else { " " };
                     let line = if i == session_selected {
                         Line::from(Span::styled(format!("{} {}", marker, info), sel_style))
@@ -3694,7 +3714,27 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     lines.push(line);
                 }
                 let para = Paragraph::new(Text::from(lines));
-                f.render_widget(para, overlay.inner(oa));
+                f.render_widget(para, inner);
+                // Scroll position indicator (when content overflows)
+                if session_entries.len() > visible_h {
+                    let max_scroll = session_entries.len().saturating_sub(visible_h);
+                    let pct = if max_scroll > 0 { session_scroll * 100 / max_scroll } else { 0 };
+                    let indicator = if session_scroll == 0 {
+                        "Top".to_string()
+                    } else if session_scroll >= max_scroll {
+                        "Bot".to_string()
+                    } else {
+                        format!("{}%", pct)
+                    };
+                    let ind_len = indicator.len() as u16;
+                    if oa.width > ind_len + 2 {
+                        let ind_x = oa.x + oa.width - ind_len - 2;
+                        let ind_y = oa.y + oa.height - 1;
+                        let ind_rect = Rect::new(ind_x, ind_y, ind_len, 1);
+                        let ind_para = Paragraph::new(Span::styled(indicator, Style::default().fg(Color::DarkGray)));
+                        f.render_widget(ind_para, ind_rect);
+                    }
+                }
             }
             if tree_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
@@ -3730,6 +3770,26 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, inner);
+                // Scroll position indicator (when content overflows)
+                if tree_entries.len() > visible_h {
+                    let max_scroll = tree_entries.len().saturating_sub(visible_h);
+                    let pct = if max_scroll > 0 { tree_scroll * 100 / max_scroll } else { 0 };
+                    let indicator = if tree_scroll == 0 {
+                        "Top".to_string()
+                    } else if tree_scroll >= max_scroll {
+                        "Bot".to_string()
+                    } else {
+                        format!("{}%", pct)
+                    };
+                    let ind_len = indicator.len() as u16;
+                    if oa.width > ind_len + 2 {
+                        let ind_x = oa.x + oa.width - ind_len - 2;
+                        let ind_y = oa.y + oa.height - 1;
+                        let ind_rect = Rect::new(ind_x, ind_y, ind_len, 1);
+                        let ind_para = Paragraph::new(Span::styled(indicator, Style::default().fg(Color::DarkGray)));
+                        f.render_widget(ind_para, ind_rect);
+                    }
+                }
             }
             if buffer_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
@@ -3762,6 +3822,26 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, inner);
+                // Scroll position indicator (when content overflows)
+                if buffer_entries.len() > visible_h {
+                    let max_scroll = buffer_entries.len().saturating_sub(visible_h);
+                    let pct = if max_scroll > 0 { buffer_scroll * 100 / max_scroll } else { 0 };
+                    let indicator = if buffer_scroll == 0 {
+                        "Top".to_string()
+                    } else if buffer_scroll >= max_scroll {
+                        "Bot".to_string()
+                    } else {
+                        format!("{}%", pct)
+                    };
+                    let ind_len = indicator.len() as u16;
+                    if oa.width > ind_len + 2 {
+                        let ind_x = oa.x + oa.width - ind_len - 2;
+                        let ind_y = oa.y + oa.height - 1;
+                        let ind_rect = Rect::new(ind_x, ind_y, ind_len, 1);
+                        let ind_para = Paragraph::new(Span::styled(indicator, Style::default().fg(Color::DarkGray)));
+                        f.render_widget(ind_para, ind_rect);
+                    }
+                }
             }
             if keys_viewer {
                 // Proportional overlay: 90% width, up to 80% height

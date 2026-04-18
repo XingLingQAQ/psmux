@@ -2300,3 +2300,7 @@ mod tests_flag_parity;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue227_remain_on_exit_hooks.rs"]
 mod tests_issue227_remain_on_exit_hooks;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue235_display_panes_base_index.rs"]
+mod tests_issue235_display_panes_base_index;

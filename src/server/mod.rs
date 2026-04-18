@@ -4047,6 +4047,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "active_idx changed {} -> {} by status-interval hook",
                         _pre_status_idx, app.active_idx));
                 }
+                // Mark state dirty so the next loop iteration pushes a fresh
+                // frame with re-expanded strftime codes (%H:%M:%S, %r, etc.)
+                // in status-left / status-right.  Without this, the status
+                // bar clock never updates for persistent (TUI) clients.
+                state_dirty = true;
             }
         }
         // ── Subscription check: expand format strings and emit %subscription-changed ──

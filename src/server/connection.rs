@@ -1049,7 +1049,28 @@ match cmd {
         }
         if !persistent { break; }
     }
-    "delete-buffer" => { let _ = tx.send(CtrlReq::DeleteBuffer); }
+    "delete-buffer" => {
+        let buf_idx: Option<usize> = args.windows(2).find(|w| w[0] == "-b").and_then(|w| w[1].parse().ok());
+        if let Some(idx) = buf_idx {
+            let _ = tx.send(CtrlReq::DeleteBufferAt(idx));
+        } else {
+            let _ = tx.send(CtrlReq::DeleteBuffer);
+        }
+    }
+    "delete-buffer-at" => {
+        if let Some(idx_str) = args.get(0) {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                let _ = tx.send(CtrlReq::DeleteBufferAt(idx));
+            }
+        }
+    }
+    "paste-buffer-at" => {
+        if let Some(idx_str) = args.get(0) {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                let _ = tx.send(CtrlReq::PasteBufferAt(idx));
+            }
+        }
+    }
     "choose-buffer" | "chooseb" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ChooseBuffer(rtx));

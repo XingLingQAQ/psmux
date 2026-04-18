@@ -953,6 +953,8 @@ pub enum CtrlReq {
     ShowBuffer(mpsc::Sender<String>),
     ShowBufferAt(mpsc::Sender<String>, usize),
     DeleteBuffer,
+    DeleteBufferAt(usize),
+    PasteBufferAt(usize),
     DisplayMessage(mpsc::Sender<String>, String, Option<usize>, bool, Option<u64>),  // resp, format, target_pane_idx, set_status_bar, duration_override_ms
     LastWindow,
     LastPane,

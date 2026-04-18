@@ -2302,6 +2302,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DeleteBuffer => {
                     if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
                 }
+                CtrlReq::DeleteBufferAt(idx) => {
+                    if idx < app.paste_buffers.len() { app.paste_buffers.remove(idx); }
+                }
+                CtrlReq::PasteBufferAt(idx) => {
+                    if idx < app.paste_buffers.len() {
+                        let text = app.paste_buffers[idx].clone();
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                            let _ = write!(p.writer, "{}", text);
+                        }
+                    }
+                }
                 CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar, duration_ms) => {
                     // Propagate OSC titles so #{pane_title} reflects latest state
                     helpers::propagate_osc_titles(&mut app);

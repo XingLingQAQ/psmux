@@ -452,6 +452,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut tree_entries: Vec<(bool, usize, usize, String, String)> = Vec::new();  // (is_win, id, sub_id, label, session_name)
     let mut tree_selected: usize = 0;
     let mut tree_scroll: usize = 0;
+    let mut buffer_chooser = false;
+    let mut buffer_entries: Vec<(usize, usize, String)> = Vec::new();  // (index, byte_len, preview)
+    let mut buffer_selected: usize = 0;
+    let mut buffer_scroll: usize = 0;
     let mut session_chooser = false;
     let mut session_entries: Vec<(String, String)> = Vec::new();
     let mut session_selected: usize = 0;
@@ -1389,12 +1393,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                             }
                         }
-                        else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
+                        else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
                             command_input = false;
                             command_cursor = 0;
                             renaming = false;
                             pane_renaming = false;
                             tree_chooser = false;
+                            buffer_chooser = false;
                             session_chooser = false;
                             keys_viewer = false;
                             confirm_cmd = None;
@@ -1412,7 +1417,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         else if is_prefix { prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; cmd_batch.push("prefix-begin\n".into()); }
                         // Check root-table bindings (bind-key -n / bind-key -T root)
                         // These fire without prefix, before keys are forwarded to PTY
-                        else if !command_input && !renaming && !pane_renaming && !tree_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
+                        else if !command_input && !renaming && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             synced_bindings.iter().any(|b| b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple))
                         } {
@@ -1436,6 +1441,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             // (shared between synced_bindings dispatch and pre-sync hardcoded fallback)
                             let mut do_choose_tree = false;
                             let mut do_choose_session = false;
+                            let mut do_choose_buffer = false;
                             let mut do_session_nav: Option<bool> = None; // Some(true)=next, Some(false)=prev
 
                             // Check synced bindings from server (includes defaults from PREFIX_DEFAULTS)
@@ -1472,6 +1478,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     window_idx_input = true; window_idx_buf.clear();
                                 } else if cmd == "choose-tree" || cmd == "choose-window" {
                                     do_choose_tree = true;
+                                } else if cmd == "choose-buffer" || cmd == "chooseb" {
+                                    do_choose_buffer = true;
                                 } else if cmd == "choose-session" {
                                     do_choose_session = true;
                                 } else if cmd.starts_with("switch-client") {
@@ -1543,7 +1551,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     keys_viewer = true;
                                 }
                                 KeyCode::Char('t') => { cmd_batch.push("clock-mode\n".into()); }
-                                KeyCode::Char('=') => { cmd_batch.push("choose-buffer\n".into()); }
+                                KeyCode::Char('=') => { do_choose_buffer = true; }
+                                KeyCode::Char('#') => { cmd_batch.push("list-buffers\n".into()); }
                                 KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
                                 KeyCode::Char('w') => { do_choose_tree = true; }
@@ -1707,6 +1716,61 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if sname == &current_session { session_selected = i; break; }
                                 }
                             }
+                            if do_choose_buffer {
+                                buffer_chooser = true;
+                                buffer_entries.clear();
+                                buffer_selected = 0;
+                                buffer_scroll = 0;
+                                // Fetch buffer list from server via TCP
+                                let port_file = format!("{}\\.psmux\\{}.port", home, current_session);
+                                if let Ok(port_str) = std::fs::read_to_string(&port_file) {
+                                    if let Ok(p) = port_str.trim().parse::<u16>() {
+                                        let sess_key = read_session_key(&current_session).unwrap_or_default();
+                                        let addr = format!("127.0.0.1:{}", p);
+                                        if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
+                                            &addr.parse().unwrap(), Duration::from_millis(100)
+                                        ) {
+                                            let _ = ss.set_read_timeout(Some(Duration::from_millis(200)));
+                                            let _ = write!(ss, "AUTH {}\n", sess_key);
+                                            let _ = ss.write_all(b"choose-buffer\n");
+                                            let _ = ss.flush();
+                                            let mut br = BufReader::new(ss);
+                                            let mut al = String::new();
+                                            let _ = br.read_line(&mut al); // AUTH OK
+                                            let mut buf_line = String::new();
+                                            if br.read_line(&mut buf_line).is_ok() {
+                                                // Parse "buffer0: 17 bytes: "content"\nbuffer1: ..."
+                                                for line in buf_line.trim().split('\n') {
+                                                    let line = line.trim();
+                                                    if line.is_empty() { continue; }
+                                                    // Format: "bufferN: M bytes: "preview""
+                                                    if let Some(rest) = line.strip_prefix("buffer") {
+                                                        if let Some(colon_pos) = rest.find(':') {
+                                                            if let Ok(idx) = rest[..colon_pos].parse::<usize>() {
+                                                                let after_colon = &rest[colon_pos+1..].trim_start();
+                                                                let byte_len = after_colon.split_whitespace().next()
+                                                                    .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                                                                // Extract preview (after "bytes: ")
+                                                                let preview = if let Some(bp) = after_colon.find('"') {
+                                                                    let p = &after_colon[bp+1..];
+                                                                    p.trim_end_matches('"').to_string()
+                                                                } else {
+                                                                    after_colon.to_string()
+                                                                };
+                                                                buffer_entries.push((idx, byte_len, preview));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if buffer_entries.is_empty() {
+                                    // No buffers — don't show chooser
+                                    buffer_chooser = false;
+                                }
+                            }
                             if let Some(dir_next) = do_session_nav {
                                 let dir = format!("{}\\.psmux", home);
                                 let mut names: Vec<String> = Vec::new();
@@ -1841,6 +1905,40 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     }
                                 }
                                 KeyCode::Esc if tree_chooser => { tree_chooser = false; }
+                                // --- buffer chooser (C-b =) ---
+                                KeyCode::Up | KeyCode::Char('k') if buffer_chooser => {
+                                    if buffer_selected > 0 { buffer_selected -= 1; }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') if buffer_chooser => {
+                                    if buffer_selected + 1 < buffer_entries.len() { buffer_selected += 1; }
+                                }
+                                KeyCode::Enter if buffer_chooser => {
+                                    // Paste selected buffer into active pane
+                                    if buffer_selected < buffer_entries.len() {
+                                        let (idx, _, _) = &buffer_entries[buffer_selected];
+                                        cmd_batch.push(format!("paste-buffer-at {}\n", idx));
+                                    }
+                                    buffer_chooser = false;
+                                }
+                                KeyCode::Char('d') | KeyCode::Delete if buffer_chooser => {
+                                    // Delete selected buffer
+                                    if buffer_selected < buffer_entries.len() {
+                                        let (idx, _, _) = &buffer_entries[buffer_selected];
+                                        cmd_batch.push(format!("delete-buffer-at {}\n", idx));
+                                        buffer_entries.remove(buffer_selected);
+                                        // Re-index remaining entries
+                                        for (i, entry) in buffer_entries.iter_mut().enumerate() {
+                                            entry.0 = i;
+                                        }
+                                        if buffer_selected >= buffer_entries.len() && buffer_selected > 0 {
+                                            buffer_selected -= 1;
+                                        }
+                                        if buffer_entries.is_empty() {
+                                            buffer_chooser = false;
+                                        }
+                                    }
+                                }
+                                KeyCode::Esc | KeyCode::Char('q') if buffer_chooser => { buffer_chooser = false; }
                                 // --- list-keys viewer (C-b ?) ---
                                 KeyCode::Up if keys_viewer => { if keys_viewer_scroll > 0 { keys_viewer_scroll -= 1; } }
                                 KeyCode::Down if keys_viewer => { keys_viewer_scroll += 1; }
@@ -1890,10 +1988,62 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if !trimmed.is_empty() {
                                         command_history.push(trimmed.clone());
                                         command_history_idx = command_history.len();
-                                        // Split on \; or ; to support command chaining (issue #192)
-                                        let sub_cmds = crate::config::split_chained_commands_pub(&trimmed);
-                                        for sub in &sub_cmds {
-                                            cmd_batch.push(format!("{}\n", sub));
+                                        // Intercept client-side UI commands from command prompt
+                                        let first_word = trimmed.split_whitespace().next().unwrap_or("");
+                                        if first_word == "choose-buffer" || first_word == "chooseb" {
+                                            // Open interactive buffer chooser instead of sending to server
+                                            buffer_chooser = true;
+                                            buffer_entries.clear();
+                                            buffer_selected = 0;
+                                            buffer_scroll = 0;
+                                            let port_file = format!("{}\\.psmux\\{}.port", home, current_session);
+                                            if let Ok(port_str) = std::fs::read_to_string(&port_file) {
+                                                if let Ok(p) = port_str.trim().parse::<u16>() {
+                                                    let sess_key = read_session_key(&current_session).unwrap_or_default();
+                                                    let addr = format!("127.0.0.1:{}", p);
+                                                    if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
+                                                        &addr.parse().unwrap(), Duration::from_millis(100)
+                                                    ) {
+                                                        let _ = ss.set_read_timeout(Some(Duration::from_millis(200)));
+                                                        let _ = write!(ss, "AUTH {}\n", sess_key);
+                                                        let _ = ss.write_all(b"choose-buffer\n");
+                                                        let _ = ss.flush();
+                                                        let mut br = BufReader::new(ss);
+                                                        let mut al = String::new();
+                                                        let _ = br.read_line(&mut al);
+                                                        let mut buf_line = String::new();
+                                                        if br.read_line(&mut buf_line).is_ok() {
+                                                            for line in buf_line.trim().split('\n') {
+                                                                let line = line.trim();
+                                                                if line.is_empty() { continue; }
+                                                                if let Some(rest) = line.strip_prefix("buffer") {
+                                                                    if let Some(colon_pos) = rest.find(':') {
+                                                                        if let Ok(idx) = rest[..colon_pos].parse::<usize>() {
+                                                                            let after_colon = &rest[colon_pos+1..].trim_start();
+                                                                            let byte_len = after_colon.split_whitespace().next()
+                                                                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                                                                            let preview = if let Some(bp) = after_colon.find('"') {
+                                                                                let p = &after_colon[bp+1..];
+                                                                                p.trim_end_matches('"').to_string()
+                                                                            } else {
+                                                                                after_colon.to_string()
+                                                                            };
+                                                                            buffer_entries.push((idx, byte_len, preview));
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if buffer_entries.is_empty() { buffer_chooser = false; }
+                                        } else {
+                                            // Split on \; or ; to support command chaining (issue #192)
+                                            let sub_cmds = crate::config::split_chained_commands_pub(&trimmed);
+                                            for sub in &sub_cmds {
+                                                cmd_batch.push(format!("{}\n", sub));
+                                            }
                                         }
                                     }
                                     command_input = false;
@@ -2716,7 +2866,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // Rate-limit dump-state requests to avoid flooding the server.
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
-        let overlays_active = command_input || renaming || pane_renaming || tree_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
+        let overlays_active = command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
         let should_dump = if force_dump || size_changed {
             true
         } else if typing_active {
@@ -3575,6 +3725,38 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         Line::from(Span::styled(label.clone(), Style::default().add_modifier(Modifier::BOLD)))
                     } else {
                         Line::from(label.clone())
+                    };
+                    lines.push(line);
+                }
+                let para = Paragraph::new(Text::from(lines));
+                f.render_widget(para, inner);
+            }
+            if buffer_chooser {
+                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let overlay = Block::default().borders(Borders::ALL)
+                    .title(" choose-buffer (Enter=paste, d=delete, q/Esc=close) ")
+                    .border_style(sel_style);
+                let buf_h = ((buffer_entries.len() as u16).saturating_add(2))
+                    .max(5)
+                    .min(content_chunk.height.saturating_sub(2));
+                let oa = centered_rect(70, buf_h, content_chunk);
+                f.render_widget(Clear, oa);
+                f.render_widget(&overlay, oa);
+                let inner = overlay.inner(oa);
+                let visible_h = inner.height as usize;
+                if buffer_selected >= buffer_scroll + visible_h {
+                    buffer_scroll = buffer_selected.saturating_sub(visible_h - 1);
+                }
+                if buffer_selected < buffer_scroll {
+                    buffer_scroll = buffer_selected;
+                }
+                let mut lines: Vec<Line> = Vec::new();
+                for (i, (idx, byte_len, preview)) in buffer_entries.iter().enumerate().skip(buffer_scroll).take(visible_h) {
+                    let label = format!("buffer{}: {} bytes: \"{}\"", idx, byte_len, preview);
+                    let line = if i == buffer_selected {
+                        Line::from(Span::styled(label, sel_style))
+                    } else {
+                        Line::from(label)
                     };
                     lines.push(line);
                 }

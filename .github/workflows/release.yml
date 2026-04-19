@@ -1,16 +1,19 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v3.3.3) — tag must already exist in the repo'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 # Prevent duplicate runs from overwriting release assets / submitting duplicate PRs
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
@@ -52,7 +55,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = "${{ github.ref_name }}"
+          $version = "${{ inputs.tag }}"
           $zipName = "psmux-$version-${{ matrix.artifact }}"
           $releaseDir = "target/${{ matrix.target }}/release"
           New-Item -ItemType Directory -Path $zipName -Force
@@ -101,7 +104,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $version = "${{ inputs.tag }}" -replace '^v', ''
           $releaseDir = Resolve-Path "target/${{ matrix.target }}/release"
           $repoDir = Resolve-Path "."
           New-Item -ItemType Directory -Path "target\installer" -Force | Out-Null
@@ -140,7 +143,7 @@ jobs:
         id: changelog
         run: |
           # Find the previous tag
-          CURRENT_TAG="${{ github.ref_name }}"
+          CURRENT_TAG="${{ inputs.tag }}"
           PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
 
           if [ -z "$PREV_TAG" ]; then
@@ -158,7 +161,7 @@ jobs:
       - name: Build release body
         id: body
         run: |
-          CURRENT_TAG="${{ github.ref_name }}"
+          CURRENT_TAG="${{ inputs.tag }}"
           PREV_TAG="${{ steps.changelog.outputs.prev_tag }}"
 
           {
@@ -311,7 +314,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ inputs.tag }}"
           $ver = $tag -replace '^v', ''
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
           echo "TAG=$tag" >> $env:GITHUB_OUTPUT
@@ -454,7 +457,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          tag="${{ github.ref_name }}"
+          tag="${{ inputs.tag }}"
           ver="${tag#v}"
           echo "VERSION=$ver" >> $GITHUB_OUTPUT
           echo "TAG=$tag" >> $GITHUB_OUTPUT
@@ -463,7 +466,7 @@ jobs:
         id: hashes
         shell: bash
         run: |
-          tag="${{ github.ref_name }}"
+          tag="${{ inputs.tag }}"
           repo="${{ github.repository }}"
           base="https://github.com/$repo/releases/download/$tag"
 
@@ -578,7 +581,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ inputs.tag }}"
           $ver = $tag -replace '^v', ''
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
           echo "TAG=$tag" >> $env:GITHUB_OUTPUT

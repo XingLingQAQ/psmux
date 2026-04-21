@@ -62,6 +62,9 @@ function New-Session {
         return $false
     }
     Start-Sleep -Seconds 3
+    # allow-set-title defaults to off (commit 4162d97). Enable it so OSC 0/2
+    # titles from child processes update pane_title for this verification test.
+    & $PSMUX set-option -t $SESSION -g allow-set-title on 2>&1 | Out-Null
     return $true
 }
 

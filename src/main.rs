@@ -63,6 +63,11 @@ fn main() {
 fn run_main() -> io::Result<()> {
     let args: Vec<String> = crate::cli::normalize_flag_equals(env::args().collect());
     
+    // Set console code page to UTF-8 early so ALL output paths (CLI commands
+    // like capture-pane, list-sessions, display-message, etc.) correctly
+    // render multi-byte Unicode characters instead of mojibake.
+    enable_virtual_terminal_processing();
+
     // Clean up any stale port files at startup
     cleanup_stale_port_files();
     
@@ -1780,6 +1785,33 @@ fn run_main() -> io::Result<()> {
                     .unwrap_or_default();
                 let effective_src = if src_session.is_empty() { current_session.clone() } else { src_session.clone() };
                 let effective_tgt = if tgt_session.is_empty() { current_session.clone() } else { tgt_session.clone() };
+                // tmux parity: require at least one of -s or -t. Reject empty invocation.
+                if source_spec.is_empty() && target_spec.is_empty() {
+                    eprintln!("psmux: usage: join-pane [-bdhv] [-l size | -p percentage] [-s src-pane] [-t dst-pane]");
+                    std::process::exit(1);
+                }
+                // tmux parity: src and target panes must be in different windows.
+                // Detect same-session same-window case and reject (matches tmux's
+                // "source and target panes must be different" error).
+                let src_after_colon_check = if source_spec.contains(':') {
+                    source_spec.split(':').nth(1).unwrap_or("")
+                } else { source_spec.as_str() };
+                let tgt_after_colon_check = if target_spec.contains(':') {
+                    target_spec.split(':').nth(1).unwrap_or("")
+                } else { target_spec.as_str() };
+                let same_session = effective_src == effective_tgt && !effective_src.is_empty();
+                if same_session && !src_after_colon_check.is_empty() && !tgt_after_colon_check.is_empty() {
+                    // Prefix with ':' so parse_target reads "0.2" as window=0,pane=2
+                    // (a bare "0.2" is otherwise read as session="0", pane=2).
+                    let sp_chk = crate::cli::parse_target(&format!(":{}", src_after_colon_check));
+                    let tp_chk = crate::cli::parse_target(&format!(":{}", tgt_after_colon_check));
+                    if let (Some(sw), Some(tw)) = (sp_chk.window, tp_chk.window) {
+                        if sw == tw {
+                            eprintln!("psmux: can't join a pane to its own window");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 if !effective_src.is_empty() && !effective_tgt.is_empty() && effective_src != effective_tgt {
                     // Cross-session join-pane: orchestrate via TCP
                     let src_after_colon = if source_spec.contains(':') {
@@ -1808,7 +1840,10 @@ fn run_main() -> io::Result<()> {
                         horizontal,
                     ) {
                         Ok(()) => {}
-                        Err(e) => eprintln!("psmux: cross-session join-pane failed: {}", e),
+                        Err(e) => {
+                            eprintln!("psmux: cross-session join-pane failed: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                 } else {
                     // Same-session join-pane: forward to server as before

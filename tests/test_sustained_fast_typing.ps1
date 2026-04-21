@@ -62,7 +62,10 @@ Cleanup
 Remove-Item "$psmuxDir\input_debug.log" -Force -EA SilentlyContinue
 
 $env:PSMUX_INPUT_DEBUG = "1"
-$proc = Start-Process -FilePath $PSMUX -ArgumentList "new-session","-s",$SESSION -PassThru
+# Use a wide terminal (-x 200) so the 100+ char test string fits on a single
+# line and the output capture does not wrap mid-marker. Without this the test
+# falsely reports dropped chars caused by terminal line wrapping.
+$proc = Start-Process -FilePath $PSMUX -ArgumentList "new-session","-s",$SESSION,"-x","200","-y","50" -PassThru
 $env:PSMUX_INPUT_DEBUG = $null
 $PID_TUI = $proc.Id
 Write-Host "`nLaunched TUI PID: $PID_TUI" -ForegroundColor Cyan
@@ -142,32 +145,27 @@ foreach ($iv in $intervals) {
 
     $paneOut = Show-Pane "After typing at ${ms}ms interval"
 
-    # Extract the echo output line (the line AFTER the echo command)
-    # Look for the marker in the output
-    $delivered = ""
-    $paneLines = $paneOut -split "`n"
-    foreach ($line in $paneLines) {
-        $trimmed = $line.Trim()
-        # Look for the line that starts with our marker but is NOT the echo command
-        if ($trimmed -match "^${marker}" -and $trimmed -notmatch "^echo ") {
-            $delivered = $trimmed
-            break
-        }
-    }
-
-    # Also check the echo command line itself for what was typed
-    $cmdLine = ""
-    foreach ($line in $paneLines) {
-        if ($line -match "echo.*${marker}") {
-            # Extract everything after "echo "
-            if ($line -match "echo\s+(.+)$") {
-                $cmdLine = $Matches[1].Trim()
-            }
-            break
-        }
-    }
-
+    # Extract the typed text by joining all wrapped pane lines into a single
+    # string and searching for the marker. Lines wrap at the terminal width
+    # (typically 80 cols) but the underlying content is contiguous, so a join
+    # of trimmed lines reconstructs the full input. We then look for the
+    # marker followed by as much of the test string as is present.
     $expected = "${marker}${text}"
+    $joined = ($paneOut -split "`n" | ForEach-Object { $_.TrimEnd() }) -join ""
+    $cmdLine = ""
+    $idx = $joined.IndexOf($marker)
+    if ($idx -ge 0) {
+        $tail = $joined.Substring($idx)
+        # Trim at the next prompt or echo repeat to isolate the input string.
+        $endIdx = $tail.Length
+        if ($tail.IndexOf("PS ", 1) -gt 0)        { $endIdx = [Math]::Min($endIdx, $tail.IndexOf("PS ", 1)) }
+        if ($tail.IndexOf($marker, 1) -gt 0)      { $endIdx = [Math]::Min($endIdx, $tail.IndexOf($marker, 1)) }
+        $cmdLine = $tail.Substring(0, $endIdx).TrimEnd()
+        # Cap at expected length (we only care about whether the full string was delivered)
+        if ($cmdLine.Length -gt $expected.Length) {
+            $cmdLine = $cmdLine.Substring(0, $expected.Length)
+        }
+    }
     Write-Host "`n  Expected ($($expected.Length) chars): $expected"
     Write-Host "  CmdLine  ($($cmdLine.Length) chars): $cmdLine"
 

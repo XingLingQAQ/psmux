@@ -132,13 +132,18 @@ if ($LASTEXITCODE -eq 0) {
     $cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
     if ($cmd.Trim() -match "wsl|bash|zsh") {
         Write-Pass "Pane runs WSL via bare name"
-    } elseif ($cmd.Trim() -match "conhost") {
-        # ConPTY sometimes reports conhost for WSL — verify via uname
+    } elseif ($cmd.Trim() -match "conhost|shell") {
+        # ConPTY/shell self reports conhost or 'shell' for WSL — verify via uname
         & $PSMUX send-keys -t $session 'uname -s' Enter 2>&1 | Out-Null
-        Start-Sleep -Seconds 2
-        $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+        $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
+        $capOut = ""
+        while ($sw2.ElapsedMilliseconds -lt 15000) {
+            $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+            if ($capOut -match "Linux") { break }
+            Start-Sleep -Milliseconds 500
+        }
         if ($capOut -match "Linux") {
-            Write-Pass "Pane runs WSL via bare name (verified via uname, pane_current_command=conhost)"
+            Write-Pass "Pane runs WSL via bare name (verified via uname, pane_current_command=$($cmd.Trim()))"
         } else {
             Write-Fail "Pane not running WSL (got: $($cmd.Trim()))"
         }
@@ -205,12 +210,12 @@ $cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) 
 Write-Info "  split-window pane_current_command: $($cmd.Trim())"
 if ($cmd.Trim() -match "wsl|bash|zsh") {
     Write-Pass "Split pane runs WSL"
-} elseif ($cmd.Trim() -match "conhost") {
+} elseif ($cmd.Trim() -match "conhost|shell") {
     & $PSMUX send-keys -t $session 'uname -s' Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
     $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
     if ($capOut -match "Linux") {
-        Write-Pass "Split pane runs WSL (verified via uname, pane_current_command=conhost)"
+        Write-Pass "Split pane runs WSL (verified via uname, pane_current_command=$($cmd.Trim()))"
     } else {
         Write-Fail "Split pane not running WSL (got: $($cmd.Trim()))"
     }
@@ -246,10 +251,15 @@ if ($output -match "PSMUX=.+") {
     Write-Pass "WSL env var test completed (PSMUX_SESSION may require WSLENV config)"
 }
 
-# Verify the pane is really running Linux
+# Verify the pane is really running Linux (poll up to 20s for WSL boot)
 & $PSMUX send-keys -t $session 'uname -s' Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 2
-$output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$output = ""
+while ($sw.ElapsedMilliseconds -lt 20000) {
+    $output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    if ($output -match "Linux") { break }
+    Start-Sleep -Milliseconds 500
+}
 if ($output -match "Linux") {
     Write-Pass "WSL pane confirmed running Linux (uname -s)"
 } else {
@@ -293,9 +303,9 @@ $cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) 
 Write-Info "  new-window after runtime set: $($cmd.Trim())"
 if ($cmd.Trim() -match "wsl|bash|zsh") {
     Write-Pass "New window uses WSL after runtime default-shell change"
-} elseif ($cmd.Trim() -match "conhost") {
+} elseif ($cmd.Trim() -match "conhost|shell") {
     & $PSMUX send-keys -t $session 'uname -s' Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
     $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
     if ($capOut -match "Linux") {
         Write-Pass "New window uses WSL after runtime change (verified via uname)"
@@ -313,9 +323,9 @@ $cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) 
 Write-Info "  split-window after runtime set: $($cmd.Trim())"
 if ($cmd.Trim() -match "wsl|bash|zsh") {
     Write-Pass "Split pane uses WSL after runtime default-shell change"
-} elseif ($cmd.Trim() -match "conhost") {
+} elseif ($cmd.Trim() -match "conhost|shell") {
     & $PSMUX send-keys -t $session 'uname -s' Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
     $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
     if ($capOut -match "Linux") {
         Write-Pass "Split pane uses WSL after runtime change (verified via uname)"
@@ -349,9 +359,9 @@ $cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) 
 Write-Info "  new-window with bare 'wsl': $($cmd.Trim())"
 if ($cmd.Trim() -match "wsl|bash|zsh") {
     Write-Pass "Runtime set with bare 'wsl' works"
-} elseif ($cmd.Trim() -match "conhost") {
+} elseif ($cmd.Trim() -match "conhost|shell") {
     & $PSMUX send-keys -t $session 'uname -s' Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
     $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
     if ($capOut -match "Linux") {
         Write-Pass "Runtime set with bare 'wsl' works (verified via uname)"

@@ -81,7 +81,16 @@ Write-Info "  pane_current_command: $cmd"
 if ($cmd -match "cmd") {
     Write-Pass "Pane is running cmd.exe"
 } else {
-    Write-Fail "Pane is NOT running cmd.exe (got: $cmd)"
+    # After #229 fix, pane_current_command returns 'shell' for the shell self
+    # (no foreground child). Verify cmd.exe via COMSPEC env var instead.
+    & $PSMUX send-keys -t $session 'echo COMSPEC=%COMSPEC%' Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    if ($capOut -match "COMSPEC=.*cmd\.exe") {
+        Write-Pass "Pane is running cmd.exe (verified via COMSPEC, pane_current_command='$cmd')"
+    } else {
+        Write-Fail "Pane is NOT running cmd.exe (got: $cmd)"
+    }
 }
 
 # Send a command and verify it works
@@ -117,7 +126,15 @@ if ($LASTEXITCODE -eq 0) {
     if ($cmd.Trim() -match "cmd") {
         Write-Pass "Pane runs cmd.exe via bare name"
     } else {
-        Write-Fail "Pane not running cmd.exe (got: $($cmd.Trim()))"
+        # After #229, pane_current_command returns 'shell' for shell self.
+        & $PSMUX send-keys -t $session 'echo COMSPEC=%COMSPEC%' Enter 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+        $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+        if ($capOut -match "COMSPEC=.*cmd\.exe") {
+            Write-Pass "Pane runs cmd.exe via bare name (verified via COMSPEC)"
+        } else {
+            Write-Fail "Pane not running cmd.exe (got: $($cmd.Trim()))"
+        }
     }
 } else {
     Write-Fail "Failed to create session with bare 'cmd.exe' name"
@@ -180,7 +197,15 @@ Write-Info "  split-window pane_current_command: $($cmd.Trim())"
 if ($cmd.Trim() -match "cmd") {
     Write-Pass "Split pane runs cmd.exe"
 } else {
-    Write-Fail "Split pane not running cmd.exe (got: $($cmd.Trim()))"
+    # After #229, pane_current_command returns 'shell' for shell self.
+    & $PSMUX send-keys -t $session 'echo COMSPEC=%COMSPEC%' Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    if ($capOut -match "COMSPEC=.*cmd\.exe") {
+        Write-Pass "Split pane runs cmd.exe (verified via COMSPEC)"
+    } else {
+        Write-Fail "Split pane not running cmd.exe (got: $($cmd.Trim()))"
+    }
 }
 
 & $PSMUX kill-session -t $session 2>$null | Out-Null
@@ -255,7 +280,14 @@ Write-Info "  new-window after runtime set: $($cmd.Trim())"
 if ($cmd.Trim() -match "cmd") {
     Write-Pass "New window uses cmd.exe after runtime default-shell change"
 } else {
-    Write-Fail "New window NOT using cmd.exe after runtime change (got: $($cmd.Trim()))"
+    & $PSMUX send-keys -t $session 'echo COMSPEC=%COMSPEC%' Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    if ($capOut -match "COMSPEC=.*cmd\.exe") {
+        Write-Pass "New window uses cmd.exe (verified via COMSPEC)"
+    } else {
+        Write-Fail "New window NOT using cmd.exe after runtime change (got: $($cmd.Trim()))"
+    }
 }
 
 & $PSMUX split-window -t $session -v 2>&1 | Out-Null
@@ -266,7 +298,14 @@ Write-Info "  split-window after runtime set: $($cmd.Trim())"
 if ($cmd.Trim() -match "cmd") {
     Write-Pass "Split pane uses cmd.exe after runtime default-shell change"
 } else {
-    Write-Fail "Split pane NOT using cmd.exe after runtime change (got: $($cmd.Trim()))"
+    & $PSMUX send-keys -t $session 'echo COMSPEC=%COMSPEC%' Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    if ($capOut -match "COMSPEC=.*cmd\.exe") {
+        Write-Pass "Split pane uses cmd.exe (verified via COMSPEC)"
+    } else {
+        Write-Fail "Split pane NOT using cmd.exe after runtime change (got: $($cmd.Trim()))"
+    }
 }
 
 & $PSMUX kill-session -t $session 2>$null | Out-Null
@@ -293,7 +332,14 @@ Write-Info "  new-window with bare 'cmd': $($cmd.Trim())"
 if ($cmd.Trim() -match "cmd") {
     Write-Pass "Runtime set with bare 'cmd' works"
 } else {
-    Write-Fail "Runtime set with bare 'cmd' failed (got: $($cmd.Trim()))"
+    & $PSMUX send-keys -t $session 'echo COMSPEC=%COMSPEC%' Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    if ($capOut -match "COMSPEC=.*cmd\.exe") {
+        Write-Pass "Runtime set with bare 'cmd' works (verified via COMSPEC)"
+    } else {
+        Write-Fail "Runtime set with bare 'cmd' failed (got: $($cmd.Trim()))"
+    }
 }
 
 & $PSMUX kill-session -t $session 2>$null | Out-Null

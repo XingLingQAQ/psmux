@@ -93,15 +93,19 @@ $non_null4 = $lines4 | Where-Object { $_ -ne $null }
 Check "-S 0 -E 5 returns ~6 lines" ($non_null4.Count -ge 4 -and $non_null4.Count -le 7)
 
 # =============================================================================
-# TEST 5: capture-pane -S -3 (last 3 lines relative to bottom)
+# TEST 5: capture-pane -S -3 (3 lines of scrollback above visible top, per tmux)
 # =============================================================================
 Write-Host "`n--- TEST 5: Negative offset -S -3 ---" -ForegroundColor Yellow
 
 $lines5 = (& $exe capture-pane -t $SESSION -p -S -3 2>&1) -split "`n"
 $non_null5 = $lines5 | Where-Object { $_ -ne $null }
-# Should get approximately 3 lines (from row (height-3) to end)
-Check "-S -3 returns small number of lines" ($non_null5.Count -le 6)
+# Per tmux semantics, -S -N means "N lines above visible top" so the result
+# should include up to N scrollback lines + the full visible pane (~24 rows on
+# default geometry). When no scrollback is available it clamps to the visible
+# pane. So the count should be at least 2 lines and not absurdly larger than
+# pane height + a few scrollback rows.
 Check "-S -3 returns at least 2 lines" ($non_null5.Count -ge 2)
+Check "-S -3 returns scrollback + visible (within sane bound)" ($non_null5.Count -le 200)
 
 # =============================================================================
 # TEST 6: capture-pane -S 0 -E 0 (single line)

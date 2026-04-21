@@ -1697,6 +1697,53 @@ fn encode_fkey(n: u8, m: u8) -> Vec<u8> {
     }
 }
 
+/// Convert a character into the byte produced by Ctrl+<char> for `send-keys`,
+/// matching tmux's input-keys.c `standard_map` semantics.
+///
+/// This is used by `send-keys C-x` (and `C-M-x`) to produce the correct
+/// terminal byte for non-letter keys. For example:
+///   * `C-/` -> 0x1f (^_)        (NOT 0x0f, which is the naive `'/' & 0x1f`)
+///   * `C-?` -> 0x7f (DEL)
+///   * `C-3` -> 0x1b (ESC), `C-4` -> 0x1c, ..., `C-7` -> 0x1f
+///   * `C-Space`, `C-2` -> 0x00 (NUL)
+///   * `C-@`..`C-~` (letters and a few punctuation) -> `c & 0x1f`
+///   * `C-!` -> '1' (literal printable, per tmux remap)
+///
+/// Returns `None` for keys that have no defined Ctrl encoding (tmux rejects
+/// these by returning -1 from `input_key_vt10x`).
+pub fn ctrl_char_send_keys_byte(c: char) -> Option<u8> {
+    if !c.is_ascii() { return None; }
+    let b = c as u8;
+    // tmux input-keys.c standard_map: special punctuation/digit remaps.
+    // Pairs: input char -> output byte. Some remaps are to printable ASCII
+    // (e.g. C-! -> '1'); others to control bytes (e.g. C-/ -> 0x1f).
+    let remap: &[(u8, u8)] = &[
+        (b'1', b'1'), (b'!', b'1'),
+        (b'9', b'9'), (b'(', b'9'),
+        (b'0', b'0'), (b')', b'0'),
+        (b'=', b'='), (b'+', b'+'),
+        (b';', b';'), (b':', b';'),
+        (b'\'', b'\''), (b'"', b'\''),
+        (b',', b','), (b'<', b','),
+        (b'.', b'.'), (b'>', b'.'),
+        (b'/', 0x1f), (b'-', 0x1f),
+        (b'8', 0x7f), (b'?', 0x7f),
+        (b' ', 0x00), (b'2', 0x00),
+    ];
+    if let Some(&(_, v)) = remap.iter().find(|(k, _)| *k == b) {
+        return Some(v);
+    }
+    // Digits 3-7 map to C0 codes 0x1b-0x1f.
+    if (b'3'..=b'7').contains(&b) {
+        return Some(b - 0x18);
+    }
+    // Standard Ctrl+letter/punct range '@'..'~' -> mask with 0x1f.
+    if (b'@'..=b'~').contains(&b) {
+        return Some(b.to_ascii_lowercase() & 0x1f);
+    }
+    None
+}
+
 pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
     let encoded: Vec<u8> = match key.code {
         // AltGr detection: On Windows, AltGr is reported as Ctrl+Alt by the
@@ -3167,3 +3214,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
 #[cfg(test)]
 #[path = "../tests-rs/test_input.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue226_ctrl_slash.rs"]
+mod tests_issue226_ctrl_slash;

@@ -1349,29 +1349,37 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                                 }
                                 s if s.starts_with("C-M-") || s.starts_with("C-m-") => {
                                     if let Some(c) = key.chars().nth(4) {
-                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
-                                        format!("\x1b{}", ctrl as char)
+                                        if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
+                                            format!("\x1b{}", ctrl as char)
+                                        } else {
+                                            String::new()
+                                        }
                                     } else {
                                         key.to_string()
                                     }
                                 }
                                 s if s.starts_with("C-") => {
                                     if let Some(c) = s.chars().nth(2) {
-                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
-                                        #[cfg(windows)]
-                                        if ctrl == 0x03 {
-                                            if let Some(win) = app.windows.get_mut(app.active_idx) {
-                                                if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
-                                                    if p.child_pid.is_none() {
-                                                        p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
-                                                    }
-                                                    if let Some(pid) = p.child_pid {
-                                                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                        if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
+                                            #[cfg(windows)]
+                                            if ctrl == 0x03 {
+                                                if let Some(win) = app.windows.get_mut(app.active_idx) {
+                                                    if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                                                        if p.child_pid.is_none() {
+                                                            p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
+                                                        }
+                                                        if let Some(pid) = p.child_pid {
+                                                            crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                                        }
                                                     }
                                                 }
                                             }
+                                            String::from(ctrl as char)
+                                        } else {
+                                            // Unsupported Ctrl combo — skip silently
+                                            // to match tmux reject behavior.
+                                            String::new()
                                         }
-                                        String::from(ctrl as char)
                                     } else {
                                         key.to_string()
                                     }

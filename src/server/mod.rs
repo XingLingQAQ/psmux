@@ -1310,7 +1310,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let cursor_style_code = crate::rendering::configured_cursor_code();
                     let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{}}}",
+                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{},\"paste_detection\":{}}}",
                         layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                         matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                         app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
@@ -1319,6 +1319,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.windows.get(app.active_idx).map_or(false, |w| w.zoom_saved.is_some()),
                         app.defaults_suppressed,
                         app.pwsh_mouse_selection,
+                        app.paste_detection,
                     ));
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
@@ -1605,13 +1606,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                                 s if s.starts_with("C-M-") || s.starts_with("C-m-") => {
                                     if let Some(c) = key.chars().nth(4) {
-                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
-                                        send_text_to_active(&mut app, &format!("\x1b{}", ctrl as char))?;
+                                        if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
+                                            send_text_to_active(&mut app, &format!("\x1b{}", ctrl as char))?;
+                                        }
                                     }
                                 }
                                 s if s.starts_with("C-") => {
                                     if let Some(c) = s.chars().nth(2) {
-                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
+                                        let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) else { continue };
                                         send_text_to_active(&mut app, &String::from(ctrl as char))?;
                                         // On Windows, writing 0x03 to the PTY pipe doesn't
                                         // generate CTRL_C_EVENT when ENABLE_PROCESSED_INPUT
@@ -2626,6 +2628,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "mouse" => { app.mouse_enabled = true; }
                             "scroll-enter-copy-mode" => { app.scroll_enter_copy_mode = true; }
                             "pwsh-mouse-selection" => { app.pwsh_mouse_selection = false; }
+                            "paste-detection" => { app.paste_detection = true; }
                             "escape-time" => { app.escape_time_ms = 500; }
                             "history-limit" => { app.history_limit = 2000; }
                             "display-time" => { app.display_time_ms = 750; }
@@ -2699,6 +2702,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("mouse {}\n", if app.mouse_enabled { "on" } else { "off" }));
                     output.push_str(&format!("scroll-enter-copy-mode {}\n", if app.scroll_enter_copy_mode { "on" } else { "off" }));
                     output.push_str(&format!("pwsh-mouse-selection {}\n", if app.pwsh_mouse_selection { "on" } else { "off" }));
+                    output.push_str(&format!("paste-detection {}\n", if app.paste_detection { "on" } else { "off" }));
                     output.push_str(&format!("status {}\n", if app.status_visible { "on" } else { "off" }));
                     output.push_str(&format!("status-position {}\n", app.status_position));
                     output.push_str(&format!("status-left \"{}\"\n", app.status_left));

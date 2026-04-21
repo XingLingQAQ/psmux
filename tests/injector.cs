@@ -160,6 +160,32 @@ class Injector
                         Thread.Sleep(ms);
                         log.Add("  SLEEP " + ms + "ms");
                     }
+                    else if (token.StartsWith("RAW:"))
+                    {
+                        // RAW:vkHex:charHex:ctrlHex  e.g. RAW:BF:1F:0008
+                        // Sends Ctrl-down + key-down + key-up + Ctrl-up
+                        // with the EXACT VK / UnicodeChar / dwControlKeyState
+                        // the caller specifies. This lets tests inject
+                        // Ctrl+/ etc. with Windows-accurate fields.
+                        var parts = token.Substring(4).Split(':');
+                        if (parts.Length == 3)
+                        {
+                            ushort rvk = Convert.ToUInt16(parts[0], 16);
+                            char rch = (char)Convert.ToUInt16(parts[1], 16);
+                            uint rctrl = Convert.ToUInt32(parts[2], 16);
+                            var recs = new INPUT_RECORD[] {
+                                MakeKey(true,  0x11, '\0', LEFT_CTRL_PRESSED),
+                                MakeKey(true,  rvk,  rch,  rctrl),
+                                MakeKey(false, rvk,  rch,  rctrl),
+                                MakeKey(false, 0x11, '\0', 0)
+                            };
+                            uint w; bool ok = WriteConsoleInput(handle, recs, 4, out w);
+                            int e = ok ? 0 : Marshal.GetLastWin32Error();
+                            log.Add(string.Format("  RAW vk=0x{0:X2} ch=0x{1:X2} ctrl=0x{2:X4} ok={3} w={4} e={5}",
+                                rvk, (int)rch, rctrl, ok, w, e));
+                            if (ok) injected++;
+                        }
+                    }
                     i = end + 1;
                     Thread.Sleep(30);
                 }

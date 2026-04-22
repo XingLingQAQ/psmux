@@ -1,7 +1,8 @@
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -1127,51 +1128,68 @@ pub fn spawn_reader_thread(
     bell_pending: Arc<std::sync::atomic::AtomicBool>,
     output_ring: Arc<Mutex<std::collections::VecDeque<u8>>>,
 ) {
+    // ── Issue #246: split the old single reader thread into two threads ──
+    //
+    // The old code did `reader.read() → parser.lock() → parser.process(chunk)
+    // → drop lock` for each chunk individually. When a TUI (Ink, PSReadLine,
+    // pwsh-in-docker, etc.) emits a logical frame larger than the 64KB read
+    // buffer — or when ConPTY/docker stdio splits a smaller frame across
+    // multiple reads — the snapshot path in src/layout.rs could win the race
+    // for the parser mutex BETWEEN two of those reads, serializing a partial
+    // mid-frame state (typically: `ESC[2K` cleared a row but only some
+    // `CUP+text` spans had landed). That partial state was rendered on the
+    // client as the visible "sparse cells" / "remnant characters" artifact.
+    //
+    // Fix:
+    //   • Reader thread: tight loop, ONLY does reader.read() and pushes raw
+    //     bytes into a staging buffer. Never touches the parser mutex, so
+    //     reads cannot be starved by snapshot work.
+    //   • Parser thread: waits for staged bytes, then ADAPTIVELY coalesces:
+    //     sleeps 1ms; if more bytes arrived, sleeps again; hard cap 8ms total.
+    //     Then locks the parser ONCE and processes the entire batch
+    //     atomically. Multi-chunk frames that arrive within the coalescing
+    //     window land as a single unit — the snapshot can no longer observe
+    //     a partial frame.
+    //
+    // Latency cost: 1ms minimum between byte arrival and render for streaming
+    // output, capped at 8ms for sustained streams. Imperceptible to humans
+    // and well below the 50ms keystroke-echo threshold.
+    const COALESCE_TICK_MS: u64 = 1;
+    const COALESCE_MAX_MS: u128 = 8;
+
+    let staging: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((Mutex::new(Vec::with_capacity(131072)), Condvar::new()));
+    let reader_done: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    // ── Reader thread: pure I/O, no parser lock ──
+    let staging_r = staging.clone();
+    let reader_done_r = reader_done.clone();
+    let output_ring_r = output_ring.clone();
     thread::spawn(move || {
-        // 64KB buffer: captures most full-screen TUI paints in a single
-        // read(), preventing partial-frame rendering ("curtain effect")
-        // that occurs when ConPTY output is split across multiple small reads.
         let mut local = vec![0u8; 65536];
         let mut zero_reads: u32 = 0;
         loop {
             match reader.read(&mut local) {
                 Ok(n) if n > 0 => {
                     zero_reads = 0;
-                    // Scan for DECSCUSR cursor shape before vt100 parser consumes data.
-                    if let Some(shape) = scan_cursor_shape(&local[..n]) {
-                        cursor_shape.store(shape, std::sync::atomic::Ordering::Release);
+                    // Push raw bytes into staging (no parser lock involved).
+                    let (lock, cv) = &*staging_r;
+                    if let Ok(mut buf) = lock.lock() {
+                        buf.extend_from_slice(&local[..n]);
+                        cv.notify_one();
                     }
-                    let rmcup = scan_rmcup(&local[..n]);
-                    if let Ok(mut parser) = term_reader.lock() {
-                        parser.process(&local[..n]);
-                        // Check for audible bells detected by the vt100
-                        // parser.  The parser correctly distinguishes
-                        // standalone BEL (0x07) from OSC/DCS/APC string
-                        // terminators, maintaining state across chunks.
-                        if parser.screen_mut().take_audible_bell() {
-                            bell_pending.store(true, std::sync::atomic::Ordering::Release);
-                        }
-                    }
-                    // Append raw output to ring buffer for control mode %output
-                    if let Ok(mut ring) = output_ring.lock() {
+                    // Append raw output to ring buffer for control mode %output.
+                    // This is independent of parser state and must stay live.
+                    if let Ok(mut ring) = output_ring_r.lock() {
                         const MAX_RING: usize = 65536;
                         let space = MAX_RING.saturating_sub(ring.len());
                         if n <= space {
                             ring.extend(&local[..n]);
                         } else {
-                            // Drop oldest data to make room
                             let drop_count = (n - space).min(ring.len());
                             ring.drain(..drop_count);
                             ring.extend(&local[..n]);
                         }
                     }
-                    // When TUI sends RMCUP, reset cursor shape so it
-                    // doesn't persist from the exiting TUI app.
-                    if rmcup {
-                        cursor_shape.store(0, std::sync::atomic::Ordering::Release);
-                    }
-                    dv_writer.fetch_add(1, std::sync::atomic::Ordering::Release);
-                    crate::types::PTY_DATA_READY.store(true, std::sync::atomic::Ordering::Release);
                 }
                 Ok(_) => {
                     zero_reads += 1;
@@ -1181,16 +1199,100 @@ pub fn spawn_reader_thread(
                 Err(_) => break,
             }
         }
-        // Reader exited (child process died / pipe closed).
-        // If parser is still in alt-screen the TUI crashed without
-        // sending RMCUP — force cleanup now (TUI is guaranteed dead).
-        if let Ok(mut parser) = term_reader.lock() {
-            if parser.screen().alternate_screen() {
-                parser.process(b"\x1b[?25h\x1b[?1049l");
-                cursor_shape.store(0, std::sync::atomic::Ordering::Release);
-                dv_writer.fetch_add(1, std::sync::atomic::Ordering::Release);
-                crate::types::PTY_DATA_READY.store(true, std::sync::atomic::Ordering::Release);
+        // Signal end-of-stream and wake parser thread one last time so it
+        // can drain remaining bytes and run the alt-screen cleanup.
+        reader_done_r.store(true, Ordering::Release);
+        let (_, cv) = &*staging_r;
+        cv.notify_all();
+    });
+
+    // ── Parser thread: coalesces staged bytes, processes under one lock ──
+    thread::spawn(move || {
+        loop {
+            // Wait for at least one byte (or shutdown).
+            {
+                let (lock, cv) = &*staging;
+                let mut buf = match lock.lock() {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+                while buf.is_empty() {
+                    if reader_done.load(Ordering::Acquire) {
+                        // Reader is gone and nothing left to drain — exit
+                        // after running alt-screen cleanup below.
+                        drop(buf);
+                        if let Ok(mut parser) = term_reader.lock() {
+                            if parser.screen().alternate_screen() {
+                                parser.process(b"\x1b[?25h\x1b[?1049l");
+                                cursor_shape.store(0, Ordering::Release);
+                                dv_writer.fetch_add(1, Ordering::Release);
+                                crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+                            }
+                        }
+                        return;
+                    }
+                    let res = cv.wait_timeout(buf, Duration::from_millis(100));
+                    buf = match res {
+                        Ok((g, _)) => g,
+                        Err(_) => return,
+                    };
+                }
+                // First bytes are present — release the lock so the reader can
+                // keep pushing while we run the adaptive coalescing wait.
             }
+
+            // Adaptive coalescing: keep waiting in 1ms ticks while new bytes
+            // are still arriving, hard-capped at 8ms total. This bridges
+            // multi-chunk frames into a single atomic parser update.
+            let coalesce_start = Instant::now();
+            let mut last_len: usize = {
+                let (lock, _) = &*staging;
+                lock.lock().map(|b| b.len()).unwrap_or(0)
+            };
+            loop {
+                if coalesce_start.elapsed().as_millis() >= COALESCE_MAX_MS { break; }
+                thread::sleep(Duration::from_millis(COALESCE_TICK_MS));
+                let cur_len = {
+                    let (lock, _) = &*staging;
+                    lock.lock().map(|b| b.len()).unwrap_or(0)
+                };
+                if cur_len == last_len {
+                    // No new bytes arrived in the last tick — frame boundary.
+                    break;
+                }
+                last_len = cur_len;
+            }
+
+            // Take the entire staged batch.
+            let bytes = {
+                let (lock, _) = &*staging;
+                match lock.lock() {
+                    Ok(mut buf) => std::mem::take(&mut *buf),
+                    Err(_) => break,
+                }
+            };
+            if bytes.is_empty() { continue; }
+
+            // Scan for cursor shape and RMCUP on the raw batch BEFORE
+            // handing to vt100 parser (preserves prior ordering semantics).
+            if let Some(shape) = scan_cursor_shape(&bytes) {
+                cursor_shape.store(shape, Ordering::Release);
+            }
+            let rmcup = scan_rmcup(&bytes);
+
+            if let Ok(mut parser) = term_reader.lock() {
+                parser.process(&bytes);
+                if parser.screen_mut().take_audible_bell() {
+                    bell_pending.store(true, Ordering::Release);
+                }
+            }
+            // When TUI sends RMCUP, reset cursor shape so it doesn't
+            // persist from the exiting TUI app.
+            if rmcup {
+                cursor_shape.store(0, Ordering::Release);
+            }
+            dv_writer.fetch_add(1, Ordering::Release);
+            crate::types::PTY_DATA_READY.store(true, Ordering::Release);
         }
     });
 }

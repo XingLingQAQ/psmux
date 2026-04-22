@@ -94,8 +94,45 @@ pub fn read_session_key(session: &str) -> io::Result<String> {
     std::fs::read_to_string(&keypath).map(|s| s.trim().to_string())
 }
 
-/// Send an authenticated command to a server
+/// Hard cap on a single response payload read from the server (256 KB).
+///
+/// The server is trusted, but the client should still bound how much memory
+/// a single picker fetch can consume. A buggy or malicious peer that sends
+/// an unbounded line with no `\n` would otherwise block until the read
+/// timeout while filling the BufReader. 256 KB is comfortably larger than
+/// any real `session-info`, `list-tree`, or `choose-buffer` payload.
+pub const MAX_AUTHED_RESPONSE_BYTES: u64 = 256 * 1024;
+
+/// Validate that a session key is well-formed for the line-oriented AUTH
+/// protocol. Rejects keys containing CR, LF, or NUL — anything that could
+/// terminate the AUTH line early or smuggle a second protocol frame.
+///
+/// Returns the trimmed key on success, `None` on rejection.
+///
+/// SECURITY: Without this check, a key sourced from a future caller (e.g.
+/// env var, IPC, plugin) that contains `\n` could inject a second command
+/// onto the AUTH line. All AUTH writers should funnel through this guard.
+pub fn validate_auth_key(key: &str) -> Option<&str> {
+    let k = key.trim_matches(|c: char| c == '\r' || c == '\n');
+    if k.is_empty() {
+        return None;
+    }
+    if k.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+        return None;
+    }
+    Some(k)
+}
+
+/// Send an authenticated command to a server (fire-and-forget).
+///
+/// Validates the key against CRLF/NUL injection. Silently no-ops on a
+/// malformed key — callers are at the trust boundary already (key file
+/// under user's profile), this is defense-in-depth.
 pub fn send_auth_cmd(addr: &str, key: &str, cmd: &[u8]) -> io::Result<()> {
+    let key = match validate_auth_key(key) {
+        Some(k) => k,
+        None => return Ok(()),
+    };
     let sock_addr: std::net::SocketAddr = addr.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     if let Ok(mut s) = std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(50)) {
         let _ = s.set_nodelay(true);
@@ -106,15 +143,25 @@ pub fn send_auth_cmd(addr: &str, key: &str, cmd: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Send an authenticated command and get response
+/// Send an authenticated command and get response.
+///
+/// Validates the key, caps the response at `MAX_AUTHED_RESPONSE_BYTES`,
+/// and returns whatever the server sent after the AUTH ack. The `OK\n`
+/// ack is **not** stripped here for backward compatibility with existing
+/// callers; new code should prefer `fetch_authed_response` /
+/// `fetch_authed_response_multi`.
 pub fn send_auth_cmd_response(addr: &str, key: &str, cmd: &[u8]) -> io::Result<String> {
+    let key = match validate_auth_key(key) {
+        Some(k) => k,
+        None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid session key")),
+    };
     let mut s = std::net::TcpStream::connect(addr)?;
     let _ = s.set_nodelay(true);
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = write!(s, "AUTH {}\n", key);
     let _ = std::io::Write::write_all(&mut s, cmd);
     let _ = s.flush();
-    let mut br = std::io::BufReader::new(&mut s);
+    let mut br = std::io::BufReader::new(std::io::Read::take(&mut s, MAX_AUTHED_RESPONSE_BYTES));
     let mut auth_line = String::new();
     let _ = std::io::BufRead::read_line(&mut br, &mut auth_line);
     let mut buf = String::new();
@@ -122,48 +169,187 @@ pub fn send_auth_cmd_response(addr: &str, key: &str, cmd: &[u8]) -> io::Result<S
     Ok(buf)
 }
 
-/// Fetch a one-line `session-info` response from a session server.
+/// Internal: open an authenticated connection and send a single command.
 ///
-/// Connects to `addr`, authenticates with `key`, sends `session-info`, and
-/// returns the server's info line. Returns `None` if the connection fails,
-/// authentication is rejected, or the info line doesn't arrive in time.
+/// Returns a length-capped `BufReader` positioned right after the command
+/// write, ready for response parsing. Centralizes:
+///   - CRLF/NUL key validation (security)
+///   - connect timeout, read timeout, TCP_NODELAY
+///   - response size cap (`MAX_AUTHED_RESPONSE_BYTES`, DoS guard)
+///   - the AUTH + command write
 ///
-/// The AUTH ack (`OK\n`) is filtered out explicitly rather than assumed to
-/// be the first line: when the AUTH reply is slow enough for the first
-/// `read_line` to time out, a naive two-read protocol picks up the late
-/// `OK` in the second read and mis-reports it as the session info. See
-/// issue #250.
-pub fn fetch_session_info(
+/// The size cap is applied with `Read::take` BEFORE the `BufReader` so the
+/// resulting reader still exposes `BufRead`. Wrapping the other way around
+/// (`BufReader::take`) loses `BufRead` because `Take` is `Read`-only.
+fn open_authed(
     addr: &str,
     key: &str,
+    cmd: &[u8],
     connect_timeout: Duration,
     read_timeout: Duration,
-) -> Option<String> {
+) -> Option<std::io::BufReader<std::io::Take<std::net::TcpStream>>> {
+    let key = validate_auth_key(key)?;
     let sock_addr: std::net::SocketAddr = addr.parse().ok()?;
     let mut s = std::net::TcpStream::connect_timeout(&sock_addr, connect_timeout).ok()?;
     s.set_read_timeout(Some(read_timeout)).ok()?;
     let _ = s.set_nodelay(true);
     write!(s, "AUTH {}\n", key).ok()?;
-    s.write_all(b"session-info\n").ok()?;
+    s.write_all(cmd).ok()?;
+    if !cmd.ends_with(b"\n") {
+        s.write_all(b"\n").ok()?;
+    }
     let _ = s.flush();
+    Some(std::io::BufReader::new(std::io::Read::take(s, MAX_AUTHED_RESPONSE_BYTES)))
+}
 
-    let mut br = std::io::BufReader::new(s);
+/// Read one response line from an authenticated stream, transparently
+/// skipping the `OK\n` AUTH ack regardless of when it arrives.
+///
+/// Returns `None` on timeout, EOF, empty payload, or `ERROR:` reply.
+/// Returns `Some(line)` on a valid payload (newline trimmed).
+fn read_authed_line<R: std::io::BufRead>(br: &mut R) -> Option<String> {
+    // First read: could be either the AUTH ack ("OK") or the payload
+    // (if the ack was already pipelined into the same packet).
     let mut line = String::new();
-    if std::io::BufRead::read_line(&mut br, &mut line).ok()? == 0 {
+    if std::io::BufRead::read_line(br, &mut line).ok()? == 0 {
         return None;
     }
-    if line.trim() == "OK" {
+    let trimmed = line.trim();
+    if trimmed == "OK" {
+        // First line WAS the ack. Read the real payload now.
         line.clear();
-        if std::io::BufRead::read_line(&mut br, &mut line).ok()? == 0 {
+        if std::io::BufRead::read_line(br, &mut line).ok()? == 0 {
             return None;
         }
     }
+    // Filter again in case the second line is also empty/error/OK.
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed == "OK" || trimmed.starts_with("ERROR:") {
         None
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// Read all remaining bytes from an authenticated stream, stripping a
+/// leading `OK\n` AUTH ack if present.
+///
+/// Returns `None` on no payload, error response, or read failure.
+/// Returns `Some(payload)` with the AUTH ack removed and trailing
+/// whitespace stripped. Total read is capped by the underlying `Take`.
+fn read_authed_all<R: std::io::Read>(rd: &mut R) -> Option<String> {
+    let mut buf = String::new();
+    std::io::Read::read_to_string(rd, &mut buf).ok()?;
+    let body = buf.strip_prefix("OK\n").or_else(|| buf.strip_prefix("OK\r\n")).unwrap_or(&buf);
+    let trimmed = body.trim();
+    if trimmed.is_empty() || trimmed.starts_with("ERROR:") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Send an authenticated single-command request and return one response line.
+///
+/// Centralized AUTH + command + response helper used by all picker fetches.
+/// Handles every known framing race for the AUTH ack:
+///   - ack pipelined with payload (one packet, both lines arrive together)
+///   - ack arrives first, then payload
+///   - ack delayed past first read (issue #250 race)
+///   - server replies only `OK` and never sends payload
+///   - server replies `ERROR: ...`
+///   - server hangs / connection refused / bad address
+///
+/// All callers get the same robust behavior; they can no longer reinvent
+/// the parser per-site (which is how #250 happened).
+pub fn fetch_authed_response(
+    addr: &str,
+    key: &str,
+    cmd: &[u8],
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
+    let mut br = open_authed(addr, key, cmd, connect_timeout, read_timeout)?;
+    read_authed_line(&mut br)
+}
+
+/// Like `fetch_authed_response` but returns the entire response body
+/// (multi-line payloads such as `list-tree` JSON arrays or `choose-buffer`
+/// listings). The leading AUTH ack line is stripped if present.
+///
+/// The total payload is bounded by `MAX_AUTHED_RESPONSE_BYTES` to prevent
+/// a malformed or hostile server from forcing unbounded client memory.
+pub fn fetch_authed_response_multi(
+    addr: &str,
+    key: &str,
+    cmd: &[u8],
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
+    let mut br = open_authed(addr, key, cmd, connect_timeout, read_timeout)?;
+    read_authed_all(&mut br)
+}
+
+/// Fetch a one-line `session-info` response from a session server.
+///
+/// Thin wrapper over `fetch_authed_response` retained for the call site
+/// in `client.rs` (and the regression tests added in PR #251 for #250).
+pub fn fetch_session_info(
+    addr: &str,
+    key: &str,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
+    fetch_authed_response(addr, key, b"session-info\n", connect_timeout, read_timeout)
+}
+
+/// Fan out `fetch_session_info` across many sessions in parallel.
+///
+/// The session picker used to call `fetch_session_info` sequentially, so
+/// opening the picker with N sessions was bounded by `N * read_timeout`
+/// in the worst case. With this helper, N concurrent threads share that
+/// bound: total wall time is roughly `read_timeout`, regardless of N.
+///
+/// `inputs` is `(label, addr, key)`. Output preserves input order and
+/// pairs each label with the fetched info or the supplied `fallback`
+/// (typically `"<label>: (not responding)"`).
+pub fn fetch_session_infos_parallel<F>(
+    inputs: Vec<(String, String, String)>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    fallback: F,
+) -> Vec<(String, String)>
+where
+    F: Fn(&str) -> String + Send + Sync,
+{
+    if inputs.is_empty() {
+        return Vec::new();
+    }
+    // Single session: skip thread spawn overhead entirely.
+    if inputs.len() == 1 {
+        let (label, addr, key) = &inputs[0];
+        let info = fetch_session_info(addr, key, connect_timeout, read_timeout)
+            .unwrap_or_else(|| fallback(label));
+        return vec![(label.clone(), info)];
+    }
+    let results: Vec<(String, String)> = std::thread::scope(|scope| {
+        let fallback_ref = &fallback;
+        let handles: Vec<_> = inputs
+            .iter()
+            .map(|(label, addr, key)| {
+                let label = label.clone();
+                let addr = addr.clone();
+                let key = key.clone();
+                scope.spawn(move || {
+                    let info = fetch_session_info(&addr, &key, connect_timeout, read_timeout)
+                        .unwrap_or_else(|| fallback_ref(&label));
+                    (label, info)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    results
 }
 
 pub fn send_control(line: String) -> io::Result<()> {
@@ -559,3 +745,7 @@ pub fn kill_remaining_server_processes() {
 #[cfg(test)]
 #[path = "../tests-rs/test_session.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue250_root_cause.rs"]
+mod tests_issue250_root_cause;

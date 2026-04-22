@@ -1602,26 +1602,22 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                         if let Ok(p) = port_str.trim().parse::<u16>() {
                                                             let sess_addr = format!("127.0.0.1:{}", p);
                                                             let sess_key = read_session_key(base).unwrap_or_default();
-                                                            if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
-                                                                &sess_addr.parse().unwrap(), Duration::from_millis(50)
+                                                            // Centralized AUTH+command helper handles the OK ack race
+                                                            // (issue #250) and bounds the response size.
+                                                            if let Some(tree_line) = crate::session::fetch_authed_response_multi(
+                                                                &sess_addr,
+                                                                &sess_key,
+                                                                b"list-tree\n",
+                                                                Duration::from_millis(50),
+                                                                Duration::from_millis(100),
                                                             ) {
-                                                                let _ = ss.set_read_timeout(Some(Duration::from_millis(100)));
-                                                                let _ = write!(ss, "AUTH {}\n", sess_key);
-                                                                let _ = ss.write_all(b"list-tree\n");
-                                                                let _ = ss.flush();
-                                                                let mut br = BufReader::new(ss);
-                                                                let mut al = String::new();
-                                                                let _ = br.read_line(&mut al); // AUTH OK
-                                                                let mut tree_line = String::new();
-                                                                if br.read_line(&mut tree_line).is_ok() {
-                                                                    if let Ok(wins) = serde_json::from_str::<Vec<WinTree>>(&tree_line.trim()) {
-                                                                        let mut win_data = Vec::new();
-                                                                        for w in &wins {
-                                                                            let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
-                                                                            win_data.push((w.id, w.name.clone(), panes));
-                                                                        }
-                                                                        sessions.push((base.to_string(), win_data));
+                                                                if let Ok(wins) = serde_json::from_str::<Vec<WinTree>>(tree_line.trim()) {
+                                                                    let mut win_data = Vec::new();
+                                                                    for w in &wins {
+                                                                        let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
+                                                                        win_data.push((w.id, w.name.clone(), panes));
                                                                     }
+                                                                    sessions.push((base.to_string(), win_data));
                                                                 }
                                                             }
                                                         }
@@ -1679,6 +1675,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 session_scroll = 0;
                                 session_num_buffer.clear();
                                 let dir = format!("{}\\.psmux", home);
+                                // Collect (label, addr, key) for every reachable port file first,
+                                // then fan out the per-session AUTH+session-info fetches in parallel.
+                                // Sequential fetches made the picker open in O(N * read_timeout);
+                                // parallelism keeps it bounded by the single-fetch timeout.
+                                let mut targets: Vec<(String, String, String)> = Vec::new();
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
                                     for e in entries.flatten() {
                                         if let Some(fname) = e.file_name().to_str() {
@@ -1689,14 +1690,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                         if let Ok(p) = port_str.trim().parse::<u16>() {
                                                             let sess_addr = format!("127.0.0.1:{}", p);
                                                             let sess_key = read_session_key(base).unwrap_or_default();
-                                                            let info = crate::session::fetch_session_info(
-                                                                &sess_addr,
-                                                                &sess_key,
-                                                                Duration::from_millis(25),
-                                                                Duration::from_millis(150),
-                                                            )
-                                                            .unwrap_or_else(|| format!("{}: (not responding)", base));
-                                                            session_entries.push((base.to_string(), info));
+                                                            targets.push((base.to_string(), sess_addr, sess_key));
                                                         }
                                                     }
                                                 }
@@ -1704,6 +1698,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         }
                                     }
                                 }
+                                let fetched = crate::session::fetch_session_infos_parallel(
+                                    targets,
+                                    Duration::from_millis(25),
+                                    Duration::from_millis(150),
+                                    |label| format!("{}: (not responding)", label),
+                                );
+                                session_entries.extend(fetched);
                                 if session_entries.is_empty() {
                                     session_entries.push((current_session.clone(), format!("{}: (current)", current_session)));
                                 }
@@ -1722,18 +1723,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if let Ok(p) = port_str.trim().parse::<u16>() {
                                         let sess_key = read_session_key(&current_session).unwrap_or_default();
                                         let addr = format!("127.0.0.1:{}", p);
-                                        if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
-                                            &addr.parse().unwrap(), Duration::from_millis(100)
+                                        if let Some(buf_line) = crate::session::fetch_authed_response_multi(
+                                            &addr,
+                                            &sess_key,
+                                            b"choose-buffer\n",
+                                            Duration::from_millis(100),
+                                            Duration::from_millis(200),
                                         ) {
-                                            let _ = ss.set_read_timeout(Some(Duration::from_millis(200)));
-                                            let _ = write!(ss, "AUTH {}\n", sess_key);
-                                            let _ = ss.write_all(b"choose-buffer\n");
-                                            let _ = ss.flush();
-                                            let mut br = BufReader::new(ss);
-                                            let mut al = String::new();
-                                            let _ = br.read_line(&mut al); // AUTH OK
-                                            let mut buf_line = String::new();
-                                            if br.read_line(&mut buf_line).is_ok() {
+                                            {
                                                 // Parse "buffer0: 17 bytes: "content"\nbuffer1: ..."
                                                 for line in buf_line.trim().split('\n') {
                                                     let line = line.trim();
@@ -2032,18 +2029,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                 if let Ok(p) = port_str.trim().parse::<u16>() {
                                                     let sess_key = read_session_key(&current_session).unwrap_or_default();
                                                     let addr = format!("127.0.0.1:{}", p);
-                                                    if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
-                                                        &addr.parse().unwrap(), Duration::from_millis(100)
+                                                    if let Some(buf_line) = crate::session::fetch_authed_response_multi(
+                                                        &addr,
+                                                        &sess_key,
+                                                        b"choose-buffer\n",
+                                                        Duration::from_millis(100),
+                                                        Duration::from_millis(200),
                                                     ) {
-                                                        let _ = ss.set_read_timeout(Some(Duration::from_millis(200)));
-                                                        let _ = write!(ss, "AUTH {}\n", sess_key);
-                                                        let _ = ss.write_all(b"choose-buffer\n");
-                                                        let _ = ss.flush();
-                                                        let mut br = BufReader::new(ss);
-                                                        let mut al = String::new();
-                                                        let _ = br.read_line(&mut al);
-                                                        let mut buf_line = String::new();
-                                                        if br.read_line(&mut buf_line).is_ok() {
+                                                        {
                                                             for line in buf_line.trim().split('\n') {
                                                                 let line = line.trim();
                                                                 if line.is_empty() { continue; }

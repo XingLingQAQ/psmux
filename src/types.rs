@@ -373,6 +373,11 @@ pub struct AppState {
     /// only on right-click), word/line selection on double/triple-click.
     /// Default: off (preserves the legacy pwsh-style copy-on-release).
     pub pwsh_mouse_selection: bool,
+    /// paste-detection: when on (default), Ctrl+V Press is suppressed and the
+    /// Windows paste detection mechanism intercepts clipboard content injected
+    /// by the console host.  When off, Ctrl+V is forwarded as send-key C-v so
+    /// child applications (e.g. neovim visual block mode) can receive it.
+    pub paste_detection: bool,
     pub paste_buffers: Vec<String>,
     pub status_left: String,
     pub status_right: String,
@@ -659,6 +664,7 @@ impl AppState {
             mouse_enabled: true,
             scroll_enter_copy_mode: true,
             pwsh_mouse_selection: false,
+            paste_detection: true,
             paste_buffers: Vec::new(),
             status_left: "[#S] ".to_string(),
             status_right: "#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}\"#{=21:pane_title}\" %H:%M %d-%b-%y".to_string(),

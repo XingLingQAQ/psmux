@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "psmux"
-version = "3.3.2"
+version = "3.3.3"
 dependencies = [
  "anyhow",
  "base64",

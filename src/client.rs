@@ -326,7 +326,7 @@ fn collect_layout_borders(
 
 /// Check if any leaf in a LayoutJson subtree is the active pane.
 /// Compute the rectangle of the active pane by searching the LayoutJson tree.
-fn compute_active_rect_json(node: &LayoutJson, area: Rect) -> Option<Rect> {
+pub fn compute_active_rect_json(node: &LayoutJson, area: Rect) -> Option<Rect> {
     match node {
         LayoutJson::Leaf { active, .. } => {
             if *active { Some(area) } else { None }
@@ -347,6 +347,399 @@ fn compute_active_rect_json(node: &LayoutJson, area: Rect) -> Option<Rect> {
                 }
             }
             None
+        }
+    }
+}
+
+/// Render a large ASCII clock overlay (tmux clock-mode).
+/// Top-level so both the main viewport and the choose-tree/choose-session
+/// preview can share one implementation.
+pub fn render_clock_overlay(f: &mut Frame, area: Rect, colour: Color) {
+    const DIGITS: [&[&str; 5]; 10] = [
+        &["###", "# #", "# #", "# #", "###"],
+        &["  #", "  #", "  #", "  #", "  #"],
+        &["###", "  #", "###", "#  ", "###"],
+        &["###", "  #", "###", "  #", "###"],
+        &["# #", "# #", "###", "  #", "  #"],
+        &["###", "#  ", "###", "  #", "###"],
+        &["###", "#  ", "###", "# #", "###"],
+        &["###", "  #", "  #", "  #", "  #"],
+        &["###", "# #", "###", "# #", "###"],
+        &["###", "# #", "###", "  #", "###"],
+    ];
+    const COLON: [&str; 5] = [" ", "#", " ", "#", " "];
+    let now = Local::now();
+    let time_str = now.format("%H:%M:%S").to_string();
+    let total_w: u16 = time_str.chars().map(|c| if c == ':' { 2 } else { 4 }).sum::<u16>() - 1;
+    let total_h: u16 = 5;
+    if area.width < total_w || area.height < total_h { return; }
+    let start_x = area.x + (area.width.saturating_sub(total_w)) / 2;
+    let start_y = area.y + (area.height.saturating_sub(total_h)) / 2;
+    let clock_area = Rect::new(start_x.saturating_sub(1), start_y, total_w + 2, total_h);
+    f.render_widget(Clear, clock_area);
+    for row in 0..5u16 {
+        let mut x = start_x;
+        for ch in time_str.chars() {
+            if ch == ':' {
+                let cell_area = Rect::new(x, start_y + row, 1, 1);
+                let s = Span::styled(COLON[row as usize], Style::default().fg(colour));
+                f.render_widget(Paragraph::new(Line::from(s)), cell_area);
+                x += 2;
+            } else if let Some(d) = ch.to_digit(10) {
+                let pattern = DIGITS[d as usize][row as usize];
+                let cell_area = Rect::new(x, start_y + row, 3, 1);
+                let s = Span::styled(pattern, Style::default().fg(colour));
+                f.render_widget(Paragraph::new(Line::from(s)), cell_area);
+                x += 4;
+            }
+        }
+    }
+}
+
+/// Render a LayoutJson tree into the given area.  This is the canonical
+/// pane renderer used by both the main viewport and the choose-tree/
+/// choose-session preview, so a preview is a true miniature of the real
+/// window (same separators, same colors, same content rendering).
+pub fn render_layout_json(
+    f: &mut Frame,
+    node: &LayoutJson,
+    area: Rect,
+    dim_preds: bool,
+    border_fg: Color,
+    active_border_fg: Color,
+    clock_mode: bool,
+    clock_colour: Color,
+    active_rect: Option<Rect>,
+    mode_style_str: &str,
+    zoomed: bool,
+    border_status: &str,
+    border_format: &str,
+) {
+    match node {
+        LayoutJson::Leaf {
+            id,
+            rows: _,
+            cols: _,
+            cursor_row,
+            cursor_col,
+            alternate_screen,
+            hide_cursor: _,
+            cursor_shape: _,
+            active,
+            copy_mode,
+            scroll_offset,
+            sel_start_row,
+            sel_start_col,
+            sel_end_row,
+            sel_end_col,
+            sel_mode,
+            copy_cursor_row,
+            copy_cursor_col,
+            content,
+            rows_v2,
+            title,
+        } => {
+            let inner = area;
+            let mut lines: Vec<Line> = Vec::new();
+            let use_full_cells = *copy_mode && *active && !content.is_empty();
+            if use_full_cells || rows_v2.is_empty() {
+                for r in 0..inner.height.min(content.len() as u16) {
+                    let mut spans: Vec<Span> = Vec::new();
+                    let row = &content[r as usize];
+                    let max_c = inner.width.min(row.len() as u16);
+                    let mut c: u16 = 0;
+                    while c < max_c {
+                        let cell = &row[c as usize];
+                        let mut fg = map_color(&cell.fg);
+                        let bg = map_color(&cell.bg);
+                        let in_selection = if *copy_mode && *active {
+                            if let (Some(sr), Some(sc), Some(er), Some(ec)) = (sel_start_row, sel_start_col, sel_end_row, sel_end_col) {
+                                let mode = sel_mode.as_deref().unwrap_or("char");
+                                match mode {
+                                    "rect" => r >= *sr && r <= *er && c >= (*sc).min(*ec) && c <= (*sc).max(*ec),
+                                    "line" => r >= *sr && r <= *er,
+                                    _ => {
+                                        if *sr == *er {
+                                            r == *sr && c >= (*sc).min(*ec) && c <= (*sc).max(*ec)
+                                        } else if r == *sr {
+                                            c >= *sc
+                                        } else if r == *er {
+                                            c <= *ec
+                                        } else {
+                                            r > *sr && r < *er
+                                        }
+                                    }
+                                }
+                            } else { false }
+                        } else { false };
+                        if *active && dim_preds && !*alternate_screen
+                            && (r > *cursor_row || (r == *cursor_row && c >= *cursor_col))
+                        {
+                            fg = dim_color(fg);
+                        }
+                        let mut style = Style::default().fg(fg).bg(bg);
+                        if in_selection {
+                            let ms = crate::rendering::parse_tmux_style(mode_style_str);
+                            style = ms;
+                        }
+                        if cell.inverse { style = style.add_modifier(Modifier::REVERSED); }
+                        if cell.dim { style = style.add_modifier(Modifier::DIM); }
+                        if cell.bold { style = style.add_modifier(Modifier::BOLD); }
+                        if cell.italic { style = style.add_modifier(Modifier::ITALIC); }
+                        if cell.underline { style = style.add_modifier(Modifier::UNDERLINED); }
+                        if cell.blink { style = style.add_modifier(Modifier::SLOW_BLINK); }
+                        if cell.strikethrough { style = style.add_modifier(Modifier::CROSSED_OUT); }
+                        let text: &str = if cell.hidden {
+                            " "
+                        } else if cell.text.is_empty() {
+                            " "
+                        } else {
+                            &cell.text
+                        };
+                        let char_width = unicode_width::UnicodeWidthStr::width(text) as u16;
+                        if char_width >= 2 && c + char_width > max_c {
+                            spans.push(Span::styled(" ", style));
+                            c += 1;
+                        } else {
+                            spans.push(Span::styled(text, style));
+                            if char_width >= 2 {
+                                c += 2;
+                            } else {
+                                c += 1;
+                            }
+                        }
+                    }
+                    if c < inner.width {
+                        let last_bg = if !spans.is_empty() {
+                            spans.last().unwrap().style.bg.unwrap_or(Color::Reset)
+                        } else { Color::Reset };
+                        let pad = " ".repeat((inner.width - c) as usize);
+                        spans.push(Span::styled(pad, Style::default().bg(last_bg)));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            } else {
+                for r in 0..inner.height.min(rows_v2.len() as u16) {
+                    let mut spans: Vec<Span> = Vec::new();
+                    let mut c: u16 = 0;
+                    let mut last_bg = Color::Reset;
+                    for run in &rows_v2[r as usize].runs {
+                        if c >= inner.width { break; }
+                        let mut fg = map_color(&run.fg);
+                        let bg = map_color(&run.bg);
+                        last_bg = bg;
+                        if *active && dim_preds && !*alternate_screen
+                            && (r > *cursor_row || (r == *cursor_row && c >= *cursor_col))
+                        {
+                            fg = dim_color(fg);
+                        }
+                        let mut style = Style::default().fg(fg).bg(bg);
+                        if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
+                        if run.flags & 1 != 0 { style = style.add_modifier(Modifier::DIM); }
+                        if run.flags & 2 != 0 { style = style.add_modifier(Modifier::BOLD); }
+                        if run.flags & 4 != 0 { style = style.add_modifier(Modifier::ITALIC); }
+                        if run.flags & 8 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                        if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
+                        if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
+                        let text: &str = if run.flags & 64 != 0 {
+                            " "
+                        } else if run.text.is_empty() {
+                            " "
+                        } else {
+                            &run.text
+                        };
+                        let run_w = run.width.max(1);
+                        if c + run_w > inner.width {
+                            let avail = (inner.width - c) as usize;
+                            let mut truncated = String::new();
+                            let mut used = 0usize;
+                            for ch in text.chars() {
+                                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                                if used + cw > avail { break; }
+                                used += cw;
+                                truncated.push(ch);
+                            }
+                            if !truncated.is_empty() {
+                                spans.push(Span::styled(truncated, style));
+                            }
+                            c = inner.width;
+                        } else {
+                            spans.push(Span::styled(text, style));
+                            c = c.saturating_add(run_w);
+                        }
+                    }
+                    if c < inner.width {
+                        let pad = " ".repeat((inner.width - c) as usize);
+                        spans.push(Span::styled(pad, Style::default().bg(last_bg)));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
+            f.render_widget(Clear, inner);
+            let para = Paragraph::new(Text::from(lines));
+            f.render_widget(para, inner);
+
+            if *copy_mode && *active {
+                let label = "[copy mode]";
+                let lw = label.len() as u16;
+                if area.width >= lw {
+                    let lx = area.x + area.width.saturating_sub(lw);
+                    let la = Rect::new(lx, area.y, lw, 1);
+                    let ls = Span::styled(label, Style::default().fg(Color::Black).bg(Color::Yellow));
+                    f.render_widget(Paragraph::new(Line::from(ls)), la);
+                }
+            }
+
+            if *copy_mode && *active && *scroll_offset > 0 {
+                let indicator = format!("[{}/{}]", scroll_offset, scroll_offset);
+                let indicator_width = indicator.len() as u16;
+                if area.width > indicator_width + 2 {
+                    let indicator_x = area.x + area.width - indicator_width - 1;
+                    let indicator_y = if *copy_mode { area.y + 1 } else { area.y };
+                    let indicator_area = Rect::new(indicator_x, indicator_y, indicator_width, 1);
+                    let indicator_span = Span::styled(indicator, Style::default().fg(Color::Black).bg(Color::Yellow));
+                    f.render_widget(Paragraph::new(Line::from(indicator_span)), indicator_area);
+                }
+            }
+
+            if *active && !*copy_mode {
+                if clock_mode {
+                    render_clock_overlay(f, inner, clock_colour);
+                }
+            }
+
+            if *copy_mode && *active {
+                if let (Some(cr), Some(cc)) = (copy_cursor_row, copy_cursor_col) {
+                    let cr = (*cr).min(inner.height.saturating_sub(1));
+                    let cc = (*cc).min(inner.width.saturating_sub(1));
+                    let cy = inner.y + cr;
+                    let cx = inner.x + cc;
+                    f.set_cursor_position((cx, cy));
+                    let buf = f.buffer_mut();
+                    let buf_area = buf.area;
+                    if cy >= buf_area.y && cy < buf_area.y + buf_area.height
+                        && cx >= buf_area.x && cx < buf_area.x + buf_area.width
+                    {
+                        let idx = (cy - buf_area.y) as usize * buf_area.width as usize
+                            + (cx - buf_area.x) as usize;
+                        if idx < buf.content.len() {
+                            let cell = &mut buf.content[idx];
+                            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                        }
+                    }
+                }
+            }
+
+            if border_status != "off" && !border_format.is_empty() && area.height > 1 {
+                let pane_title_str = title.as_deref().unwrap_or("");
+                let pane_label = border_format
+                    .replace("#{pane_title}", pane_title_str)
+                    .replace("#{pane_index}", &id.to_string())
+                    .replace("#P", &id.to_string());
+                let label_width = unicode_width::UnicodeWidthStr::width(pane_label.as_str()) as u16;
+                if label_width > 0 && area.width >= label_width {
+                    let label_y = if border_status == "bottom" { area.y + area.height.saturating_sub(1) } else { area.y };
+                    let label_area = Rect::new(area.x, label_y, label_width.min(area.width), 1);
+                    let label_style = Style::default().fg(if *active { active_border_fg } else { border_fg });
+                    f.render_widget(Paragraph::new(Line::from(Span::styled(pane_label, label_style))), label_area);
+                }
+            }
+        }
+        LayoutJson::Split { kind, sizes, children } => {
+            let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
+                sizes.clone()
+            } else {
+                vec![(100 / children.len().max(1)) as u16; children.len()]
+            };
+            let is_horizontal = kind == "Horizontal";
+            let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
+
+            for (i, child) in children.iter().enumerate() {
+                if i < rects.len() {
+                    render_layout_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format);
+                }
+            }
+
+            if zoomed { return; }
+            let border_style = Style::default().fg(border_fg);
+            let active_border_style = Style::default().fg(active_border_fg);
+            let buf = f.buffer_mut();
+            for i in 0..children.len().saturating_sub(1) {
+                if i >= rects.len() { break; }
+
+                let both_leaves = matches!(&children[i], LayoutJson::Leaf { .. })
+                    && matches!(children.get(i + 1), Some(LayoutJson::Leaf { .. }));
+
+                if is_horizontal {
+                    let sep_x = rects[i].x + rects[i].width;
+                    if sep_x < buf.area.x + buf.area.width {
+                        if both_leaves {
+                            let left_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
+                            let right_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
+                            let left_sty = if left_active { active_border_style } else { border_style };
+                            let right_sty = if right_active { active_border_style } else { border_style };
+                            let mid_y = area.y + area.height / 2;
+                            for y in area.y..area.y + area.height {
+                                let sty = if y < mid_y { left_sty } else { right_sty };
+                                let idx = (y - buf.area.y) as usize * buf.area.width as usize
+                                    + (sep_x - buf.area.x) as usize;
+                                if idx < buf.content.len() {
+                                    buf.content[idx].set_char('│');
+                                    buf.content[idx].set_style(sty);
+                                }
+                            }
+                        } else {
+                            for y in area.y..area.y + area.height {
+                                let active = active_rect.map_or(false, |ar| {
+                                    y >= ar.y && y < ar.y + ar.height
+                                    && (sep_x == ar.x + ar.width || sep_x + 1 == ar.x)
+                                });
+                                let sty = if active { active_border_style } else { border_style };
+                                let idx = (y - buf.area.y) as usize * buf.area.width as usize
+                                    + (sep_x - buf.area.x) as usize;
+                                if idx < buf.content.len() {
+                                    buf.content[idx].set_char('│');
+                                    buf.content[idx].set_style(sty);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let sep_y = rects[i].y + rects[i].height;
+                    if sep_y < buf.area.y + buf.area.height {
+                        if both_leaves {
+                            let top_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
+                            let bot_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
+                            let top_sty = if top_active { active_border_style } else { border_style };
+                            let bot_sty = if bot_active { active_border_style } else { border_style };
+                            let mid_x = area.x + area.width / 2;
+                            for x in area.x..area.x + area.width {
+                                let sty = if x < mid_x { top_sty } else { bot_sty };
+                                let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize
+                                    + (x - buf.area.x) as usize;
+                                if idx < buf.content.len() {
+                                    buf.content[idx].set_char('─');
+                                    buf.content[idx].set_style(sty);
+                                }
+                            }
+                        } else {
+                            for x in area.x..area.x + area.width {
+                                let active = active_rect.map_or(false, |ar| {
+                                    x >= ar.x && x < ar.x + ar.width
+                                    && (sep_y == ar.y + ar.height || sep_y + 1 == ar.y)
+                                });
+                                let sty = if active { active_border_style } else { border_style };
+                                let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize
+                                    + (x - buf.area.x) as usize;
+                                if idx < buf.content.len() {
+                                    buf.content[idx].set_char('─');
+                                    buf.content[idx].set_style(sty);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -3274,424 +3667,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let mut border_path = Vec::new();
             collect_layout_borders(&root, content_chunk, &mut border_path, &mut client_borders);
 
-            /// Render a large ASCII clock overlay (tmux clock-mode)
-            fn render_clock_overlay(f: &mut Frame, area: Rect, colour: Color) {
-                // Big digit font (5 rows high, 3 cols wide per digit + colon)
-                const DIGITS: [&[&str; 5]; 10] = [
-                    &["###", "# #", "# #", "# #", "###"],  // 0
-                    &["  #", "  #", "  #", "  #", "  #"],  // 1
-                    &["###", "  #", "###", "#  ", "###"],  // 2
-                    &["###", "  #", "###", "  #", "###"],  // 3
-                    &["# #", "# #", "###", "  #", "  #"],  // 4
-                    &["###", "#  ", "###", "  #", "###"],  // 5
-                    &["###", "#  ", "###", "# #", "###"],  // 6
-                    &["###", "  #", "  #", "  #", "  #"],  // 7
-                    &["###", "# #", "###", "# #", "###"],  // 8
-                    &["###", "# #", "###", "  #", "###"],  // 9
-                ];
-                const COLON: [&str; 5] = [" ", "#", " ", "#", " "];
-                let now = Local::now();
-                let time_str = now.format("%H:%M:%S").to_string();
-                // Each char is 3 wide + 1 gap, colon is 1 wide + 1 gap
-                let total_w: u16 = time_str.chars().map(|c| if c == ':' { 2 } else { 4 }).sum::<u16>() - 1;
-                let total_h: u16 = 5;
-                if area.width < total_w || area.height < total_h { return; }
-                let start_x = area.x + (area.width.saturating_sub(total_w)) / 2;
-                let start_y = area.y + (area.height.saturating_sub(total_h)) / 2;
-                // Clear the area
-                let clock_area = Rect::new(start_x.saturating_sub(1), start_y, total_w + 2, total_h);
-                f.render_widget(Clear, clock_area);
-                for row in 0..5u16 {
-                    let mut x = start_x;
-                    for ch in time_str.chars() {
-                        if ch == ':' {
-                            let cell_area = Rect::new(x, start_y + row, 1, 1);
-                            let s = Span::styled(COLON[row as usize], Style::default().fg(colour));
-                            f.render_widget(Paragraph::new(Line::from(s)), cell_area);
-                            x += 2;
-                        } else if let Some(d) = ch.to_digit(10) {
-                            let pattern = DIGITS[d as usize][row as usize];
-                            let cell_area = Rect::new(x, start_y + row, 3, 1);
-                            let s = Span::styled(pattern, Style::default().fg(colour));
-                            f.render_widget(Paragraph::new(Line::from(s)), cell_area);
-                            x += 4;
-                        }
-                    }
-                }
-            }
-
-            fn render_json(f: &mut Frame, node: &LayoutJson, area: Rect, dim_preds: bool, border_fg: Color, active_border_fg: Color, clock_mode: bool, clock_colour: Color, active_rect: Option<Rect>, mode_style_str: &str, zoomed: bool, border_status: &str, border_format: &str) {
-                match node {
-                    LayoutJson::Leaf {
-                        id,
-                        rows: _,
-                        cols: _,
-                        cursor_row,
-                        cursor_col,
-                        alternate_screen,
-                        hide_cursor: _,
-                        cursor_shape: _,
-                        active,
-                        copy_mode,
-                        scroll_offset,
-                        sel_start_row,
-                        sel_start_col,
-                        sel_end_row,
-                        sel_end_col,
-                        sel_mode,
-                        copy_cursor_row,
-                        copy_cursor_col,
-                        content,
-                        rows_v2,
-                        title,
-                    } => {
-                        // No borders — content fills entire area (tmux-style)
-                        let inner = area;
-                        let mut lines: Vec<Line> = Vec::new();
-                        let use_full_cells = *copy_mode && *active && !content.is_empty();
-                        if use_full_cells || rows_v2.is_empty() {
-                            for r in 0..inner.height.min(content.len() as u16) {
-                                let mut spans: Vec<Span> = Vec::new();
-                                let row = &content[r as usize];
-                                let max_c = inner.width.min(row.len() as u16);
-                                let mut c: u16 = 0;
-                                while c < max_c {
-                                    let cell = &row[c as usize];
-                                    let mut fg = map_color(&cell.fg);
-                                    let bg = map_color(&cell.bg);
-                                    let in_selection = if *copy_mode && *active {
-                                        if let (Some(sr), Some(sc), Some(er), Some(ec)) = (sel_start_row, sel_start_col, sel_end_row, sel_end_col) {
-                                            let mode = sel_mode.as_deref().unwrap_or("char");
-                                            match mode {
-                                                "rect" => r >= *sr && r <= *er && c >= (*sc).min(*ec) && c <= (*sc).max(*ec),
-                                                "line" => r >= *sr && r <= *er,
-                                                _ /* char */ => {
-                                                    if *sr == *er {
-                                                        // Single line
-                                                        r == *sr && c >= (*sc).min(*ec) && c <= (*sc).max(*ec)
-                                                    } else if r == *sr {
-                                                        c >= *sc
-                                                    } else if r == *er {
-                                                        c <= *ec
-                                                    } else {
-                                                        r > *sr && r < *er
-                                                    }
-                                                }
-                                            }
-                                        } else { false }
-                                    } else { false };
-                                    if *active && dim_preds && !*alternate_screen
-                                        && (r > *cursor_row || (r == *cursor_row && c >= *cursor_col))
-                                    {
-                                        fg = dim_color(fg);
-                                    }
-                                    let mut style = Style::default().fg(fg).bg(bg);
-                                    if in_selection {
-                                        // Apply mode-style from theme/config instead of hardcoded colors
-                                        let ms = crate::rendering::parse_tmux_style(&mode_style_str);
-                                        style = ms;
-                                    }
-                                    if cell.inverse { style = style.add_modifier(Modifier::REVERSED); }
-                                    if cell.dim { style = style.add_modifier(Modifier::DIM); }
-                                    if cell.bold { style = style.add_modifier(Modifier::BOLD); }
-                                    if cell.italic { style = style.add_modifier(Modifier::ITALIC); }
-                                    if cell.underline { style = style.add_modifier(Modifier::UNDERLINED); }
-                                    if cell.blink { style = style.add_modifier(Modifier::SLOW_BLINK); }
-                                    if cell.strikethrough { style = style.add_modifier(Modifier::CROSSED_OUT); }
-                                    // ratatui-crossterm omits SGR 8 (HIDDEN), render as spaces
-                                    let text: &str = if cell.hidden {
-                                        " "
-                                    } else if cell.text.is_empty() {
-                                        " "
-                                    } else {
-                                        &cell.text
-                                    };
-                                    let char_width = unicode_width::UnicodeWidthStr::width(text) as u16;
-                                    if char_width >= 2 && c + char_width > max_c {
-                                        // Wide char at boundary would overflow
-                                        spans.push(Span::styled(" ", style));
-                                        c += 1;
-                                    } else {
-                                        spans.push(Span::styled(text, style));
-                                        if char_width >= 2 {
-                                            c += 2;
-                                        } else {
-                                            c += 1;
-                                        }
-                                    }
-                                }
-                                // Pad remaining columns so the Line fills the
-                                // full pane width — prevents a visible gap when
-                                // the server's content width differs from the
-                                // client's computed rect (e.g. during resize or
-                                // when status_lines > 1).
-                                if c < inner.width {
-                                    let last_bg = if !spans.is_empty() {
-                                        spans.last().unwrap().style.bg.unwrap_or(Color::Reset)
-                                    } else { Color::Reset };
-                                    let pad = " ".repeat((inner.width - c) as usize);
-                                    spans.push(Span::styled(pad, Style::default().bg(last_bg)));
-                                }
-                                lines.push(Line::from(spans));
-                            }
-                        } else {
-                            for r in 0..inner.height.min(rows_v2.len() as u16) {
-                                let mut spans: Vec<Span> = Vec::new();
-                                let mut c: u16 = 0;
-                                let mut last_bg = Color::Reset;
-                                for run in &rows_v2[r as usize].runs {
-                                    if c >= inner.width { break; }
-                                    let mut fg = map_color(&run.fg);
-                                    let bg = map_color(&run.bg);
-                                    last_bg = bg;
-                                    if *active && dim_preds && !*alternate_screen
-                                        && (r > *cursor_row || (r == *cursor_row && c >= *cursor_col))
-                                    {
-                                        fg = dim_color(fg);
-                                    }
-                                    let mut style = Style::default().fg(fg).bg(bg);
-                                    if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
-                                    if run.flags & 1 != 0 { style = style.add_modifier(Modifier::DIM); }
-                                    if run.flags & 2 != 0 { style = style.add_modifier(Modifier::BOLD); }
-                                    if run.flags & 4 != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                                    if run.flags & 8 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
-                                    if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
-                                    if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
-                                    // ratatui-crossterm omits SGR 8 (HIDDEN), render as spaces
-                                    let text: &str = if run.flags & 64 != 0 {
-                                        " "
-                                    } else if run.text.is_empty() {
-                                        " "
-                                    } else {
-                                        &run.text
-                                    };
-                                    // Truncate run text if it extends past the pane width
-                                    let run_w = run.width.max(1);
-                                    if c + run_w > inner.width {
-                                        let avail = (inner.width - c) as usize;
-                                        let mut truncated = String::new();
-                                        let mut used = 0usize;
-                                        for ch in text.chars() {
-                                            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-                                            if used + cw > avail { break; }
-                                            used += cw;
-                                            truncated.push(ch);
-                                        }
-                                        if !truncated.is_empty() {
-                                            spans.push(Span::styled(truncated, style));
-                                        }
-                                        c = inner.width;
-                                    } else {
-                                        spans.push(Span::styled(text, style));
-                                        c = c.saturating_add(run_w);
-                                    }
-                                }
-                                // Pad remaining columns with the last run's bg
-                                // so every Line fills the full pane width.
-                                if c < inner.width {
-                                    let pad = " ".repeat((inner.width - c) as usize);
-                                    spans.push(Span::styled(pad, Style::default().bg(last_bg)));
-                                }
-                                lines.push(Line::from(spans));
-                            }
-                        }
-                        f.render_widget(Clear, inner);
-                        let para = Paragraph::new(Text::from(lines));
-                        f.render_widget(para, inner);
-
-                        // Copy mode indicator (replaces the old block title "[copy mode]")
-                        if *copy_mode && *active {
-                            let label = "[copy mode]";
-                            let lw = label.len() as u16;
-                            if area.width >= lw {
-                                let lx = area.x + area.width.saturating_sub(lw);
-                                let la = Rect::new(lx, area.y, lw, 1);
-                                let ls = Span::styled(label, Style::default().fg(Color::Black).bg(Color::Yellow));
-                                f.render_widget(Paragraph::new(Line::from(ls)), la);
-                            }
-                        }
-
-                        if *copy_mode && *active && *scroll_offset > 0 {
-                            let indicator = format!("[{}/{}]", scroll_offset, scroll_offset);
-                            let indicator_width = indicator.len() as u16;
-                            if area.width > indicator_width + 2 {
-                                let indicator_x = area.x + area.width - indicator_width - 1;
-                                let indicator_y = if *copy_mode { area.y + 1 } else { area.y };
-                                let indicator_area = Rect::new(indicator_x, indicator_y, indicator_width, 1);
-                                let indicator_span = Span::styled(indicator, Style::default().fg(Color::Black).bg(Color::Yellow));
-                                f.render_widget(Paragraph::new(Line::from(indicator_span)), indicator_area);
-                            }
-                        }
-
-                        if *active && !*copy_mode {
-                            // Clock mode overlay
-                            if clock_mode {
-                                render_clock_overlay(f, inner, clock_colour);
-                            }
-                            // Cursor visibility is handled entirely outside
-                            // the draw callback — see the post-draw atomic
-                            // cursor write below.  We intentionally do NOT
-                            // call f.set_cursor_position() here so that
-                            // ratatui never emits separate ?25h/?25l flushes
-                            // that would create intermediate states visible
-                            // to WT between vsync frames.
-                        }
-
-                        // In copy mode, show cursor at copy_pos with a
-                        // highlighted (reverse-video) cell so the user can see
-                        // where the cursor is before starting selection.
-                        if *copy_mode && *active {
-                            if let (Some(cr), Some(cc)) = (copy_cursor_row, copy_cursor_col) {
-                                let cr = (*cr).min(inner.height.saturating_sub(1));
-                                let cc = (*cc).min(inner.width.saturating_sub(1));
-                                let cy = inner.y + cr;
-                                let cx = inner.x + cc;
-                                f.set_cursor_position((cx, cy));
-                                // Highlight the cursor cell with reverse video
-                                let buf = f.buffer_mut();
-                                let buf_area = buf.area;
-                                if cy >= buf_area.y && cy < buf_area.y + buf_area.height
-                                    && cx >= buf_area.x && cx < buf_area.x + buf_area.width
-                                {
-                                    let idx = (cy - buf_area.y) as usize * buf_area.width as usize
-                                        + (cx - buf_area.x) as usize;
-                                    if idx < buf.content.len() {
-                                        let cell = &mut buf.content[idx];
-                                        cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
-                                    }
-                                }
-                            }
-                        }
-                        // Pane border format/status overlay
-                        if border_status != "off" && !border_format.is_empty() && area.height > 1 {
-                            let pane_title_str = title.as_deref().unwrap_or("");
-                            let pane_label = border_format
-                                .replace("#{pane_title}", pane_title_str)
-                                .replace("#{pane_index}", &id.to_string())
-                                .replace("#P", &id.to_string());
-                            let label_width = unicode_width::UnicodeWidthStr::width(pane_label.as_str()) as u16;
-                            if label_width > 0 && area.width >= label_width {
-                                let label_y = if border_status == "bottom" { area.y + area.height.saturating_sub(1) } else { area.y };
-                                let label_area = Rect::new(area.x, label_y, label_width.min(area.width), 1);
-                                let label_style = Style::default().fg(if *active { active_border_fg } else { border_fg });
-                                f.render_widget(Paragraph::new(Line::from(Span::styled(pane_label, label_style))), label_area);
-                            }
-                        }
-                    }
-                    LayoutJson::Split { kind, sizes, children } => {
-                        let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
-                            sizes.clone()
-                        } else {
-                            vec![(100 / children.len().max(1)) as u16; children.len()]
-                        };
-                        let is_horizontal = kind == "Horizontal";
-                        let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
-
-                        // Render children first
-                        for (i, child) in children.iter().enumerate() {
-                            if i < rects.len() { render_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format); }
-                        }
-
-                        // Draw separator lines between children using direct buffer access.
-                        // Skip when zoomed — no visible borders (#82)
-                        if zoomed { return; }
-                        let border_style = Style::default().fg(border_fg);
-                        let active_border_style = Style::default().fg(active_border_fg);
-                        let buf = f.buffer_mut();
-                        for i in 0..children.len().saturating_sub(1) {
-                            if i >= rects.len() { break; }
-
-                            // When both neighbours are direct leaves, use the midpoint
-                            // half-highlight so the colored half indicates which side
-                            // is active.  For nested splits, use adjacency to the
-                            // computed active pane rect so only the correct portion of
-                            // the separator is highlighted.
-                            let both_leaves = matches!(&children[i], LayoutJson::Leaf { .. })
-                                && matches!(children.get(i + 1), Some(LayoutJson::Leaf { .. }));
-
-                            if is_horizontal {
-                                // Vertical separator line between left/right children.
-                                let sep_x = rects[i].x + rects[i].width;
-                                if sep_x < buf.area.x + buf.area.width {
-                                    if both_leaves {
-                                        let left_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
-                                        let right_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
-                                        let left_sty = if left_active { active_border_style } else { border_style };
-                                        let right_sty = if right_active { active_border_style } else { border_style };
-                                        let mid_y = area.y + area.height / 2;
-                                        for y in area.y..area.y + area.height {
-                                            let sty = if y < mid_y { left_sty } else { right_sty };
-                                            let idx = (y - buf.area.y) as usize * buf.area.width as usize
-                                                + (sep_x - buf.area.x) as usize;
-                                            if idx < buf.content.len() {
-                                                buf.content[idx].set_char('│');
-                                                buf.content[idx].set_style(sty);
-                                            }
-                                        }
-                                    } else {
-                                        for y in area.y..area.y + area.height {
-                                            let active = active_rect.map_or(false, |ar| {
-                                                y >= ar.y && y < ar.y + ar.height
-                                                && (sep_x == ar.x + ar.width || sep_x + 1 == ar.x)
-                                            });
-                                            let sty = if active { active_border_style } else { border_style };
-                                            let idx = (y - buf.area.y) as usize * buf.area.width as usize
-                                                + (sep_x - buf.area.x) as usize;
-                                            if idx < buf.content.len() {
-                                                buf.content[idx].set_char('│');
-                                                buf.content[idx].set_style(sty);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Horizontal separator line between top/bottom children.
-                                let sep_y = rects[i].y + rects[i].height;
-                                if sep_y < buf.area.y + buf.area.height {
-                                    if both_leaves {
-                                        let top_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
-                                        let bot_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
-                                        let top_sty = if top_active { active_border_style } else { border_style };
-                                        let bot_sty = if bot_active { active_border_style } else { border_style };
-                                        let mid_x = area.x + area.width / 2;
-                                        for x in area.x..area.x + area.width {
-                                            let sty = if x < mid_x { top_sty } else { bot_sty };
-                                            let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize
-                                                + (x - buf.area.x) as usize;
-                                            if idx < buf.content.len() {
-                                                buf.content[idx].set_char('─');
-                                                buf.content[idx].set_style(sty);
-                                            }
-                                        }
-                                    } else {
-                                        for x in area.x..area.x + area.width {
-                                            let active = active_rect.map_or(false, |ar| {
-                                                x >= ar.x && x < ar.x + ar.width
-                                                && (sep_y == ar.y + ar.height || sep_y + 1 == ar.y)
-                                            });
-                                            let sty = if active { active_border_style } else { border_style };
-                                            let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize
-                                                + (x - buf.area.x) as usize;
-                                            if idx < buf.content.len() {
-                                                buf.content[idx].set_char('─');
-                                                buf.content[idx].set_style(sty);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             let active_rect = compute_active_rect_json(&root, content_chunk);
             let clock_col = clock_colour_str.as_deref().map(|s| map_color(s)).unwrap_or(Color::Cyan);
             let border_status = state.pane_border_status.as_deref().unwrap_or("off");
             let border_format = state.pane_border_format.as_deref().unwrap_or("");
-            render_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format);
+            render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format);
             fix_border_intersections(f.buffer_mut());
-            // Re-color all border characters based on adjacency to the active pane.
             // render_json and fix_border_intersections can leave inconsistent styles
             // at intersections and along edges shared by nested splits.
             if let Some(ar) = active_rect {

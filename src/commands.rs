@@ -2342,3 +2342,7 @@ mod tests_issue244_capture_scrollback;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue245_mouse_selection.rs"]
 mod tests_issue245_mouse_selection;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr255_active_border.rs"]
+mod tests_pr255_active_border;

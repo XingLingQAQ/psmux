@@ -301,6 +301,7 @@ fn run_main() -> io::Result<()> {
             term.draw(|f| {
                 let area = Rect::new(0, 0, w, h);
                 let active_rect = crate::client::compute_active_rect_json(&layout, area);
+                let total_panes = layout.count_leaves();
                 crate::client::render_layout_json(
                     f, &layout, area,
                     false,
@@ -308,6 +309,7 @@ fn run_main() -> io::Result<()> {
                     false, Color::Reset,
                     active_rect,
                     "", false, "off", "",
+                    total_panes,
                 );
                 crate::rendering::fix_border_intersections(f.buffer_mut());
             }).unwrap();

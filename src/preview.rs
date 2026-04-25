@@ -696,6 +696,7 @@ pub fn render_dump_tree(
 ) {
     if area.width == 0 || area.height == 0 { return; }
     let active_rect = crate::client::compute_active_rect_json(layout, area);
+    let total_panes = layout.count_leaves();
     crate::client::render_layout_json(
         f, layout, area,
         false,            // dim_preds: never dim predictions in preview
@@ -707,6 +708,7 @@ pub fn render_dump_tree(
         false,            // zoomed: ignore zoom for preview, show real layout
         "off",            // border_status off (no per-pane title bar)
         "",               // border_format irrelevant
+        total_panes,
     );
     crate::rendering::fix_border_intersections(f.buffer_mut());
 }

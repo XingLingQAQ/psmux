@@ -156,6 +156,16 @@ pub enum LayoutJson {
     },
 }
 
+impl LayoutJson {
+    /// Counts the total number of leaf panes in this layout tree.
+    pub fn count_leaves(&self) -> usize {
+        match self {
+            LayoutJson::Leaf { .. } => 1,
+            LayoutJson::Split { children, .. } => children.iter().map(|c| c.count_leaves()).sum(),
+        }
+    }
+}
+
 pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
     dump_layout_json_inner(app, None)
 }

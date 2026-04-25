@@ -467,6 +467,7 @@ pub fn render_layout_json(
     zoomed: bool,
     border_status: &str,
     border_format: &str,
+    total_panes: usize,
 ) {
     match node {
         LayoutJson::Leaf {
@@ -726,7 +727,7 @@ pub fn render_layout_json(
 
             for (i, child) in children.iter().enumerate() {
                 if i < rects.len() {
-                    render_layout_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format);
+                    render_layout_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes);
                 }
             }
 
@@ -743,7 +744,7 @@ pub fn render_layout_json(
                 if is_horizontal {
                     let sep_x = rects[i].x + rects[i].width;
                     if sep_x < buf.area.x + buf.area.width {
-                        if both_leaves {
+                        if both_leaves && total_panes == 2 {
                             let left_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
                             let right_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
                             let left_sty = if left_active { active_border_style } else { border_style };
@@ -777,7 +778,7 @@ pub fn render_layout_json(
                 } else {
                     let sep_y = rects[i].y + rects[i].height;
                     if sep_y < buf.area.y + buf.area.height {
-                        if both_leaves {
+                        if both_leaves && total_panes == 2 {
                             let top_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
                             let bot_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
                             let top_sty = if top_active { active_border_style } else { border_style };
@@ -3890,7 +3891,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let clock_col = clock_colour_str.as_deref().map(|s| map_color(s)).unwrap_or(Color::Cyan);
             let border_status = state.pane_border_status.as_deref().unwrap_or("off");
             let border_format = state.pane_border_format.as_deref().unwrap_or("");
-            render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format);
+            // O(N) per frame but pane counts are small in practice (typically < 20).
+            let total_panes = if state.zoomed { 1 } else { root.count_leaves() };
+            render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format, total_panes);
             fix_border_intersections(f.buffer_mut());
             // render_json and fix_border_intersections can leave inconsistent styles
             // at intersections and along edges shared by nested splits.
@@ -3905,7 +3908,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         let idx = row * w + col;
                         if idx >= buf.content.len() { continue; }
                         let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
-                        if !matches!(ch, '│' | '─' | '┼' | '├' | '┤' | '┬' | '┴') { continue; }
+                        // Only re-color junction characters. The straight │ and ─ separators
+                        // are now already colored correctly per-cell by render_layout_json based
+                        // on adjacency, so re-coloring them here would clobber that work for
+                        // 3+ pane layouts where a separator borders both active and inactive panes.
+                        if !matches!(ch, '┼' | '├' | '┤' | '┬' | '┴') { continue; }
                         let x = buf.area.x + col as u16;
                         let y = buf.area.y + row as u16;
                         let adj = (x + 1 == ar.x && y >= ar.y && y < ar.y + ar.height)

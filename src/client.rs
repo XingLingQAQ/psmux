@@ -99,6 +99,85 @@ fn row_chars(runs: &[crate::layout::CellRunJson], width: usize) -> Vec<char> {
     out
 }
 
+/// Downscale a `rows_v2` buffer (src_h x src_w) to (dst_h x dst_w) using
+/// nearest-neighbour sampling per cell. Each output cell becomes a 1-wide
+/// run carrying the char + style of the sampled source cell. Used by the
+/// preview path so a 240x29 pane buffer rendered into a 60x14 preview slot
+/// shows the entire pane scaled down rather than only the top-left corner.
+pub(crate) fn downscale_rows_v2(
+    src: &[crate::layout::RowRunsJson],
+    src_h: u16,
+    src_w: u16,
+    dst_h: u16,
+    dst_w: u16,
+) -> Vec<crate::layout::RowRunsJson> {
+    use crate::layout::{CellRunJson, RowRunsJson};
+    let mut out: Vec<RowRunsJson> = Vec::with_capacity(dst_h as usize);
+    if src_h == 0 || src_w == 0 || dst_h == 0 || dst_w == 0 {
+        return out;
+    }
+    // Pre-expand each source row once into a per-column flat array.
+    // Cache row_index -> Vec<(char, fg, bg, flags)> for row reuse if multiple
+    // dst rows map to the same src row.
+    let mut last_src_idx: Option<usize> = None;
+    let mut flat: Vec<(char, String, String, u8)> = Vec::new();
+    for r_dst in 0..dst_h {
+        let r_src = ((r_dst as u32 * src_h as u32) / dst_h as u32) as usize;
+        if r_src >= src.len() {
+            out.push(RowRunsJson { runs: vec![] });
+            continue;
+        }
+        if last_src_idx != Some(r_src) {
+            flat.clear();
+            flat.reserve(src_w as usize);
+            for run in &src[r_src].runs {
+                let w = run.width.max(1) as usize;
+                let chars: Vec<char> = run.text.chars().collect();
+                for i in 0..w {
+                    if flat.len() >= src_w as usize { break; }
+                    let ch = chars.get(i).copied().unwrap_or(' ');
+                    flat.push((ch, run.fg.clone(), run.bg.clone(), run.flags));
+                }
+                if flat.len() >= src_w as usize { break; }
+            }
+            while flat.len() < src_w as usize {
+                flat.push((' ', String::new(), String::new(), 0));
+            }
+            last_src_idx = Some(r_src);
+        }
+        let mut runs: Vec<CellRunJson> = Vec::with_capacity(dst_w as usize);
+        for c_dst in 0..dst_w {
+            let c_lo = ((c_dst as u32 * src_w as u32) / dst_w as u32) as usize;
+            let c_hi = (((c_dst as u32 + 1) * src_w as u32) / dst_w as u32) as usize;
+            let c_hi = c_hi.max(c_lo + 1).min(flat.len());
+            // Within the [c_lo, c_hi) cluster prefer the first non-space cell
+            // so text remains readable when scaling down by large factors. Fall
+            // back to the cluster's first cell otherwise.
+            let mut pick: Option<usize> = None;
+            for i in c_lo..c_hi {
+                if let Some(t) = flat.get(i) {
+                    if t.0 != ' ' { pick = Some(i); break; }
+                }
+            }
+            let idx = pick.unwrap_or(c_lo);
+            let cell = flat.get(idx);
+            let (ch, fg, bg, flags) = match cell {
+                Some(t) => (t.0, t.1.clone(), t.2.clone(), t.3),
+                None => (' ', String::new(), String::new(), 0),
+            };
+            runs.push(CellRunJson {
+                text: ch.to_string(),
+                width: 1,
+                fg,
+                bg,
+                flags,
+            });
+        }
+        out.push(RowRunsJson { runs });
+    }
+    out
+}
+
 /// Normalise a selection (start, end) into reading-order or block-mode bounds.
 fn normalize_selection(start: (u16, u16), end: (u16, u16), block: bool) -> (u16, u16, u16, u16) {
     if block {
@@ -418,8 +497,8 @@ pub fn render_layout_json(
     match node {
         LayoutJson::Leaf {
             id,
-            rows: _,
-            cols: _,
+            rows: src_rows,
+            cols: src_cols,
             cursor_row,
             cursor_col,
             alternate_screen,
@@ -442,7 +521,23 @@ pub fn render_layout_json(
             let inner = area;
             let mut lines: Vec<Line> = Vec::new();
             let use_full_cells = *copy_mode && *active && !content.is_empty();
-            if use_full_cells || rows_v2.is_empty() {
+            // If the source pane is larger than the rendered area (typical for
+            // choose-tree previews showing a 240x29 pane in a 60x14 slot),
+            // downscale the buffer by nearest-neighbour sampling so the entire
+            // pane content is visible instead of cropped at the top-left.
+            let needs_scale = !use_full_cells
+                && !rows_v2.is_empty()
+                && *src_rows > 0 && *src_cols > 0
+                && inner.height > 0 && inner.width > 0
+                && (*src_rows > inner.height || *src_cols > inner.width);
+            let scaled_holder: Vec<RowRunsJson>;
+            let rows_v2_eff: &[RowRunsJson] = if needs_scale {
+                scaled_holder = downscale_rows_v2(rows_v2, *src_rows, *src_cols, inner.height, inner.width);
+                &scaled_holder
+            } else {
+                rows_v2.as_slice()
+            };
+            if use_full_cells || rows_v2_eff.is_empty() {
                 for r in 0..inner.height.min(content.len() as u16) {
                     let mut spans: Vec<Span> = Vec::new();
                     let row = &content[r as usize];
@@ -519,11 +614,11 @@ pub fn render_layout_json(
                     lines.push(Line::from(spans));
                 }
             } else {
-                for r in 0..inner.height.min(rows_v2.len() as u16) {
+                for r in 0..inner.height.min(rows_v2_eff.len() as u16) {
                     let mut spans: Vec<Span> = Vec::new();
                     let mut c: u16 = 0;
                     let mut last_bg = Color::Reset;
-                    for run in &rows_v2[r as usize].runs {
+                    for run in &rows_v2_eff[r as usize].runs {
                         if c >= inner.width { break; }
                         let mut fg = map_color(&run.fg);
                         let bg = map_color(&run.bg);

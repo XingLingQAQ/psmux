@@ -938,6 +938,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Whether the right-side preview pane is shown. Toggled by `p`
     // while a chooser is open. Persisted across reopens.
     let mut preview_enabled: bool = false;
+    // Mirror of the server-side `choose-tree-preview` option. When true,
+    // pickers open with `preview_enabled` already set so the user does not
+    // need to press `p` each time. Configured via `set -g choose-tree-preview on`.
+    let mut choose_tree_preview_default: bool = false;
     // Draggable popup state (shared across pickers). Offset is applied on top
     // of the centered rect; resets when no picker is open.
     let mut popup_offset: (i32, i32) = (0, 0);
@@ -1192,6 +1196,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// paste-detection option (mirror of server-side AppState field)
         #[serde(default = "default_paste_detection")]
         paste_detection: bool,
+        /// choose-tree-preview option: when true, choose-session and
+        /// choose-tree pickers open with the live preview pane visible.
+        #[serde(default)]
+        choose_tree_preview: bool,
         /// status-left-length (max display width for left status)
         #[serde(default = "default_status_left_length")]
         status_left_length: usize,
@@ -2084,6 +2092,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 popup_offset = (0, 0);
                                 popup_dragging = false;
                                 popup_rect_last = None;
+                                if choose_tree_preview_default { preview_enabled = true; }
                                 // Query ALL sessions (like tmux choose-tree)
                                 let dir = format!("{}\\.psmux", home);
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -2172,6 +2181,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 popup_offset = (0, 0);
                                 popup_dragging = false;
                                 popup_rect_last = None;
+                                if choose_tree_preview_default { preview_enabled = true; }
                                 let dir = format!("{}\\.psmux", home);
                                 // Collect (label, addr, key) for every reachable port file first,
                                 // then fan out the per-session AUTH+session-info fetches in parallel.
@@ -3504,6 +3514,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         client_pwsh_selection = state.pwsh_mouse_selection;
         #[cfg(windows)]
         { paste_detection_enabled = state.paste_detection; }
+        choose_tree_preview_default = state.choose_tree_preview;
         client_zoomed = state.zoomed;
         let dim_preds = state.prediction_dimming;
         clock_active = state.clock_mode;

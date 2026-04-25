@@ -378,6 +378,10 @@ pub struct AppState {
     /// by the console host.  When off, Ctrl+V is forwarded as send-key C-v so
     /// child applications (e.g. neovim visual block mode) can receive it.
     pub paste_detection: bool,
+    /// choose-tree-preview: when on, choose-session and choose-tree pickers
+    /// open with the live preview pane already visible (no need to press `p`).
+    /// Default: off (matches tmux which has no preview-on-by-default option).
+    pub choose_tree_preview: bool,
     pub paste_buffers: Vec<String>,
     pub status_left: String,
     pub status_right: String,
@@ -665,6 +669,7 @@ impl AppState {
             scroll_enter_copy_mode: true,
             pwsh_mouse_selection: false,
             paste_detection: true,
+            choose_tree_preview: false,
             paste_buffers: Vec::new(),
             status_left: "[#S] ".to_string(),
             status_right: "#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}\"#{=21:pane_title}\" %H:%M %d-%b-%y".to_string(),

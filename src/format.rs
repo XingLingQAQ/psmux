@@ -807,6 +807,7 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "history-limit" => Some(app.history_limit.to_string()),
         "mouse" => Some(if app.mouse_enabled { "on".into() } else { "off".into() }),
         "scroll-enter-copy-mode" => Some(if app.scroll_enter_copy_mode { "on".into() } else { "off".into() }),
+        "choose-tree-preview" => Some(if app.choose_tree_preview { "on".into() } else { "off".into() }),
         "mode-keys" => Some(app.mode_keys.clone()),
         "default-command" | "default-shell" => Some(if app.default_shell.is_empty() {
             crate::pane::cached_shell().unwrap_or("pwsh.exe").to_string()
@@ -1540,6 +1541,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         // ── Options as format variables ──
         "mouse" => if app.mouse_enabled { "on".into() } else { "off".into() },
         "scroll-enter-copy-mode" => if app.scroll_enter_copy_mode { "on".into() } else { "off".into() },
+        "choose-tree-preview" => if app.choose_tree_preview { "on".into() } else { "off".into() },
         "prefix" => format_key_binding(&app.prefix_key),
         "prefix2" => app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_else(|| "none".to_string()),
         "status" => if app.status_visible { "on".into() } else { "off".into() },

@@ -147,7 +147,8 @@ See [claude-code.md](claude-code.md) for detailed setup and troubleshooting.
 
 ## Interactive Choosers
 
-- `choose-tree` (`Prefix + w`): browse and select sessions, windows, and panes interactively
+- `choose-tree` (`Prefix + w`): browse and select sessions, windows, and panes interactively, with optional [live preview pane](preview.md) (`p` to toggle, `set -g choose-tree-preview on` to default on)
+- `choose-session` (`Prefix + s`): browse sessions only, same live preview support
 - `choose-buffer` (`Prefix + =`): pick from paste buffers with preview
 - `choose-client`: view connected clients
 - `customize-mode`: interactive options editor

@@ -105,6 +105,7 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `scroll-enter-copy-mode` | Bool | `on` | Enter copy mode on mouse scroll (set `off` to disable) |
 | `pwsh-mouse-selection` | Bool | `off` | Windows 11 PowerShell-style word/line selection (double/triple-click) |
 | `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host and send as bracketed paste (set `off` to let Ctrl+V reach child apps like neovim) |
+| `choose-tree-preview` | Bool | `off` | Open `choose-session` / `choose-tree` pickers with the live preview pane already visible (saves pressing `p`). See [preview.md](preview.md) |
 | `status` | Bool/Int | `on` | Show status bar (number = line count) |
 | `status-position` | Str | `bottom` | `top` or `bottom` |
 | `status-justify` | Str | `left` | `left`, `centre`, `right`, `absolute-centre` |
@@ -273,6 +274,17 @@ With paste detection off, you can still paste using:
 * **`psmux send-keys C-v`** from another terminal
 
 > **Note:** `unbind-key -n C-v` alone is not sufficient to stop Ctrl+V interception because the paste detection operates outside the key binding system. You must use `set -g paste-detection off`.
+
+### Live Preview in Choosers
+
+`choose-session` (prefix + s) and `choose-tree` (prefix + w) include a live preview pane that mirrors the selected session or window in real time. By default it is hidden and you press `p` to toggle it. To make it visible by default:
+
+```tmux
+# Open all choosers with the preview pane already visible
+set -g choose-tree-preview on
+```
+
+You can still press `p` inside the chooser to hide it for the current session. The setting is read once when the chooser opens, so changes to the option take effect immediately on the next open. See [preview.md](preview.md) for the full feature documentation.
 
 ### Command Chaining
 

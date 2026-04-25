@@ -532,6 +532,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "scroll-enter-copy-mode" => app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1"),
         "pwsh-mouse-selection" => app.pwsh_mouse_selection = matches!(value, "on" | "true" | "1"),
         "paste-detection" => app.paste_detection = matches!(value, "on" | "true" | "1"),
+        "choose-tree-preview" => app.choose_tree_preview = matches!(value, "on" | "true" | "1"),
         "prefix" => {
             if let Some(key) = parse_key_name(value) {
                 app.prefix_key = key;

@@ -21,22 +21,51 @@ pub fn split_with_gaps(is_horizontal: bool, sizes: &[u16], area: Rect) -> Vec<Re
     let total_pct: u32 = sizes.iter().map(|&s| s as u32).sum();
     if total_pct == 0 { return vec![area; n]; }
 
-    let mut rects = Vec::with_capacity(n);
-    let mut offset: u16 = 0;
-
+    // Compute proportional sizes first.
+    let mut child_sizes: Vec<u16> = Vec::with_capacity(n);
+    let mut running: u16 = 0;
     for (i, &pct) in sizes.iter().enumerate() {
         let size = if i == n - 1 {
-            total_available.saturating_sub(offset) // last child gets remainder
+            total_available.saturating_sub(running)
         } else {
-            ((total_available as u32 * pct as u32) / total_pct) as u16
+            let s = ((total_available as u32 * pct as u32) / total_pct) as u16;
+            running = running.saturating_add(s);
+            s
         };
+        child_sizes.push(size);
+    }
 
+    // If total space allows at least 1 cell per child, guarantee that minimum
+    // by stealing from the largest siblings. This prevents previews of windows
+    // with many nested splits from completely hiding deeply-nested panes when
+    // the preview area is small.
+    if total_available >= n as u16 {
+        loop {
+            let mut zero_idx: Option<usize> = None;
+            for (i, &s) in child_sizes.iter().enumerate() {
+                if s == 0 { zero_idx = Some(i); break; }
+            }
+            let Some(zi) = zero_idx else { break };
+            // Find largest child with > 1 cell to steal from.
+            let mut max_idx = 0usize;
+            let mut max_val = 0u16;
+            for (i, &s) in child_sizes.iter().enumerate() {
+                if s > max_val { max_val = s; max_idx = i; }
+            }
+            if max_val <= 1 { break; }
+            child_sizes[max_idx] -= 1;
+            child_sizes[zi] += 1;
+        }
+    }
+
+    let mut rects = Vec::with_capacity(n);
+    let mut offset: u16 = 0;
+    for (i, &size) in child_sizes.iter().enumerate() {
         let child_rect = if is_horizontal {
             Rect::new(area.x + offset + i as u16, area.y, size, area.height)
         } else {
             Rect::new(area.x, area.y + offset + i as u16, area.width, size)
         };
-
         rects.push(child_rect);
         offset += size;
     }

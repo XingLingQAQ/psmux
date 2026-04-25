@@ -51,6 +51,34 @@ use crate::server::run_server;
 use crate::client::run_remote;
 use crate::ssh_input::{send_mouse_enable, InputSource};
 
+/// Convert a ratatui Color to an ANSI SGR escape sequence.
+fn color_to_ansi(c: ratatui::style::Color, fg: bool) -> String {
+    use ratatui::style::Color;
+    let base = if fg { 30 } else { 40 };
+    let bright = if fg { 90 } else { 100 };
+    match c {
+        Color::Reset => format!("\x1b[{}m", if fg { 39 } else { 49 }),
+        Color::Black => format!("\x1b[{}m", base + 0),
+        Color::Red => format!("\x1b[{}m", base + 1),
+        Color::Green => format!("\x1b[{}m", base + 2),
+        Color::Yellow => format!("\x1b[{}m", base + 3),
+        Color::Blue => format!("\x1b[{}m", base + 4),
+        Color::Magenta => format!("\x1b[{}m", base + 5),
+        Color::Cyan => format!("\x1b[{}m", base + 6),
+        Color::Gray => format!("\x1b[{}m", base + 7),
+        Color::DarkGray => format!("\x1b[{}m", bright + 0),
+        Color::LightRed => format!("\x1b[{}m", bright + 1),
+        Color::LightGreen => format!("\x1b[{}m", bright + 2),
+        Color::LightYellow => format!("\x1b[{}m", bright + 3),
+        Color::LightBlue => format!("\x1b[{}m", bright + 4),
+        Color::LightMagenta => format!("\x1b[{}m", bright + 5),
+        Color::LightCyan => format!("\x1b[{}m", bright + 6),
+        Color::White => format!("\x1b[{}m", bright + 7),
+        Color::Rgb(r, g, b) => format!("\x1b[{};2;{};{};{}m", if fg { 38 } else { 48 }, r, g, b),
+        Color::Indexed(i) => format!("\x1b[{};5;{}m", if fg { 38 } else { 48 }, i),
+    }
+}
+
 fn main() {
     if let Err(e) = run_main() {
         // Print a user-friendly error message instead of Rust's Debug format
@@ -243,6 +271,70 @@ fn run_main() -> io::Result<()> {
         }
         "list-commands" | "lscm" => {
             print_commands();
+            return Ok(());
+        }
+        // Hidden internal command for empirical preview rendering tests.
+        // Usage: psmux _render-preview <session> <win_id> <width> <height>
+        // Fetches the window-dump and renders it via the SAME render_layout_json
+        // the choose-tree/choose-session preview uses, then prints the resulting
+        // buffer as ANSI text to stdout. Lets us compare REAL vs PREVIEW.
+        "_render-preview" => {
+            if cmd_args.len() < 5 {
+                eprintln!("usage: psmux _render-preview <session> <win_id> <width> <height>");
+                std::process::exit(2);
+            }
+            let sess = cmd_args[1].clone();
+            let win_id: usize = cmd_args[2].parse().expect("win_id must be a number");
+            let w: u16 = cmd_args[3].parse().expect("width must be a number");
+            let h: u16 = cmd_args[4].parse().expect("height must be a number");
+            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+            let layout = match crate::preview::fetch_window_dump(&home, &sess, win_id) {
+                Some(l) => l,
+                None => { eprintln!("failed to fetch window-dump for {}:@{}", sess, win_id); std::process::exit(3); }
+            };
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            use ratatui::layout::Rect;
+            use ratatui::style::Color;
+            let backend = TestBackend::new(w, h);
+            let mut term = Terminal::new(backend).unwrap();
+            term.draw(|f| {
+                let area = Rect::new(0, 0, w, h);
+                let active_rect = crate::client::compute_active_rect_json(&layout, area);
+                crate::client::render_layout_json(
+                    f, &layout, area,
+                    false,
+                    Color::DarkGray, Color::Green,
+                    false, Color::Reset,
+                    active_rect,
+                    "", false, "off", "",
+                );
+                crate::rendering::fix_border_intersections(f.buffer_mut());
+            }).unwrap();
+            // Dump the buffer as ANSI escape sequences so colors are visible.
+            let buf = term.backend().buffer().clone();
+            let area = buf.area;
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            for y in 0..area.height {
+                let mut last_fg: Option<Color> = None;
+                let mut last_bg: Option<Color> = None;
+                for x in 0..area.width {
+                    let cell = &buf.content[(y as usize) * (area.width as usize) + (x as usize)];
+                    let fg = cell.style().fg;
+                    let bg = cell.style().bg;
+                    if fg != last_fg || bg != last_bg {
+                        let _ = write!(out, "\x1b[0m");
+                        if let Some(c) = fg { let _ = write!(out, "{}", color_to_ansi(c, true)); }
+                        if let Some(c) = bg { let _ = write!(out, "{}", color_to_ansi(c, false)); }
+                        last_fg = fg;
+                        last_bg = bg;
+                    }
+                    let _ = write!(out, "{}", cell.symbol());
+                }
+                let _ = writeln!(out, "\x1b[0m");
+            }
             return Ok(());
         }
         _ => {}

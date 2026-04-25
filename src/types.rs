@@ -373,6 +373,13 @@ pub struct AppState {
     /// only on right-click), word/line selection on double/triple-click.
     /// Default: off (preserves the legacy pwsh-style copy-on-release).
     pub pwsh_mouse_selection: bool,
+    /// mouse-selection: when off, psmux disables its own client-side drag
+    /// selection overlay so applications running inside a pane (opencode,
+    /// nvim, etc.) can implement their own mouse selection without having
+    /// psmux's selection rectangle drawn on top.  Mouse events are still
+    /// forwarded to the application (click-to-focus, scroll, app-level
+    /// mouse tracking continue to work).  Default: on.  (issue #245)
+    pub mouse_selection: bool,
     /// paste-detection: when on (default), Ctrl+V Press is suppressed and the
     /// Windows paste detection mechanism intercepts clipboard content injected
     /// by the console host.  When off, Ctrl+V is forwarded as send-key C-v so
@@ -668,6 +675,7 @@ impl AppState {
             mouse_enabled: true,
             scroll_enter_copy_mode: true,
             pwsh_mouse_selection: false,
+            mouse_selection: true,
             paste_detection: true,
             choose_tree_preview: false,
             paste_buffers: Vec::new(),

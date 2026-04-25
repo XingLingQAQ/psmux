@@ -2338,3 +2338,7 @@ mod tests_issue235_display_panes_base_index;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue244_capture_scrollback.rs"]
 mod tests_issue244_capture_scrollback;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue245_mouse_selection.rs"]
+mod tests_issue245_mouse_selection;

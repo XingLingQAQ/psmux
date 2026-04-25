@@ -1105,6 +1105,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     fn default_status_visible() -> bool { true }
     fn default_repeat_time() -> u64 { 500 }
     fn default_paste_detection() -> bool { true }
+    fn default_mouse_selection() -> bool { true }
 
     /// A single key binding synced from the server.
     #[derive(serde::Deserialize, Clone, Debug)]
@@ -1204,6 +1205,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// pwsh-mouse-selection option (mirror of server-side AppState field)
         #[serde(default)]
         pwsh_mouse_selection: bool,
+        /// mouse-selection option (mirror of server-side AppState field).
+        /// When false, client suppresses its own drag-selection overlay so
+        /// in-pane apps (opencode, etc.) can do their own mouse selection.
+        #[serde(default = "default_mouse_selection")]
+        mouse_selection: bool,
         /// paste-detection option (mirror of server-side AppState field)
         #[serde(default = "default_paste_detection")]
         paste_detection: bool,
@@ -1352,6 +1358,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut client_content_area: Rect = Rect::default();
     let mut client_copy_mode: bool = false;
     let mut client_pwsh_selection: bool = false;
+    let mut client_mouse_selection: bool = true;
     let mut client_zoomed: bool = false;
     let mut client_drag: Option<ClientDragState> = None;
     // Border hover highlight: (position, kind, area) of the border under the cursor.
@@ -3086,6 +3093,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                     pane_id, rel_col, rel_row));
                                                 border_drag = false;
 
+                                                // mouse-selection off: do not start any client-side
+                                                // drag selection.  In-pane apps (opencode, nvim, etc.)
+                                                // can implement their own mouse selection without
+                                                // psmux drawing on top.  (issue #245)
+                                                if !client_mouse_selection {
+                                                    rsel_start = None;
+                                                    rsel_end = None;
+                                                    rsel_pane_rect = None;
+                                                    rsel_block = false;
+                                                    rsel_dragged = false;
+                                                    selection_changed = true;
+                                                } else {
                                                 // Ctrl+click extends an existing selection to the click
                                                 // position without starting a new one. (Shift+click
                                                 // cannot be used on Windows Terminal — it is reserved
@@ -3153,6 +3172,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                     rsel_dragged = false;
                                                     selection_changed = true;
                                                 }
+                                                } // end if client_mouse_selection
                                             }
                                         } else {
                                             cmd_batch.push(format!("mouse-down {} {}\n", me.column, me.row));
@@ -3255,7 +3275,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         let sizes_str = new_sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
                                         cmd_batch.push(format!("split-sizes {} {}\n", path_str, sizes_str));
                                     }
-                                } else if rsel_start.is_none() {
+                                } else if rsel_start.is_none() || !client_mouse_selection {
                                     if client_copy_mode {
                                         if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                             r.contains(ratatui::layout::Position { x: me.column, y: me.row })
@@ -3623,6 +3643,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         client_base_index = base_index;
         client_copy_mode = active_pane_in_copy_mode(&root);
         client_pwsh_selection = state.pwsh_mouse_selection;
+        client_mouse_selection = state.mouse_selection;
         #[cfg(windows)]
         { paste_detection_enabled = state.paste_detection; }
         choose_tree_preview_default = state.choose_tree_preview;

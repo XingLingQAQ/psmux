@@ -466,6 +466,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Live preview cache for choose-tree / choose-session pickers (issue #257).
     // Keyed by "session\twin_id\tpane_id"; pane_id == usize::MAX => active pane.
     let mut preview_cache: crate::preview::PreviewCache = std::collections::HashMap::new();
+    // Layout cache for the same pickers — fetched once per (sess, win)
+    // so we can render the actual split layout, not just one pane.
+    let mut layout_cache: crate::preview::LayoutCache = std::collections::HashMap::new();
     // Draggable popup state (shared across pickers). Offset is applied on top
     // of the centered rect; resets when no picker is open.
     let mut popup_offset: (i32, i32) = (0, 0);
@@ -3860,44 +3863,103 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         let sep = Paragraph::new(Span::styled("│", Style::default().fg(Color::DarkGray)));
                         f.render_widget(sep, Rect { x: sep_x, y: yy, width: 1, height: 1 });
                     }
-                    // Look up first window of the highlighted session by querying list-tree.
-                    // We cache by session+win=usize::MAX, fetching list-tree once per session.
-                    let preview_text: Option<String> = session_entries.get(session_selected)
-                        .and_then(|(sname, _info)| {
-                            // Get first window id via cached list-tree fetch.
-                            let lt_key = format!("__lt__\t{}", sname);
-                            let win_id = if let Some((cached, ts)) = preview_cache.get(&lt_key) {
-                                if ts.elapsed() < crate::preview::PREVIEW_TTL {
-                                    cached.parse::<usize>().ok()
-                                } else { None }
-                            } else { None };
-                            let win_id = win_id.or_else(|| {
-                                // Fetch list-tree for this session
-                                let port_path = format!("{}\\.psmux\\{}.port", home, sname);
-                                let port: u16 = std::fs::read_to_string(&port_path).ok()?.trim().parse().ok()?;
-                                let key = crate::session::read_session_key(sname).ok()?;
-                                let resp = crate::session::fetch_authed_response_multi(
-                                    &format!("127.0.0.1:{}", port),
-                                    &key,
-                                    b"list-tree\n",
-                                    Duration::from_millis(150),
-                                    Duration::from_millis(300),
-                                )?;
-                                let wins: Vec<WinTree> = serde_json::from_str(resp.trim()).ok()?;
-                                let first = wins.first()?;
-                                preview_cache.insert(lt_key, (first.id.to_string(), Instant::now()));
-                                Some(first.id)
-                            });
-                            let wid = win_id?;
-                            crate::preview::get_or_fetch(&mut preview_cache, &home, sname, wid, usize::MAX)
+                    // Issue #257 follow-up: render the first window of the
+                    // highlighted session with its full split layout.
+                    let mut rendered = false;
+                    if let Some((sname, _info)) = session_entries.get(session_selected) {
+                        // Resolve first window id via cached list-tree fetch.
+                        let lt_key = format!("__lt__\t{}", sname);
+                        let win_id = if let Some((cached, ts)) = preview_cache.get(&lt_key) {
+                            if ts.elapsed() < crate::preview::PREVIEW_TTL {
+                                cached.parse::<usize>().ok()
+                            } else { None }
+                        } else { None };
+                        let win_id = win_id.or_else(|| {
+                            let port_path = format!("{}\\.psmux\\{}.port", home, sname);
+                            let port: u16 = std::fs::read_to_string(&port_path).ok()?.trim().parse().ok()?;
+                            let key = crate::session::read_session_key(sname).ok()?;
+                            let resp = crate::session::fetch_authed_response_multi(
+                                &format!("127.0.0.1:{}", port),
+                                &key,
+                                b"list-tree\n",
+                                Duration::from_millis(150),
+                                Duration::from_millis(300),
+                            )?;
+                            let wins: Vec<WinTree> = serde_json::from_str(resp.trim()).ok()?;
+                            let first = wins.first()?;
+                            preview_cache.insert(lt_key, (first.id.to_string(), Instant::now()));
+                            Some(first.id)
                         });
-                    let preview_lines = match preview_text {
-                        Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
-                        None => vec!["(no preview available)".to_string()],
-                    };
-                    let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
-                    let pv_para = Paragraph::new(Text::from(pv));
-                    f.render_widget(pv_para, parea);
+
+                        if let Some(wid) = win_id {
+                            if let Some(layout) = crate::preview::get_or_fetch_layout(
+                                &mut layout_cache, &home, sname, wid,
+                            ) {
+                                let rects = crate::preview::flatten_layout_to_rects(&layout, parea);
+                                let seps = crate::preview::layout_separators(&layout, parea);
+                                for (rect, is_vert) in seps {
+                                    let ch = if is_vert { "│" } else { "─" };
+                                    let style = Style::default().fg(Color::DarkGray);
+                                    if is_vert {
+                                        for yy in rect.y..(rect.y + rect.height) {
+                                            let s = Paragraph::new(Span::styled(ch, style));
+                                            f.render_widget(s, Rect { x: rect.x, y: yy, width: 1, height: 1 });
+                                        }
+                                    } else {
+                                        let s = Paragraph::new(Span::styled(ch.repeat(rect.width as usize), style));
+                                        f.render_widget(s, rect);
+                                    }
+                                }
+                                for (lpid, lactive, larea) in rects {
+                                    if larea.width < 2 || larea.height < 2 { continue; }
+                                    let border_style = if lactive {
+                                        sel_style
+                                    } else {
+                                        Style::default().fg(Color::DarkGray)
+                                    };
+                                    let blk = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_style(border_style)
+                                        .title(format!(" %{} ", lpid));
+                                    let inside = blk.inner(larea);
+                                    f.render_widget(blk, larea);
+                                    let body = crate::preview::get_or_fetch(
+                                        &mut preview_cache, &home, sname, wid, lpid,
+                                    );
+                                    let lines = match body {
+                                        Some(t) => crate::preview::clip_lines(&t, inside.width, inside.height),
+                                        None => vec!["(no preview)".to_string()],
+                                    };
+                                    let pv: Vec<Line> = lines.into_iter().map(Line::from).collect();
+                                    f.render_widget(Paragraph::new(Text::from(pv)), inside);
+                                }
+                                rendered = true;
+                            }
+                        }
+                    }
+
+                    if !rendered {
+                        // Fallback to single-pane preview if the layout
+                        // endpoint is unavailable.
+                        let preview_text: Option<String> = session_entries.get(session_selected)
+                            .and_then(|(sname, _info)| {
+                                let lt_key = format!("__lt__\t{}", sname);
+                                let win_id = if let Some((cached, ts)) = preview_cache.get(&lt_key) {
+                                    if ts.elapsed() < crate::preview::PREVIEW_TTL {
+                                        cached.parse::<usize>().ok()
+                                    } else { None }
+                                } else { None };
+                                let wid = win_id?;
+                                crate::preview::get_or_fetch(&mut preview_cache, &home, sname, wid, usize::MAX)
+                            });
+                        let preview_lines = match preview_text {
+                            Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
+                            None => vec!["(no preview available)".to_string()],
+                        };
+                        let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
+                        let pv_para = Paragraph::new(Text::from(pv));
+                        f.render_widget(pv_para, parea);
+                    }
                 }
                 // Scroll position indicator (when content overflows)
                 if session_entries.len() > visible_h {
@@ -3996,28 +4058,106 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         let sep = Paragraph::new(Span::styled("│", Style::default().fg(Color::DarkGray)));
                         f.render_widget(sep, Rect { x: sep_x, y: yy, width: 1, height: 1 });
                     }
-                    // Determine target session/window/pane for the preview
-                    let preview_text: Option<String> = tree_entries.get(tree_selected).and_then(|(is_win, wid, pid, _label, sess)| {
-                        if *is_win && *wid == usize::MAX {
-                            // Session header — preview the active window's active pane.
-                            // We don't know window id here without fetching; fall through
-                            // to show the first window's id from the list.
+                    // Determine target session/window/pane for the preview.
+                    // Issue #257 follow-up: if the highlighted entry is a
+                    // window (or a session header), render the *whole*
+                    // window with its real split layout, mirroring tmux's
+                    // window_tree_draw_window. Pane-level entries still
+                    // render the single pane.
+                    let sel = tree_entries.get(tree_selected).cloned();
+                    let mut rendered = false;
+                    if let Some((is_win, wid, pid, _label, sess)) = sel {
+                        // Resolve target window id: session header => first window
+                        // in that session from tree_entries.
+                        let target_win: Option<usize> = if is_win && wid == usize::MAX {
                             tree_entries.iter()
-                                .find(|(iw, w, _p, _l, s)| *iw && *w != usize::MAX && s == sess)
-                                .and_then(|(_, w, _p, _l, s)| crate::preview::get_or_fetch(&mut preview_cache, &home, s, *w, usize::MAX))
-                        } else if *is_win {
-                            crate::preview::get_or_fetch(&mut preview_cache, &home, sess, *wid, usize::MAX)
+                                .find(|(iw, w, _p, _l, s)| *iw && *w != usize::MAX && s == &sess)
+                                .map(|(_, w, _p, _l, _s)| *w)
+                        } else if is_win {
+                            Some(wid)
                         } else {
-                            crate::preview::get_or_fetch(&mut preview_cache, &home, sess, *wid, *pid)
+                            // pane entry: still render the whole window
+                            Some(wid)
+                        };
+
+                        if let Some(twid) = target_win {
+                            if let Some(layout) = crate::preview::get_or_fetch_layout(
+                                &mut layout_cache, &home, &sess, twid,
+                            ) {
+                                let rects = crate::preview::flatten_layout_to_rects(&layout, parea);
+                                let seps = crate::preview::layout_separators(&layout, parea);
+
+                                // Highlight which pane the user is hovering on
+                                // (for pane-level entries). Active pane gets a
+                                // brighter border anyway.
+                                let highlight_pid = if !is_win { Some(pid) } else { None };
+
+                                for (rect, is_vert) in seps {
+                                    let ch = if is_vert { "│" } else { "─" };
+                                    let style = Style::default().fg(Color::DarkGray);
+                                    if is_vert {
+                                        for yy in rect.y..(rect.y + rect.height) {
+                                            let s = Paragraph::new(Span::styled(ch, style));
+                                            f.render_widget(s, Rect { x: rect.x, y: yy, width: 1, height: 1 });
+                                        }
+                                    } else {
+                                        let s = Paragraph::new(Span::styled(ch.repeat(rect.width as usize), style));
+                                        f.render_widget(s, rect);
+                                    }
+                                }
+
+                                for (lpid, lactive, larea) in rects {
+                                    if larea.width < 2 || larea.height < 2 { continue; }
+                                    // Border around each pane. Active pane =
+                                    // accent style; hovered pane (when entry
+                                    // points at a specific pane) also accented.
+                                    let is_focus = lactive || highlight_pid == Some(lpid);
+                                    let border_style = if is_focus {
+                                        sel_style
+                                    } else {
+                                        Style::default().fg(Color::DarkGray)
+                                    };
+                                    let blk = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_style(border_style)
+                                        .title(format!(" %{} ", lpid));
+                                    let inside = blk.inner(larea);
+                                    f.render_widget(blk, larea);
+                                    let body = crate::preview::get_or_fetch(
+                                        &mut preview_cache, &home, &sess, twid, lpid,
+                                    );
+                                    let lines = match body {
+                                        Some(t) => crate::preview::clip_lines(&t, inside.width, inside.height),
+                                        None => vec!["(no preview)".to_string()],
+                                    };
+                                    let pv: Vec<Line> = lines.into_iter().map(Line::from).collect();
+                                    f.render_widget(Paragraph::new(Text::from(pv)), inside);
+                                }
+                                rendered = true;
+                            }
                         }
-                    });
-                    let preview_lines = match preview_text {
-                        Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
-                        None => vec!["(no preview available)".to_string()],
-                    };
-                    let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
-                    let pv_para = Paragraph::new(Text::from(pv));
-                    f.render_widget(pv_para, parea);
+
+                        if !rendered {
+                            // Fallback: single-pane preview (session not
+                            // reachable, or no layout returned).
+                            let preview_text: Option<String> = if is_win && wid == usize::MAX {
+                                tree_entries.iter()
+                                    .find(|(iw, w, _p, _l, s)| *iw && *w != usize::MAX && s == &sess)
+                                    .and_then(|(_, w, _p, _l, s)| crate::preview::get_or_fetch(&mut preview_cache, &home, s, *w, usize::MAX))
+                            } else if is_win {
+                                crate::preview::get_or_fetch(&mut preview_cache, &home, &sess, wid, usize::MAX)
+                            } else {
+                                crate::preview::get_or_fetch(&mut preview_cache, &home, &sess, wid, pid)
+                            };
+                            let preview_lines = match preview_text {
+                                Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
+                                None => vec!["(no preview available)".to_string()],
+                            };
+                            let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
+                            let pv_para = Paragraph::new(Text::from(pv));
+                            f.render_widget(pv_para, parea);
+                        }
+                    }
                 }
                 // Scroll position indicator (when content overflows)
                 if tree_entries.len() > visible_h {

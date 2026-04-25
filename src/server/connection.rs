@@ -807,6 +807,23 @@ match cmd {
         if !persistent { break; }
     }
     "list-tree" => { let (rtx, rrx) = mpsc::channel::<String>(); let _ = tx.send(CtrlReq::ListTree(rtx)); if let Ok(text) = rrx.recv() { if persistent { let _ = tx.send(CtrlReq::ShowTextPopup("list-tree".to_string(), text)); } else { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); } } if !persistent { break; } }
+    "window-layout" => {
+        // Issue #257: return simplified layout JSON for a given window id.
+        // Usage: window-layout <window_id>
+        let wid: Option<usize> = args.get(0).and_then(|a| a.trim_start_matches('@').parse::<usize>().ok());
+        if let Some(wid) = wid {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::WindowLayout(wid, rtx));
+            if let Ok(text) = rrx.recv() {
+                let _ = write!(write_stream, "{}\n", text);
+                let _ = write_stream.flush();
+            }
+        } else {
+            let _ = write!(write_stream, "{{}}\n");
+            let _ = write_stream.flush();
+        }
+        if !persistent { break; }
+    }
     "toggle-sync" => { let _ = tx.send(CtrlReq::ToggleSync); }
     "set-pane-title" => { let title = args.join(" "); let _ = tx.send(CtrlReq::SetPaneTitle(title)); }
     "send-keys" => {

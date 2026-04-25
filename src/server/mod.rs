@@ -1498,6 +1498,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ListWindowsTmux(resp) => { helpers::propagate_osc_titles(&mut app); let text = list_windows_tmux(&app); let _ = resp.send(text); }
                 CtrlReq::ListWindowsFormat(resp, fmt) => { helpers::propagate_osc_titles(&mut app); let text = format_list_windows(&app, &fmt); let _ = resp.send(text); }
                 CtrlReq::ListTree(resp) => { let json = list_tree_json(&app)?; let _ = resp.send(json); }
+                CtrlReq::WindowLayout(wid, resp) => {
+                    let json = crate::util::window_layout_json(&app, wid)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let _ = resp.send(json);
+                }
                 CtrlReq::ToggleSync => { app.sync_input = !app.sync_input; }
                 CtrlReq::SetPaneTitle(title) => {
                     let win = &mut app.windows[app.active_idx];

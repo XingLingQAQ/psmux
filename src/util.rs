@@ -92,6 +92,19 @@ pub struct PaneInfo { pub id: usize, pub title: String }
 #[derive(Serialize, Deserialize)]
 pub struct WinTree { pub id: usize, pub name: String, pub active: bool, pub panes: Vec<PaneInfo> }
 
+/// Lightweight layout description for cross-session preview rendering
+/// (issue #257). Mirrors the structural part of `LayoutJson` without any
+/// pane content. Uses the same `type` discriminant so it deserializes
+/// alongside the heavier dump-state layout.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+pub enum LayoutSimple {
+    #[serde(rename = "split")]
+    Split { kind: String, sizes: Vec<u16>, children: Vec<LayoutSimple> },
+    #[serde(rename = "leaf")]
+    Leaf { id: usize, #[serde(default)] active: bool },
+}
+
 pub fn list_windows_json(app: &AppState) -> io::Result<String> {
     let mut v: Vec<WinInfo> = Vec::new();
     for (i, w) in app.windows.iter().enumerate() { v.push(WinInfo { id: w.id, name: w.name.clone(), active: i == app.active_idx, activity: w.activity_flag, tab_text: String::new() }); }
@@ -136,6 +149,42 @@ pub fn list_tree_json(app: &AppState) -> io::Result<String> {
     }
     let s = serde_json::to_string(&v).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))?;
     Ok(s)
+}
+
+/// Build a simplified layout tree for a specific window (issue #257
+/// preview rendering). Returns `None` if the window id is not found.
+pub fn window_layout_simple(app: &AppState, win_id: usize) -> Option<LayoutSimple> {
+    fn build(node: &Node, active_path: &[usize], cur_path: &mut Vec<usize>) -> LayoutSimple {
+        match node {
+            Node::Split { kind, sizes, children } => {
+                let k = match *kind {
+                    crate::types::LayoutKind::Horizontal => "Horizontal".to_string(),
+                    crate::types::LayoutKind::Vertical => "Vertical".to_string(),
+                };
+                let mut ch = Vec::with_capacity(children.len());
+                for (i, c) in children.iter().enumerate() {
+                    cur_path.push(i);
+                    ch.push(build(c, active_path, cur_path));
+                    cur_path.pop();
+                }
+                LayoutSimple::Split { kind: k, sizes: sizes.clone(), children: ch }
+            }
+            Node::Leaf(p) => LayoutSimple::Leaf {
+                id: p.id,
+                active: cur_path.as_slice() == active_path,
+            },
+        }
+    }
+    let w = app.windows.iter().find(|w| w.id == win_id)?;
+    let mut path = Vec::new();
+    Some(build(&w.root, &w.active_path, &mut path))
+}
+
+pub fn window_layout_json(app: &AppState, win_id: usize) -> io::Result<String> {
+    let layout = window_layout_simple(app, win_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "window not found"))?;
+    serde_json::to_string(&layout)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))
 }
 
 pub const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

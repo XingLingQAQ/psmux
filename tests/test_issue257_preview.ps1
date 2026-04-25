@@ -155,7 +155,69 @@ try { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue } catch {}
 
 Cleanup
 
-Write-Host "`n=== Results ===" -ForegroundColor Cyan
-Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green
-Write-Host "  Failed: $($script:TestsFailed)" -ForegroundColor $(if ($script:TestsFailed -gt 0) { "Red" } else { "Green" })
-exit $script:TestsFailed
+# === TEST 5 (follow-up): window-layout endpoint reflects real splits ===
+Write-Host "`n[Test 5] window-layout returns full split layout JSON" -ForegroundColor Yellow
+
+$SESSION_LAY = "issue257_layout"
+& $PSMUX kill-session -t $SESSION_LAY 2>&1 | Out-Null
+Start-Sleep -Milliseconds 500
+Remove-Item "$psmuxDir\$SESSION_LAY.*" -Force -EA SilentlyContinue
+
+& $PSMUX new-session -d -s $SESSION_LAY
+Start-Sleep -Seconds 2
+& $PSMUX split-window -h -t $SESSION_LAY 2>&1 | Out-Null
+Start-Sleep -Milliseconds 600
+& $PSMUX split-window -v -t $SESSION_LAY 2>&1 | Out-Null
+Start-Sleep -Milliseconds 600
+
+$wid = (& $PSMUX display-message -t $SESSION_LAY -p '#{window_id}' 2>&1).Trim().TrimStart('@')
+$panes = & $PSMUX list-panes -t $SESSION_LAY -F '#{pane_id}' 2>&1
+$paneCount = ($panes | Where-Object { $_ -match '%\d+' }).Count
+Write-Host "  Window @$wid has $paneCount panes" -ForegroundColor DarkGray
+
+if ($paneCount -ne 3) {
+    Write-Fail "Expected 3 panes, got $paneCount"
+} else {
+    $portPath = "$psmuxDir\$SESSION_LAY.port"
+    $keyPath  = "$psmuxDir\$SESSION_LAY.key"
+    if (-not (Test-Path $portPath) -or -not (Test-Path $keyPath)) {
+        Write-Fail "Port or key file missing for $SESSION_LAY"
+    } else {
+        $port = [int](Get-Content $portPath -Raw).Trim()
+        $key  = (Get-Content $keyPath -Raw).Trim()
+        try {
+            $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1', $port)
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 1500
+            $writer = [System.IO.StreamWriter]::new($stream)
+            $writer.NewLine = "`n"
+            $writer.AutoFlush = $true
+            $reader = [System.IO.StreamReader]::new($stream)
+            $writer.WriteLine("AUTH $key")
+            # Consume auth ack ("OK")
+            $null = $reader.ReadLine()
+            $writer.WriteLine("window-layout $wid")
+            Start-Sleep -Milliseconds 400
+            $resp = ""
+            while ($stream.DataAvailable) {
+                $resp += [char]$stream.ReadByte()
+            }
+            $client.Close()
+            Write-Host "  Layout JSON: $resp" -ForegroundColor DarkGray
+            $leafCount = ([regex]::Matches($resp, '"type":"leaf"')).Count
+            $hasSplit  = $resp -match '"type":"split"'
+            $hasH = $resp -match '"kind":"Horizontal"'
+            $hasV = $resp -match '"kind":"Vertical"'
+            if ($hasSplit -and $leafCount -ge 3 -and $hasH -and $hasV) {
+                Write-Pass "window-layout returned 3 leaves with both Horizontal+Vertical splits"
+            } else {
+                Write-Fail "Layout JSON missing structure (split=$hasSplit, leaves=$leafCount, H=$hasH, V=$hasV)"
+            }
+        } catch {
+            Write-Fail "TCP request to window-layout failed: $_"
+        }
+    }
+}
+
+& $PSMUX kill-session -t $SESSION_LAY 2>&1 | Out-Null
+Remove-Item "$psmuxDir\$SESSION_LAY.*" -Force -EA SilentlyContinue

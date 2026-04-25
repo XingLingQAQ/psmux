@@ -933,6 +933,9 @@ pub enum CtrlReq {
     ListWindowsTmux(mpsc::Sender<String>),
     ListWindowsFormat(mpsc::Sender<String>, String),
     ListTree(mpsc::Sender<String>),
+    /// Issue #257: simplified layout (split kind/sizes + pane ids)
+    /// for a specific window, used for choose-tree preview rendering.
+    WindowLayout(usize, mpsc::Sender<String>),
     ToggleSync,
     SetPaneTitle(String),
     SetPaneStyle(String),

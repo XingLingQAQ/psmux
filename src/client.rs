@@ -99,111 +99,57 @@ fn row_chars(runs: &[crate::layout::CellRunJson], width: usize) -> Vec<char> {
     out
 }
 
-/// Reflow a `rows_v2` buffer onto a narrower preview area without dropping
-/// characters. Each source row is expanded to its visible cells (trailing
-/// spaces trimmed), then word-wrapped onto one or more `dst_w`-wide rows so
-/// that every character is preserved. The bottom `dst_h` wrapped rows are
-/// returned so the cursor / latest output remains visible (this is what
-/// users care about in a preview). Earlier nearest-neighbour sampling
-/// dropped roughly every other character at 2:1 ratios and produced
-/// unreadable output like "PC:Ueu" for "PS C:\Users".
+/// Clip a `rows_v2` buffer to fit a smaller preview area without
+/// rescaling. Scaling cell-grid content (terminal output) is fundamentally
+/// lossy: nearest-neighbour sampling drops characters and reflow word-wrap
+/// destroys 2D TUI grids (htop, vim, pstop) by shifting subsequent rows.
+/// The honest behaviour, matching tmux's own `choose-tree` preview, is to
+/// show the buffer at 1:1 and clip what does not fit.
+///
+/// Strategy:
+///   * Trailing fully-blank rows are dropped so the prompt / cursor of a
+///     shell sits at the bottom edge of the preview instead of being
+///     scrolled off by empty space.
+///   * The bottom `dst_h` remaining rows are returned. For a shell this
+///     is the most recent output. For a full-screen TUI (no blank rows)
+///     this is the bottom edge of the TUI (status / F-key bar) which
+///     preserves the grid intact.
+///   * Columns are NOT modified here. The caller's render loop already
+///     clips runs that exceed `inner.width`, so column geometry stays
+///     pixel-accurate.
 pub(crate) fn downscale_rows_v2(
     src: &[crate::layout::RowRunsJson],
     _src_h: u16,
-    src_w: u16,
+    _src_w: u16,
     dst_h: u16,
-    dst_w: u16,
+    _dst_w: u16,
 ) -> Vec<crate::layout::RowRunsJson> {
-    use crate::layout::{CellRunJson, RowRunsJson};
-    if src_w == 0 || dst_h == 0 || dst_w == 0 || src.is_empty() {
+    use crate::layout::RowRunsJson;
+    if dst_h == 0 || src.is_empty() {
         return Vec::new();
     }
-    // Expand every source row into its sequence of visible cells, trimming
-    // trailing blank cells (cells whose text is empty/space and which carry
-    // no background colour). Empty rows are kept as a blank line so vertical
-    // structure (cursor on a fresh prompt line) is preserved.
-    // Each cell is one grapheme of visual width 1 or 2 (CJK).
-    type Cell = (String, String, String, u8, u16);
-    let mut row_cells: Vec<Vec<Cell>> = Vec::with_capacity(src.len());
-    for row in src {
-        let mut cells: Vec<Cell> = Vec::new();
-        let mut col: u16 = 0;
-        for run in &row.runs {
-            if col >= src_w { break; }
-            let run_w = run.width.max(1);
-            let chars_vec: Vec<char> = run.text.chars().collect();
-            if chars_vec.is_empty() {
-                // Blank run carrying width (e.g. trailing pad): emit width-1
-                // space cells so wrap can split anywhere within it.
-                for _ in 0..run_w {
-                    if col >= src_w { break; }
-                    cells.push((" ".to_string(), run.fg.clone(), run.bg.clone(), run.flags, 1));
-                    col = col.saturating_add(1);
-                }
-            } else if chars_vec.len() == 1 && run_w >= 2 {
-                // Single wide char (e.g. CJK).
-                let g = chars_vec[0].to_string();
-                cells.push((g, run.fg.clone(), run.bg.clone(), run.flags, run_w));
-                col = col.saturating_add(run_w);
-            } else {
-                for ch in chars_vec {
-                    if col >= src_w { break; }
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
-                    cells.push((ch.to_string(), run.fg.clone(), run.bg.clone(), run.flags, cw));
-                    col = col.saturating_add(cw);
-                }
-            }
-        }
-        // Trim trailing blank-and-no-bg cells.
-        while let Some(last) = cells.last() {
-            let blank_text = last.0.chars().all(|c| c == ' ');
-            let no_bg = last.2.is_empty() || last.2 == "default";
-            if blank_text && no_bg { cells.pop(); } else { break; }
-        }
-        row_cells.push(cells);
+    // Find the last row that has any non-blank cell (with bg colour or
+    // non-space text). Everything after that is empty filler from the
+    // viewport.
+    let is_blank = |row: &RowRunsJson| -> bool {
+        row.runs.iter().all(|run| {
+            let blank_text = run.text.is_empty() || run.text.chars().all(|c| c == ' ');
+            let no_bg = run.bg.is_empty() || run.bg == "default";
+            blank_text && no_bg
+        })
+    };
+    let mut last_used = src.len();
+    while last_used > 0 && is_blank(&src[last_used - 1]) {
+        last_used -= 1;
     }
-    // Trim trailing empty rows so the cursor / last prompt sits at the
-    // bottom of the wrapped output instead of being scrolled off by blank
-    // lines that follow it in the source buffer.
-    while row_cells.last().map_or(false, |r| r.is_empty()) {
-        row_cells.pop();
+    // Keep at least one blank row so the cursor on a fresh prompt line is
+    // visible (otherwise we would trim away the line the cursor is on).
+    if last_used < src.len() {
+        last_used += 1;
     }
-    // Wrap each source row onto one or more dst_w-wide output rows.
-    let mut wrapped: Vec<RowRunsJson> = Vec::new();
-    for cells in &row_cells {
-        if cells.is_empty() {
-            wrapped.push(RowRunsJson { runs: Vec::new() });
-            continue;
-        }
-        let mut current: Vec<CellRunJson> = Vec::new();
-        let mut col: u16 = 0;
-        for (text, fg, bg, flags, w) in cells {
-            let cw = (*w).max(1);
-            if cw > dst_w {
-                // Cell wider than preview row entirely - skip rather than crash.
-                continue;
-            }
-            if col + cw > dst_w {
-                wrapped.push(RowRunsJson { runs: std::mem::take(&mut current) });
-                col = 0;
-            }
-            current.push(CellRunJson {
-                text: text.clone(),
-                width: cw,
-                fg: fg.clone(),
-                bg: bg.clone(),
-                flags: *flags,
-            });
-            col += cw;
-        }
-        if !current.is_empty() || cells.is_empty() {
-            wrapped.push(RowRunsJson { runs: current });
-        }
-    }
-    // Show the bottom dst_h rows so the most recent output / cursor is
-    // visible (matches how a real terminal scrolls).
-    let start = wrapped.len().saturating_sub(dst_h as usize);
-    wrapped.split_off(start)
+    let trimmed = &src[..last_used];
+    let start = trimmed.len().saturating_sub(dst_h as usize);
+    trimmed[start..].to_vec()
 }
 
 /// Normalise a selection (start, end) into reading-order or block-mode bounds.

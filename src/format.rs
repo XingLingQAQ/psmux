@@ -8,7 +8,7 @@
 // -F custom format for list commands.
 
 use std::env;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use crate::types::{AppState, Node, LayoutKind, Pane, Mode, VERSION};
 use crate::tree::{split_with_gaps, get_active_pane_id, active_pane, count_panes};
@@ -20,11 +20,17 @@ use crate::config::format_key_binding;
 thread_local! {
     static PANE_POS_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static BUFFER_IDX_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    static NAMED_BUFFER_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Set the buffer index for per-buffer format expansion in list-buffers -F.
 pub fn set_buffer_idx_override(idx: Option<usize>) {
     BUFFER_IDX_OVERRIDE.set(idx);
+}
+
+/// Set the named buffer override for per-buffer format expansion in list-buffers -F.
+pub fn set_named_buffer_override(name: Option<String>) {
+    NAMED_BUFFER_OVERRIDE.with(|c| *c.borrow_mut() = name);
 }
 
 // ─────────────────── tmux window_layout generation ────────────────────
@@ -1487,14 +1493,27 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
 
         // ── Buffer ──
         "buffer_size" => {
+            // Check named buffer override first
+            let named = NAMED_BUFFER_OVERRIDE.with(|c| c.borrow().clone());
+            if let Some(ref name) = named {
+                return app.named_buffers.get(name).map(|b| b.len().to_string()).unwrap_or("0".into());
+            }
             let idx = BUFFER_IDX_OVERRIDE.get().unwrap_or(0);
             app.paste_buffers.get(idx).map(|b| b.len().to_string()).unwrap_or("0".into())
         }
         "buffer_sample" => {
+            let named = NAMED_BUFFER_OVERRIDE.with(|c| c.borrow().clone());
+            if let Some(ref name) = named {
+                return app.named_buffers.get(name).map(|b| b.chars().take(50).collect::<String>()).unwrap_or_default();
+            }
             let idx = BUFFER_IDX_OVERRIDE.get().unwrap_or(0);
             app.paste_buffers.get(idx).map(|b| b.chars().take(50).collect::<String>()).unwrap_or_default()
         }
         "buffer_name" => {
+            let named = NAMED_BUFFER_OVERRIDE.with(|c| c.borrow().clone());
+            if let Some(name) = named {
+                return name;
+            }
             let idx = BUFFER_IDX_OVERRIDE.get().unwrap_or(0);
             if idx < app.paste_buffers.len() { format!("buffer{:04}", idx) } else { String::new() }
         }

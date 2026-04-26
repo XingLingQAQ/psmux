@@ -390,6 +390,11 @@ pub struct AppState {
     /// Default: off (matches tmux which has no preview-on-by-default option).
     pub choose_tree_preview: bool,
     pub paste_buffers: Vec<String>,
+    /// Named paste buffers (HashMap<name, content>). Named buffers are separate
+    /// from the positional stack and are accessed via `set-buffer -b name`.
+    pub named_buffers: std::collections::HashMap<String, String>,
+    /// Auto-increment counter for unnamed buffer names (buffer0, buffer1, etc.)
+    pub paste_next_index: u32,
     pub status_left: String,
     pub status_right: String,
     pub window_base_index: usize,
@@ -679,6 +684,8 @@ impl AppState {
             paste_detection: true,
             choose_tree_preview: false,
             paste_buffers: Vec::new(),
+            named_buffers: std::collections::HashMap::new(),
+            paste_next_index: 0,
             status_left: "[#S] ".to_string(),
             status_right: "#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}\"#{=21:pane_title}\" %H:%M %d-%b-%y".to_string(),
             window_base_index: 0,
@@ -885,10 +892,14 @@ pub enum CtrlReq {
     CapturePane(mpsc::Sender<String>),
     CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>),
     FocusWindow(usize),
+    /// Focus window by @N id lookup
+    FocusWindowById(usize),
     /// Focus window by name lookup
     FocusWindowByName(String),
     /// Temporary focus for -t targeting: server saves/restores active_idx
     FocusWindowTemp(usize),
+    /// Temporary focus by @N id for -t targeting
+    FocusWindowByIdTemp(usize),
     /// Temporary focus by name for -t targeting
     FocusWindowByNameTemp(String),
     FocusPane(usize),
@@ -975,12 +986,18 @@ pub enum CtrlReq {
     SwapPane(String),
     ResizePane(String, u16),
     SetBuffer(String),
+    /// Set a named buffer: (name, content)
+    SetNamedBuffer(String, String),
     ListBuffers(mpsc::Sender<String>),
     ListBuffersFormat(mpsc::Sender<String>, String),
     ShowBuffer(mpsc::Sender<String>),
     ShowBufferAt(mpsc::Sender<String>, usize),
+    /// Show a named buffer by name
+    ShowNamedBuffer(mpsc::Sender<String>, String),
     DeleteBuffer,
     DeleteBufferAt(usize),
+    /// Delete a named buffer by name
+    DeleteNamedBuffer(String),
     PasteBufferAt(usize),
     DisplayMessage(mpsc::Sender<String>, String, Option<usize>, bool, Option<u64>),  // resp, format, target_pane_idx, set_status_bar, duration_override_ms
     LastWindow,

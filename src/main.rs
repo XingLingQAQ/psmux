@@ -435,6 +435,9 @@ fn run_main() -> io::Result<()> {
                                     i += 1;
                                 }
                             }
+                            s if s.starts_with("-F") && s.len() > 2 => {
+                                format_str = Some(s[2..].to_string());
+                            }
                             "-f" => {
                                 if let Some(f) = cmd_args.get(i + 1) {
                                     filter_str = Some(f.to_string());
@@ -680,18 +683,33 @@ fn run_main() -> io::Result<()> {
                         while k < chars.len() {
                             let c = chars[k];
                             // Value-consuming flags: when in a combined group,
-                            // the value is the next cmd_args element (getopt style).
+                            // remaining chars after the flag letter are the value (getopt style).
+                            // If no remaining chars, the value is the next cmd_args element.
+                            macro_rules! consume_value {
+                                () => {{
+                                    if k + 1 < chars.len() {
+                                        // Rest of this arg is the value (e.g., -F#{fmt})
+                                        let val: String = chars[k+1..].iter().collect();
+                                        (val, true)
+                                    } else {
+                                        // Value is the next arg
+                                        i += 1;
+                                        let val = if i < cmd_args.len() { cmd_args[i].to_string() } else { String::new() };
+                                        (val, true)
+                                    }
+                                }};
+                            }
                             match c {
-                            's' => { i += 1; if i < cmd_args.len() { session_name = Some(cmd_args[i].to_string()); } break; }
-                            'n' => { i += 1; if i < cmd_args.len() { window_name = Some(cmd_args[i].to_string()); } break; }
-                            'F' => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } break; }
-                            'c' => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } break; }
-                            'x' => { i += 1; if i < cmd_args.len() { init_width = cmd_args[i].parse::<u16>().ok(); } break; }
-                            'y' => { i += 1; if i < cmd_args.len() { init_height = cmd_args[i].parse::<u16>().ok(); } break; }
+                            's' => { let (v, _) = consume_value!(); session_name = Some(v); break; }
+                            'n' => { let (v, _) = consume_value!(); window_name = Some(v); break; }
+                            'F' => { let (v, _) = consume_value!(); format_str = Some(v.trim_matches('"').to_string()); break; }
+                            'c' => { let (v, _) = consume_value!(); start_dir = Some(v.trim_matches('"').to_string()); break; }
+                            'x' => { let (v, _) = consume_value!(); init_width = v.parse::<u16>().ok(); break; }
+                            'y' => { let (v, _) = consume_value!(); init_height = v.parse::<u16>().ok(); break; }
                             'e' => {
-                                i += 1;
+                                let (v, _) = consume_value!();
                                 match crate::util::parse_new_session_e_value_token(
-                                    cmd_args.get(i).map(|s| s.as_str()),
+                                    Some(v.as_str()),
                                 ) {
                                     Ok(pair) => env_vars.push(pair),
                                     Err(msg) => {
@@ -700,8 +718,8 @@ fn run_main() -> io::Result<()> {
                                 }
                                 break;
                             }
-                            'f' => { i += 1; break; /* skip value */ }
-                            't' => { i += 1; if i < cmd_args.len() { group_target = Some(cmd_args[i].to_string()); } break; }
+                            'f' => { let _ = consume_value!(); break; /* skip value */ }
+                            't' => { let (v, _) = consume_value!(); group_target = Some(v); break; }
                             // Boolean flags
                             'd' => { detached = true; }
                             'P' => { print_info = true; }
@@ -1007,6 +1025,7 @@ fn run_main() -> io::Result<()> {
                         match a {
                             "-n" => { i += 1; if i < cmd_args.len() { name_arg = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
+                            s if s.starts_with("-F") && s.len() > 2 => { format_str = Some(s[2..].trim_matches('"').to_string()); }
                             "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-t" | "-e" | "-S" => { i += 1; /* skip value */ }
                             "-d" => { detached = true; }
@@ -1062,6 +1081,7 @@ fn run_main() -> io::Result<()> {
                         if a == "--" { sw_positional.extend(cmd_args[i+1..].iter().map(|s| s.to_string())); break; }
                         match a {
                             "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
+                            s if s.starts_with("-F") && s.len() > 2 => { format_str = Some(s[2..].trim_matches('"').to_string()); }
                             "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-p" => { i += 1; if i < cmd_args.len() { size_pct = Some(cmd_args[i].to_string()); size_cells = None; } }
                             "-l" => { i += 1; if i < cmd_args.len() { let v = cmd_args[i].to_string(); if v.ends_with('%') { size_pct = Some(v); size_cells = None; } else { size_cells = Some(v); size_pct = None; } } }
@@ -1295,6 +1315,9 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
+                        s if s.starts_with("-F") && s.len() > 2 => {
+                            cmd.push_str(&format!(" -F \"{}\"", s[2..].trim_matches('"').replace("\"", "\\\"")));
+                        }
                         _ => {}
                     }
                     i += 1;
@@ -1317,6 +1340,9 @@ fn run_main() -> io::Result<()> {
                                 cmd.push_str(&format!(" -F \"{}\"", f.trim_matches('"').replace("\"", "\\\"")));
                                 i += 1;
                             }
+                        }
+                        s if s.starts_with("-F") && s.len() > 2 => {
+                            cmd.push_str(&format!(" -F \"{}\"", s[2..].trim_matches('"').replace("\"", "\\\"")));
                         }
                         "-t" => {
                             if let Some(t) = cmd_args.get(i + 1) {
@@ -1407,10 +1433,14 @@ fn run_main() -> io::Result<()> {
                     let mut i = 1;
                     while i < cmd_args.len() {
                         if cmd_args[i].as_str() == "-t" {
-                            if let Some(v) = cmd_args.get(i + 1) { t = v.to_string(); }
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                // Strip leading '=' prefix (tmux exact-match semantics)
+                                t = v.strip_prefix('=').unwrap_or(v).to_string();
+                            }
                             i += 1;
                         } else if !cmd_args[i].starts_with('-') {
-                            t = cmd_args[i].to_string();
+                            let raw = &cmd_args[i];
+                            t = raw.strip_prefix('=').unwrap_or(raw).to_string();
                             break;
                         }
                         i += 1;
@@ -1611,6 +1641,9 @@ fn run_main() -> io::Result<()> {
                                 format_str = Some(f.to_string());
                                 i += 1;
                             }
+                        }
+                        s if s.starts_with("-F") && s.len() > 2 => {
+                            format_str = Some(s[2..].to_string());
                         }
                         "-t" => { i += 1; } // skip target
                         _ => {}

@@ -41,7 +41,7 @@ use crate::config::{load_config, parse_key_string, format_key_binding, normalize
 use crate::commands::{parse_command_to_action, format_action, parse_menu_definition, execute_command_string};
 use crate::util::{list_windows_json, list_tree_json, list_windows_tmux, base64_encode};
 use crate::control;
-use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override};
+use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override, set_named_buffer_override};
 use crate::help;
 
 /// Build a JSON fragment with overlay state (popup, menu, confirm, display_panes).
@@ -758,7 +758,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         | CtrlReq::WindowLayout(..)
                     );
                     let is_temp_focus = matches!(&req,
-                        CtrlReq::FocusWindowTemp(_) | CtrlReq::FocusWindowByNameTemp(_) | CtrlReq::FocusPaneTemp(_) | CtrlReq::FocusPaneByIndexTemp(_));
+                        CtrlReq::FocusWindowTemp(_) | CtrlReq::FocusWindowByIdTemp(_) | CtrlReq::FocusWindowByNameTemp(_) | CtrlReq::FocusPaneTemp(_) | CtrlReq::FocusPaneByIndexTemp(_));
                     let mut hook_event: Option<&str> = None;
                     // Track active_idx changes for debugging window-switch issues
                     let _prev_active_idx = app.active_idx;
@@ -767,8 +767,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::PrevWindow => "PrevWindow",
                         CtrlReq::SelectWindow(_) => "SelectWindow",
                         CtrlReq::FocusWindow(_) => "FocusWindow",
+                        CtrlReq::FocusWindowById(_) => "FocusWindowById",
                         CtrlReq::FocusWindowByName(_) => "FocusWindowByName",
                         CtrlReq::FocusWindowTemp(_) => "FocusWindowTemp",
+                        CtrlReq::FocusWindowByIdTemp(_) => "FocusWindowByIdTemp",
                         CtrlReq::FocusWindowByNameTemp(_) => "FocusWindowByNameTemp",
                         CtrlReq::FocusWindowCmd(_) => "FocusWindowCmd",
                         CtrlReq::LastWindow => "LastWindow",
@@ -1033,6 +1035,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     meta_dirty = true;
                 }
+                CtrlReq::FocusWindowById(id) => {
+                    if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
+                        if internal_idx != app.active_idx {
+                            switch_with_copy_save(&mut app, |app| {
+                                app.last_window_idx = app.active_idx;
+                                app.active_idx = internal_idx;
+                            });
+                            if let Some(win) = app.windows.get_mut(internal_idx) {
+                                win.activity_flag = false;
+                                win.bell_flag = false;
+                                win.silence_flag = false;
+                            }
+                            resize_all_panes(&mut app);
+                        }
+                    }
+                    meta_dirty = true;
+                }
                 CtrlReq::FocusPane(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
                     switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, pid); });
@@ -1079,6 +1098,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         temp_focus_restore = Some((app.active_idx, pane_id));
                     }
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
+                        app.active_idx = internal_idx;
+                    }
+                }
+                CtrlReq::FocusWindowByIdTemp(id) => {
+                    if temp_focus_restore.is_none() {
+                        let pane_id = crate::tree::get_active_pane_id(
+                            &app.windows[app.active_idx].root,
+                            &app.windows[app.active_idx].active_path,
+                        ).unwrap_or(usize::MAX);
+                        temp_focus_restore = Some((app.active_idx, pane_id));
+                    }
+                    if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
                         app.active_idx = internal_idx;
                     }
                 }
@@ -2302,11 +2333,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     app.paste_buffers.insert(0, content);
                     if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
                 }
+                CtrlReq::SetNamedBuffer(name, content) => {
+                    app.named_buffers.insert(name, content);
+                }
                 CtrlReq::ListBuffers(resp) => {
                     let mut output = String::new();
+                    // List auto-named buffers (positional stack)
                     for (i, buf) in app.paste_buffers.iter().enumerate() {
                         let preview: String = buf.chars().take(50).collect();
                         output.push_str(&format!("buffer{}: {} bytes: \"{}\"\n", i, buf.len(), preview));
+                    }
+                    // List named buffers
+                    let mut names: Vec<&String> = app.named_buffers.keys().collect();
+                    names.sort();
+                    for name in names {
+                        let buf = &app.named_buffers[name];
+                        let preview: String = buf.chars().take(50).collect();
+                        output.push_str(&format!("{}: {} bytes: \"{}\"\n", name, buf.len(), preview));
                     }
                     let _ = resp.send(output);
                 }
@@ -2316,6 +2359,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         set_buffer_idx_override(Some(i));
                         output.push(expand_format(&fmt, &app));
                         set_buffer_idx_override(None);
+                    }
+                    // Named buffers with format: use name override
+                    let mut names: Vec<String> = app.named_buffers.keys().cloned().collect();
+                    names.sort();
+                    for name in &names {
+                        set_named_buffer_override(Some(name.clone()));
+                        output.push(expand_format(&fmt, &app));
+                        set_named_buffer_override(None);
                     }
                     let _ = resp.send(output.join("\n"));
                 }
@@ -2327,11 +2378,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let content = app.paste_buffers.get(idx).cloned().unwrap_or_default();
                     let _ = resp.send(content);
                 }
+                CtrlReq::ShowNamedBuffer(resp, name) => {
+                    let content = app.named_buffers.get(&name).cloned().unwrap_or_default();
+                    let _ = resp.send(content);
+                }
                 CtrlReq::DeleteBuffer => {
                     if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
                 }
                 CtrlReq::DeleteBufferAt(idx) => {
                     if idx < app.paste_buffers.len() { app.paste_buffers.remove(idx); }
+                }
+                CtrlReq::DeleteNamedBuffer(name) => {
+                    app.named_buffers.remove(&name);
                 }
                 CtrlReq::PasteBufferAt(idx) => {
                     if idx < app.paste_buffers.len() {

@@ -510,6 +510,9 @@ pub fn print_commands() {
 pub fn parse_target(target: &str) -> ParsedTarget {
     let mut result = ParsedTarget::default();
     
+    // Strip leading '=' prefix (tmux exact-match semantics)
+    let target = target.strip_prefix('=').unwrap_or(target);
+    
     if target.starts_with('%') {
         if let Ok(pid) = target[1..].parse::<usize>() {
             result.pane = Some(pid);
@@ -524,9 +527,26 @@ pub fn parse_target(target: &str) -> ParsedTarget {
         }
         return result;
     }
+    // $N is a tmux session ID (e.g., "$0"). In psmux each server process
+    // hosts exactly one session (always id 0), so session IDs are not
+    // meaningful for routing. Treat "$N" as "current session" by leaving
+    // session = None (the caller will fall through to the default session).
+    if target.starts_with('$') && target[1..].parse::<usize>().is_ok() {
+        return result;
+    }
     
     let (session_part, window_pane_part) = if let Some(colon_pos) = target.find(':') {
-        let session = if colon_pos == 0 { None } else { Some(target[..colon_pos].to_string()) };
+        let session = if colon_pos == 0 {
+            None
+        } else {
+            let s = &target[..colon_pos];
+            // $N session IDs (e.g. "$0:1") — ignore the session part
+            if s.starts_with('$') && s[1..].parse::<usize>().is_ok() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        };
         (session, Some(&target[colon_pos + 1..]))
     } else if target.starts_with('.') {
         (None, Some(target))
@@ -589,6 +609,19 @@ pub fn parse_target(target: &str) -> ParsedTarget {
 pub fn extract_session_from_target(target: &str) -> String {
     let parsed = parse_target(target);
     parsed.session.unwrap_or_else(|| "default".to_string())
+}
+
+/// Extract a flag value from args, supporting both two-token (`-F value`)
+/// and concatenated (`-Fvalue`) forms, matching tmux CLI behavior.
+pub fn extract_flag_value<'a>(args: &[&'a str], flag: &str) -> Option<String> {
+    // Two-token form: -F value
+    if let Some(w) = args.windows(2).find(|w| w[0] == flag) {
+        return Some(w[1].to_string());
+    }
+    // Concatenated form: -Fvalue
+    args.iter()
+        .find(|a| a.starts_with(flag) && a.len() > flag.len())
+        .map(|a| a[flag.len()..].to_string())
 }
 
 #[cfg(test)]

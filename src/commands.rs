@@ -1452,13 +1452,44 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             paste_latest(app)?;
         }
         "set-buffer" | "setb" => {
-            if let Some(text) = parts.get(1) {
-                app.paste_buffers.insert(0, text.to_string());
-                if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+            // Parse -b name and extract content, skipping flags
+            let mut i = 1;
+            let mut buf_name: Option<String> = None;
+            let mut content: Option<String> = None;
+            while i < parts.len() {
+                if parts[i] == "-b" {
+                    if let Some(name) = parts.get(i + 1) {
+                        buf_name = Some(name.to_string());
+                    }
+                    i += 2; // skip -b and its value (buffer name)
+                } else if parts[i].starts_with('-') {
+                    i += 1; // skip unknown flags
+                } else {
+                    // Everything from here is content
+                    content = Some(parts[i..].join(" "));
+                    break;
+                }
+            }
+            if let Some(text) = content {
+                if let Some(name) = buf_name {
+                    app.named_buffers.insert(name, text);
+                } else {
+                    app.paste_buffers.insert(0, text);
+                    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+                }
             }
         }
         "delete-buffer" | "deleteb" => {
-            if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
+            let buf_name: Option<String> = parts.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
+            if let Some(name) = buf_name {
+                if let Ok(idx) = name.parse::<usize>() {
+                    if idx < app.paste_buffers.len() { app.paste_buffers.remove(idx); }
+                } else {
+                    app.named_buffers.remove(&name);
+                }
+            } else {
+                if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
+            }
         }
         "list-buffers" | "lsb" => {
             let mut output = String::new();
@@ -1466,11 +1497,28 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 output.push_str(&format!("buffer{}: {} bytes: \"{}\"\n", i,
                     buf.len(), &buf.chars().take(50).collect::<String>()));
             }
+            // List named buffers
+            let mut names: Vec<&String> = app.named_buffers.keys().collect();
+            names.sort();
+            for name in names {
+                let buf = &app.named_buffers[name];
+                let preview: String = buf.chars().take(50).collect();
+                output.push_str(&format!("{}: {} bytes: \"{}\"\n", name, buf.len(), preview));
+            }
             if output.is_empty() { output.push_str("(no buffers)\n"); }
             show_output_popup(app, "list-buffers", output);
         }
         "show-buffer" | "showb" => {
-            if let Some(buf) = app.paste_buffers.first() {
+            let buf_name: Option<String> = parts.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
+            if let Some(name) = buf_name {
+                if let Ok(idx) = name.parse::<usize>() {
+                    if let Some(buf) = app.paste_buffers.get(idx) {
+                        show_output_popup(app, "show-buffer", buf.clone());
+                    }
+                } else if let Some(buf) = app.named_buffers.get(&name) {
+                    show_output_popup(app, "show-buffer", buf.clone());
+                }
+            } else if let Some(buf) = app.paste_buffers.first() {
                 show_output_popup(app, "show-buffer", buf.clone());
             }
         }
@@ -2346,3 +2394,11 @@ mod tests_issue245_mouse_selection;
 #[cfg(test)]
 #[path = "../tests-rs/test_pr255_active_border.rs"]
 mod tests_pr255_active_border;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr207_compat_bugs.rs"]
+mod tests_pr207_compat_bugs;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_named_buffers.rs"]
+mod tests_named_buffers;

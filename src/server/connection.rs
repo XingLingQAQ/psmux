@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::net::TcpStream;
 
 use crate::types::{CtrlReq, LayoutKind, WaitForOp, ControlNotification};
-use crate::cli::parse_target;
+use crate::cli::{parse_target, extract_flag_value};
 use crate::util::base64_decode;
 use crate::control;
 
@@ -67,6 +67,7 @@ let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(2000)));
 let mut persistent = false;
 let mut resp_tx_opt: Option<mpsc::Sender<mpsc::Receiver<String>>> = None;
 let mut global_target_win: Option<usize> = None;
+let mut global_target_win_is_id = false;
 let mut global_target_win_name: Option<String> = None;
 let mut global_target_pane: Option<usize> = None;
 let mut global_pane_is_id = false;
@@ -255,6 +256,7 @@ if control_echo || control_noecho {
 
         // Parse -t from command args
         let mut ctrl_target_win: Option<usize> = None;
+        let mut ctrl_target_win_is_id = false;
         let mut ctrl_target_win_name: Option<String> = None;
         let mut ctrl_target_pane: Option<usize> = None;
         let mut ctrl_pane_is_id = false;
@@ -266,8 +268,8 @@ if control_echo || control_noecho {
                     if let Some(v) = cmd_args.get(i+1) {
                         ctrl_raw_target = Some(v.to_string());
                         let pt = parse_target(v);
-                        if pt.window.is_some() { ctrl_target_win = pt.window; ctrl_target_win_name = None; }
-                        else if pt.window_name.is_some() { ctrl_target_win_name = pt.window_name; ctrl_target_win = None; }
+                        if pt.window.is_some() { ctrl_target_win = pt.window; ctrl_target_win_is_id = pt.window_is_id; ctrl_target_win_name = None; }
+                        else if pt.window_name.is_some() { ctrl_target_win_name = pt.window_name; ctrl_target_win = None; ctrl_target_win_is_id = false; }
                         if pt.pane.is_some() {
                             ctrl_target_pane = pt.pane;
                             ctrl_pane_is_id = pt.pane_is_id;
@@ -295,9 +297,17 @@ if control_echo || control_noecho {
         let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp");
         if let Some(wid) = ctrl_target_win {
             if is_focus_cmd {
-                let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
+                if ctrl_target_win_is_id {
+                    let _ = tx_ctrl.send(CtrlReq::FocusWindowById(wid));
+                } else {
+                    let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
+                }
             } else {
-                let _ = tx_ctrl.send(CtrlReq::FocusWindowTemp(wid));
+                if ctrl_target_win_is_id {
+                    let _ = tx_ctrl.send(CtrlReq::FocusWindowByIdTemp(wid));
+                } else {
+                    let _ = tx_ctrl.send(CtrlReq::FocusWindowTemp(wid));
+                }
             }
         } else if let Some(ref wname) = ctrl_target_win_name {
             if is_focus_cmd {
@@ -368,6 +378,7 @@ if line.trim().starts_with("TARGET ") {
     global_raw_target = Some(target_spec.to_string());
     let parsed = parse_target(target_spec);
     global_target_win = parsed.window;
+    global_target_win_is_id = parsed.window_is_id;
     global_target_win_name = parsed.window_name;
     global_target_pane = parsed.pane;
     global_pane_is_id = parsed.pane_is_id;
@@ -442,6 +453,7 @@ loop {
 
 // Parse -t argument from command line (takes precedence over global TARGET)
 let mut target_win: Option<usize> = global_target_win;
+let mut target_win_is_id: bool = global_target_win_is_id;
 let mut target_win_name: Option<String> = global_target_win_name.clone();
 let mut target_pane: Option<usize> = global_target_pane;
 let mut pane_is_id = global_pane_is_id;
@@ -455,8 +467,8 @@ while i < args.len() {
             raw_target = Some(v.to_string());
             // Parse the -t value using parse_target for consistent handling
             let pt = parse_target(v);
-            if pt.window.is_some() { target_win = pt.window; target_win_name = None; }
-            else if pt.window_name.is_some() { target_win_name = pt.window_name; target_win = None; }
+            if pt.window.is_some() { target_win = pt.window; target_win_is_id = pt.window_is_id; target_win_name = None; }
+            else if pt.window_name.is_some() { target_win_name = pt.window_name; target_win = None; target_win_is_id = false; }
             if pt.pane.is_some() { 
                 target_pane = pt.pane;
                 pane_is_id = pt.pane_is_id;
@@ -486,9 +498,17 @@ let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "
 let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep");
 if let Some(wid) = target_win {
     if is_focus_cmd {
-        let _ = tx.send(CtrlReq::FocusWindow(wid));
+        if target_win_is_id {
+            let _ = tx.send(CtrlReq::FocusWindowById(wid));
+        } else {
+            let _ = tx.send(CtrlReq::FocusWindow(wid));
+        }
     } else if !skip_target_focus {
-        let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
+        if target_win_is_id {
+            let _ = tx.send(CtrlReq::FocusWindowByIdTemp(wid));
+        } else {
+            let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
+        }
     }
 } else if let Some(ref wname) = target_win_name {
     if is_focus_cmd {
@@ -526,9 +546,9 @@ match cmd {
         let start_dir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
         let detached = args.iter().any(|a| *a == "-d");
         let print_info = args.iter().any(|a| *a == "-P");
-        let format_str: Option<String> = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
+        let format_str: Option<String> = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
         let cmd_str: Option<String> = args.iter()
-            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
+            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
             .map(|s| s.trim_matches('"').to_string());
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
@@ -546,7 +566,7 @@ match cmd {
         let kind = if args.iter().any(|a| *a == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
         let detached = args.iter().any(|a| *a == "-d");
         let print_info = args.iter().any(|a| *a == "-P");
-        let format_str: Option<String> = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
+        let format_str: Option<String> = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
         let start_dir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
         // -p N = percentage, -l N = cell count, -l N% = percentage (tmux semantics)
         let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
@@ -769,8 +789,8 @@ match cmd {
     "previous-window" | "prev" => { let _ = tx.send(CtrlReq::PrevWindow); }
     "rename-window" | "renamew" => { if let Some(name) = args.get(0) { let _ = tx.send(CtrlReq::RenameWindow((*name).to_string())); } }
     "list-windows" | "lsw" => {
-        // Extract -F format if provided
-        let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+        // Extract -F format if provided (supports -F val and -Fval)
+        let fmt = extract_flag_value(&args, "-F");
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ListWindowsFormat(rtx, fmt_str));
@@ -932,7 +952,7 @@ match cmd {
         }
     }
     "list-panes" | "lsp" => {
-        let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+        let fmt = extract_flag_value(&args, "-F");
         // tmux: -a = all panes across all sessions, -s = all panes in target session
         // psmux uses per-session servers, so -s is equivalent to listing the current
         // session's panes (same as no flag). -a lists all panes in this server too
@@ -1043,23 +1063,54 @@ match cmd {
         }
     }
     "set-buffer" => {
-        let content = args.iter().filter(|a| !a.starts_with('-')).cloned().collect::<Vec<&str>>().join(" ");
-        let _ = tx.send(CtrlReq::SetBuffer(content));
+        // Parse -b name and content, skipping flags
+        let mut buf_name: Option<String> = None;
+        let mut i = 0;
+        let mut content_parts: Vec<&str> = Vec::new();
+        while i < args.len() {
+            if args[i] == "-b" {
+                if let Some(name) = args.get(i + 1) {
+                    buf_name = Some(name.to_string());
+                }
+                i += 2; // skip -b and its value (buffer name)
+            } else if args[i].starts_with('-') {
+                i += 1; // skip unknown flags
+            } else {
+                content_parts.extend_from_slice(&args[i..]);
+                break;
+            }
+        }
+        let content = content_parts.join(" ");
+        if let Some(name) = buf_name {
+            let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
+        } else {
+            let _ = tx.send(CtrlReq::SetBuffer(content));
+        }
     }
     "paste-buffer" | "pasteb" => {
-        let buf_idx: Option<usize> = args.windows(2).find(|w| w[0] == "-b").and_then(|w| w[1].parse().ok());
+        let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
+        let paste_mode = args.iter().any(|a| *a == "-p");
         let (rtx, rrx) = mpsc::channel::<String>();
-        if let Some(idx) = buf_idx {
-            let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
+        if let Some(ref name) = buf_name {
+            // Try numeric index first for backward compat, else named buffer
+            if let Ok(idx) = name.parse::<usize>() {
+                let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
+            } else {
+                let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
+            }
         } else {
             let _ = tx.send(CtrlReq::ShowBuffer(rtx));
         }
         if let Ok(text) = rrx.recv() {
-            let _ = tx.send(CtrlReq::SendText(text));
+            if paste_mode {
+                let _ = tx.send(CtrlReq::SendPaste(text));
+            } else {
+                let _ = tx.send(CtrlReq::SendText(text));
+            }
         }
     }
     "list-buffers" | "lsb" => {
-        let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+        let fmt = extract_flag_value(&args, "-F");
         let (rtx, rrx) = mpsc::channel::<String>();
         if let Some(fmt_str) = fmt {
             let _ = tx.send(CtrlReq::ListBuffersFormat(rtx, fmt_str));
@@ -1076,8 +1127,17 @@ match cmd {
         if !persistent { break; }
     }
     "show-buffer" | "showb" => {
+        let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::ShowBuffer(rtx));
+        if let Some(name) = buf_name {
+            if let Ok(idx) = name.parse::<usize>() {
+                let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
+            } else {
+                let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name));
+            }
+        } else {
+            let _ = tx.send(CtrlReq::ShowBuffer(rtx));
+        }
         if let Ok(text) = rrx.recv() {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("show-buffer".to_string(), text));
@@ -1088,9 +1148,13 @@ match cmd {
         if !persistent { break; }
     }
     "delete-buffer" => {
-        let buf_idx: Option<usize> = args.windows(2).find(|w| w[0] == "-b").and_then(|w| w[1].parse().ok());
-        if let Some(idx) = buf_idx {
-            let _ = tx.send(CtrlReq::DeleteBufferAt(idx));
+        let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
+        if let Some(name) = buf_name {
+            if let Ok(idx) = name.parse::<usize>() {
+                let _ = tx.send(CtrlReq::DeleteBufferAt(idx));
+            } else {
+                let _ = tx.send(CtrlReq::DeleteNamedBuffer(name));
+            }
         } else {
             let _ = tx.send(CtrlReq::DeleteBuffer);
         }
@@ -1677,7 +1741,7 @@ match cmd {
         let _ = tx.send(CtrlReq::NextLayout);
     }
     "list-clients" | "lsc" => {
-        let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+        let fmt = extract_flag_value(&args, "-F");
         let (rtx, rrx) = mpsc::channel::<String>();
         if let Some(fmt_str) = fmt {
             let _ = tx.send(CtrlReq::ListClientsFormat(rtx, fmt_str));
@@ -2099,7 +2163,7 @@ match cmd {
         }
     }
     "list-sessions" | "ls" => {
-        let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+        let fmt = extract_flag_value(&args, "-F");
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None, false, None));
@@ -2421,7 +2485,7 @@ fn dispatch_control_command(
 ) -> bool {
     match cmd {
         "list-windows" | "lsw" => {
-            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+            let format_str = extract_flag_value(&args, "-F");
             let (rtx, rrx) = mpsc::channel::<String>();
             if let Some(fmt) = format_str {
                 let _ = tx.send(CtrlReq::ListWindowsFormat(rtx, fmt));
@@ -2436,7 +2500,7 @@ fn dispatch_control_command(
         "list-panes" | "lsp" => {
             let all = args.iter().any(|a| *a == "-a");
             let session_scope = args.iter().any(|a| *a == "-s");
-            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+            let format_str = extract_flag_value(&args, "-F");
             let (rtx, rrx) = mpsc::channel::<String>();
             if all || session_scope {
                 if let Some(fmt) = format_str {
@@ -2477,11 +2541,12 @@ fn dispatch_control_command(
             let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
             let detached = args.iter().any(|a| *a == "-d");
             let print_info = args.iter().any(|a| *a == "-P");
-            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
+            let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
             let cmd_str: Option<String> = args.iter()
                 .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a))
                     && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a))
-                    && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
+                    && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a))
+                    && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
                 .map(|s| s.trim_matches('"').to_string());
             if print_info {
                 let (rtx, rrx) = mpsc::channel::<String>();
@@ -2506,7 +2571,7 @@ fn dispatch_control_command(
             let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
             let detached = args.iter().any(|a| *a == "-d");
             let print_info = args.iter().any(|a| *a == "-P");
-            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
+            let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
             // -p N = percentage, -l N = cell count, -l N% = percentage (tmux semantics)
             let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
                 .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
@@ -2706,7 +2771,7 @@ fn dispatch_control_command(
             true
         }
         "list-buffers" | "lsb" => {
-            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+            let format_str = extract_flag_value(&args, "-F");
             let (rtx, rrx) = mpsc::channel::<String>();
             if let Some(fmt) = format_str {
                 let _ = tx.send(CtrlReq::ListBuffersFormat(rtx, fmt));
@@ -2719,8 +2784,17 @@ fn dispatch_control_command(
             true
         }
         "show-buffer" | "showb" => {
+            let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ShowBuffer(rtx));
+            if let Some(name) = buf_name {
+                if let Ok(idx) = name.parse::<usize>() {
+                    let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
+                } else {
+                    let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name));
+                }
+            } else {
+                let _ = tx.send(CtrlReq::ShowBuffer(rtx));
+            }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }
@@ -2735,7 +2809,7 @@ fn dispatch_control_command(
             true
         }
         "list-clients" | "lsc" => {
-            let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+            let fmt = extract_flag_value(&args, "-F");
             let (rtx, rrx) = mpsc::channel::<String>();
             if let Some(fmt_str) = fmt {
                 let _ = tx.send(CtrlReq::ListClientsFormat(rtx, fmt_str));

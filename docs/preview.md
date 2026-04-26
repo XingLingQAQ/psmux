@@ -14,10 +14,11 @@ Inside a chooser:
 * Press **p** to toggle the preview pane on or off.
 * Use the **arrow keys**, **j/k**, or **h/l** to move the selection. The preview updates automatically.
 * Press **g** to jump to the top, **G** to jump to the bottom (matches tmux `mode-tree`).
-* Press **Enter** to switch to the selected target.
+* Type a **number** (e.g. `3`) to start a digit-jump buffer shown at the bottom as `go to 3`, then press **Enter** to jump to that row (1-based). **Backspace** edits the buffer; **Esc** cancels. Every row is prefixed with its number so the mapping is always visible.
+* Press **Enter** with no digit buffer to switch to the arrow-cursor selection.
 * Press **Esc** or **q** to close.
 
-Full hjkl + g/G navigation also works in `choose-buffer` (prefix + =), the keybindings viewer (prefix + ?), and `customize-mode`.
+Full hjkl + g/G navigation and digit-jump also work in `choose-buffer` (prefix + =), the keybindings viewer (prefix + ?), and `customize-mode`.
 
 ## Make the Preview Visible by Default
 

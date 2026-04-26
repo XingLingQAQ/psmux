@@ -167,3 +167,28 @@ psmux prevents launching a psmux session inside an existing psmux session. If yo
 - Sets `TMUX` and `TMUX_PANE` env vars for tmux-aware tool compatibility
 
 See [configuration.md](configuration.md) for `default-shell` and other options.
+
+## Named Paste Buffers
+
+- `set-buffer -b <name> "text"` to create a named buffer
+- `show-buffer -b <name>` to read it back
+- `paste-buffer -b <name>` to paste into the active pane
+- `delete-buffer -b <name>` to remove it
+- Named buffers are separate from the anonymous buffer stack
+- Useful for structured data exchange between automation steps
+
+## Developer Integration and tmux API Compatibility
+
+psmux is designed as a drop-in replacement for tmux on Windows at the API level:
+
+- **Same CLI protocol**: 83 tmux commands with identical flags, arguments, and output formats
+- **Same stable IDs**: `$N` (session), `@N` (window), `%N` (pane) targeting works identically
+- **Same control mode**: `-C`/`-CC` wire protocol with `%begin`/`%end` framing and async notifications
+- **Same format engine**: 140+ format variables, conditionals, loops, regex, string ops
+- **Same config**: Reads `~/.tmux.conf` directly
+- **libtmux compatible**: The libtmux Python library works with psmux (see note on Windows encoding)
+- **tmux.exe alias**: psmux installs a `tmux.exe` alias so existing scripts find it on the PATH
+
+For a full developer integration guide with examples in Python, PowerShell, Node.js, Go, and Rust, see [integration.md](integration.md).
+
+For the tmux command and feature compatibility matrix, see [compatibility.md](compatibility.md).

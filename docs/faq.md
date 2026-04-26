@@ -125,3 +125,37 @@ A: Yes, use the `-L` flag for server namespaces: `psmux -L work new-session -s d
 
 **Q: How many tmux commands does psmux support?**
 A: 83 tmux-compatible commands including session management, window/pane control, copy mode, display popups/menus, interactive choosers, hooks, environment variables, pipe-pane, wait-for synchronization, and more. See [tmux_args_reference.md](tmux_args_reference.md) for the full list.
+
+---
+
+## Developer Integration FAQ
+
+**Q: Can I use psmux as a drop-in replacement for tmux in my project?**
+A: Yes. psmux implements the same CLI protocol, commands, flags, and output formats as tmux. It also installs a `tmux.exe` alias, so scripts calling `tmux` will find psmux on the PATH without any code changes.
+
+**Q: Does libtmux work with psmux?**
+A: Yes. libtmux (the Python tmux API library) works with psmux because psmux implements the same commands and output formats. On Windows, you need to ensure UTF-8 encoding is used (set `PYTHONUTF8=1` or patch libtmux's `common.py` to add `encoding="utf-8"` to the Popen call). See [integration.md](integration.md) for details.
+
+**Q: Why does libtmux return empty sessions on Windows?**
+A: libtmux uses a Unicode separator character (U+241E) internally to parse format output. On Windows, Python defaults to cp1252 encoding which garbles this character. Set `$env:PYTHONUTF8 = "1"` before running your script, or patch libtmux to use `encoding="utf-8"`. This is an upstream libtmux issue, not psmux-specific.
+
+**Q: Does psmux support control mode for IDE integrations?**
+A: Yes. `psmux -CC` enters control mode with the same wire protocol as tmux (command/response framing with `%begin`/`%end`, async notifications for window/session/pane events, output escaping). See [control-mode.md](control-mode.md) for the full protocol reference.
+
+**Q: What is `dump-state` and when should I use it?**
+A: `dump-state` is a psmux extension command (not in tmux) that returns the entire session state as a JSON blob, including windows, panes, options, sizes, and screen content. Use it when building rich UIs or debugging integrations.
+
+**Q: Do named paste buffers work?**
+A: Yes. `set-buffer -b <name> "text"`, `show-buffer -b <name>`, `paste-buffer -b <name>`, and `delete-buffer -b <name>` all work. Named buffers are useful for structured data exchange between automation steps.
+
+**Q: How do I handle encoding when reading psmux output in Python?**
+A: Always specify `encoding="utf-8"` in `subprocess.Popen()` or `subprocess.run()` calls on Windows. Alternatively, set the `PYTHONUTF8=1` environment variable globally. psmux outputs UTF-8, but Python defaults to cp1252 on Windows.
+
+**Q: Can I target windows by their stable ID (`@N`) instead of index?**
+A: Yes. `psmux select-window -t @2` targets the window with stable ID 2 (not display index 2). Stable IDs are assigned when windows are created and never change during the server's lifetime.
+
+**Q: What environment variables does psmux set?**
+A: `TMUX` (session info), `TMUX_PANE` (pane ID like `%0`), `TERM=xterm-256color`, and `COLORTERM=truecolor`. Tools that check `$TMUX` to detect tmux will correctly detect psmux.
+
+**Q: Where is the full developer integration guide?**
+A: See [integration.md](integration.md) for examples in Python, PowerShell, Node.js, Go, and Rust, plus cross-platform project patterns, libtmux usage, control mode integration, and troubleshooting.

@@ -92,6 +92,12 @@ psmux delete-buffer
 # Interactive buffer chooser (enter=paste, d=delete, esc=close)
 psmux choose-buffer
 
+# Named buffers (separate from anonymous stack)
+psmux set-buffer -b mydata "key=value"
+psmux show-buffer -b mydata
+psmux paste-buffer -b mydata
+psmux delete-buffer -b mydata
+
 # Clear command prompt history
 psmux clear-prompt-history
 ```

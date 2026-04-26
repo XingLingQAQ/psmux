@@ -1901,6 +1901,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     }
                                     KeyCode::Up | KeyCode::Char('k') => { cmd_batch.push("customize-navigate -1\n".into()); }
                                     KeyCode::Down | KeyCode::Char('j') => { cmd_batch.push("customize-navigate 1\n".into()); }
+                                    // hjkl parity with tmux mode-tree (issue #259): h = up, l = down for flat lists
+                                    KeyCode::Char('h') => { cmd_batch.push("customize-navigate -1\n".into()); }
+                                    KeyCode::Char('l') => { cmd_batch.push("customize-navigate 1\n".into()); }
                                     KeyCode::PageUp => { cmd_batch.push("customize-navigate -20\n".into()); }
                                     KeyCode::PageDown => { cmd_batch.push("customize-navigate 20\n".into()); }
                                     KeyCode::Home | KeyCode::Char('g') => { cmd_batch.push("customize-navigate -9999\n".into()); }
@@ -2388,6 +2391,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             match key.code {
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
                                 KeyCode::Down if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
+                                // hjkl parity with tmux mode-tree (issue #259): for flat lists
+                                // tmux treats h/k as up and j/l as down. g/G map to Home/End.
+                                KeyCode::Char('k') if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
+                                KeyCode::Char('j') if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
+                                KeyCode::Char('h') if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
+                                KeyCode::Char('l') if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
+                                KeyCode::Char('g') if session_chooser => { session_selected = 0; }
+                                KeyCode::Char('G') if session_chooser => { session_selected = session_entries.len().saturating_sub(1); }
                                 KeyCode::PageUp if session_chooser => { session_selected = session_selected.saturating_sub(10); }
                                 KeyCode::PageDown if session_chooser => { session_selected = (session_selected + 10).min(session_entries.len().saturating_sub(1)); }
                                 KeyCode::Home if session_chooser => { session_selected = 0; }
@@ -2478,6 +2489,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char(_) if session_chooser => {}
                                 KeyCode::Up if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
                                 KeyCode::Down if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
+                                // hjkl parity with tmux mode-tree (issue #259): h/k = up, j/l = down
+                                // for flat lists. g/G map to Home/End.
+                                KeyCode::Char('k') if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
+                                KeyCode::Char('j') if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
+                                KeyCode::Char('h') if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
+                                KeyCode::Char('l') if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
+                                KeyCode::Char('g') if tree_chooser => { tree_selected = 0; }
+                                KeyCode::Char('G') if tree_chooser => { tree_selected = tree_entries.len().saturating_sub(1); }
                                 KeyCode::PageUp if tree_chooser => { tree_selected = tree_selected.saturating_sub(10); }
                                 KeyCode::PageDown if tree_chooser => { tree_selected = (tree_selected + 10).min(tree_entries.len().saturating_sub(1)); }
                                 KeyCode::Home if tree_chooser => { tree_selected = 0; }
@@ -2547,6 +2566,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Down | KeyCode::Char('j') if buffer_chooser => {
                                     if buffer_selected + 1 < buffer_entries.len() { buffer_selected += 1; }
                                 }
+                                // hjkl parity with tmux mode-tree (issue #259): h = up, l = down for flat lists
+                                KeyCode::Char('h') if buffer_chooser => { if buffer_selected > 0 { buffer_selected -= 1; } }
+                                KeyCode::Char('l') if buffer_chooser => { if buffer_selected + 1 < buffer_entries.len() { buffer_selected += 1; } }
+                                KeyCode::Char('g') if buffer_chooser => { buffer_selected = 0; }
+                                KeyCode::Char('G') if buffer_chooser => { buffer_selected = buffer_entries.len().saturating_sub(1); }
                                 KeyCode::PageUp if buffer_chooser => { buffer_selected = buffer_selected.saturating_sub(10); }
                                 KeyCode::PageDown if buffer_chooser => { buffer_selected = (buffer_selected + 10).min(buffer_entries.len().saturating_sub(1)); }
                                 KeyCode::Home if buffer_chooser => { buffer_selected = 0; }
@@ -2612,6 +2636,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Esc if keys_viewer => { keys_viewer = false; }
                                 KeyCode::Char('k') if keys_viewer => { if keys_viewer_scroll > 0 { keys_viewer_scroll -= 1; } }
                                 KeyCode::Char('j') if keys_viewer => { keys_viewer_scroll += 1; }
+                                // hjkl parity with tmux mode-tree (issue #259): h = up, l = down, g/G = home/end
+                                KeyCode::Char('h') if keys_viewer => { if keys_viewer_scroll > 0 { keys_viewer_scroll -= 1; } }
+                                KeyCode::Char('l') if keys_viewer => { keys_viewer_scroll += 1; }
+                                KeyCode::Char('g') if keys_viewer => { keys_viewer_scroll = 0; }
+                                KeyCode::Char('G') if keys_viewer => { keys_viewer_scroll = keys_viewer_lines.len().saturating_sub(1); }
                                 // --- kill confirmation: y/Y/Enter confirms, n/N/Esc cancels ---
                                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter if confirm_cmd.is_some() => {
                                     if let Some(cmd) = confirm_cmd.take() {

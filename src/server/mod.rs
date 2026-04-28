@@ -3497,6 +3497,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let preview = preview.replace('\n', "\\n").replace('\r', "");
                         output.push_str(&format!("buffer{}: {} bytes: \"{}\"\n", i, buf.len(), preview));
                     }
+                    let mut names: Vec<&String> = app.named_buffers.keys().collect();
+                    names.sort();
+                    for name in names {
+                        let buf = &app.named_buffers[name];
+                        let preview: String = buf.chars().take(50).collect();
+                        let preview = preview.replace('\n', "\\n").replace('\r', "");
+                        output.push_str(&format!("{}: {} bytes: \"{}\"\n", name, buf.len(), preview));
+                    }
                     let _ = resp.send(output);
                 }
                 CtrlReq::ServerInfo(resp) => {
@@ -3736,12 +3744,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         is_control: true,
                     });
                     app.attached_clients = app.attached_clients.saturating_add(1);
-                    // Emit the initial state burst (issue #261). Real tmux
-                    // sends %sessions-changed / %session-changed / %window-add /
-                    // %layout-change / %window-pane-changed immediately after
-                    // a control client attaches; iTerm2's tmux integration
-                    // freezes waiting for these if we don't.
-                    control::emit_initial_state(&app, client_id);
+                    // NOTE: Real tmux does NOT emit a notification burst on
+                    // -CC attach (see tmux/control.c control_start()). It
+                    // sends only the DCS opener "\033P1000p" and lets the
+                    // client (e.g. iTerm2) drive the dialog with explicit
+                    // list-sessions / list-windows -F commands. The DCS is
+                    // emitted by server/connection.rs right after the
+                    // CONTROL_NOECHO line is parsed. Issue #261 fix:
+                    // missing DCS was the actual hang cause for iTerm2.
+                    //
+                    // The emit_initial_state() helper remains available for
+                    // future explicit refresh hooks but is intentionally
+                    // NOT called here — calling it would emit notifications
+                    // before iTerm2's own list-* commands, which is
+                    // non-standard.
                 }
                 CtrlReq::ControlSubscribe { client_id, name, target, format } => {
                     if let Some(cc) = app.control_clients.get_mut(&client_id) {

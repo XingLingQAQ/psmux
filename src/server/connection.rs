@@ -197,6 +197,15 @@ if control_echo || control_noecho {
     let tx_ctrl = tx.clone();
     let aliases_ctrl = aliases.clone();
 
+    // For -CC (no-echo) mode, emit the DCS opening sequence "\033P1000p"
+    // before anything else. This is what tmux does in control_start() and is
+    // what iTerm2's tmux integration watches for to switch from terminal mode
+    // into native tmux UI mode. Without it iTerm2 sits forever waiting.
+    // Reference: tmux/control.c control_start() CLIENT_CONTROLCONTROL branch.
+    if control_noecho {
+        let _ = write_stream.write_all(b"\x1bP1000p");
+    }
+
     // Notify client that control mode is ready
     let _ = writeln!(write_stream);
     let _ = write_stream.flush();
@@ -364,7 +373,14 @@ if control_echo || control_noecho {
         let _ = write_stream.flush();
     }
 
-    // Deregister and clean up
+    // Deregister and clean up.
+    // For -CC (no-echo) mode, emit the closing ST (ESC \) so iTerm2 leaves
+    // tmux integration mode cleanly. Real tmux's client always emits ST on
+    // -CC exit (tmux/client.c CLIENT_CONTROLCONTROL exit branch).
+    if control_noecho {
+        let _ = write_stream.write_all(b"\x1b\\");
+        let _ = write_stream.flush();
+    }
     let _ = tx.send(CtrlReq::ControlDeregister { client_id: ctrl_client_id });
     drop(notif_thread);
     return;
@@ -987,14 +1003,33 @@ match cmd {
     }
     "kill-window" | "killw" => { let _ = tx.send(CtrlReq::KillWindow); }
     "kill-session" | "kill-ses" => {
-        // If -t <target> is given, kill that session instead of self
+        // If -t <target> is given, kill that session instead of self.
+        // The target may be specified without the -L socket-name namespace
+        // prefix (e.g. "worker1" instead of "ns1__worker1"), so if the raw
+        // path is missing we ask our own server for its session name and
+        // fall through to KillSession when raw_target matches us.
         if let Some(ref tgt) = raw_target {
             let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
             let port_path = format!("{}\\.psmux\\{}.port", home, tgt);
+            let mut handled = false;
             if let Ok(port_str) = std::fs::read_to_string(&port_path) {
                 if let Ok(port) = port_str.trim().parse::<u16>() {
                     let key = crate::session::read_session_key(tgt).unwrap_or_default();
                     let _ = crate::session::send_control_to_port(port, "kill-session\n", &key);
+                    handled = true;
+                }
+            }
+            if !handled {
+                // Query our own session name. If it matches the target
+                // (in-namespace name), kill self. Otherwise the target
+                // simply does not exist on this server.
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::SessionInfo(rtx));
+                if let Ok(line) = rrx.recv() {
+                    let self_name = line.split(':').next().unwrap_or("").trim();
+                    if !self_name.is_empty() && self_name == tgt {
+                        let _ = tx.send(CtrlReq::KillSession);
+                    }
                 }
             }
         } else {
@@ -1530,9 +1565,11 @@ match cmd {
         let has_a = combined_has_set('a');
         let has_q = combined_has_set('q');
         let has_o = combined_has_set('o');
-        // Skip -t TARGET value (TARGET is not a positional option/value)
+        // Skip -t TARGET / -p PANE values (TARGET is not a positional option/value).
+        // Note: -w is a scope flag (window), not a target flag — it does NOT
+        // consume the next argument.
         let t_targets: std::collections::HashSet<&str> = args.windows(2)
-            .filter(|w| w[0] == "-t" || w[0] == "-p" || w[0] == "-w")
+            .filter(|w| w[0] == "-t" || w[0] == "-p")
             .map(|w| w[1]).collect();
         let non_flag_args: Vec<&str> = args.iter()
             .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_targets.contains(*a))

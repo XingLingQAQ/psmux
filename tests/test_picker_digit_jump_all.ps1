@@ -279,7 +279,7 @@ function Query-Server($name, $cmd) {
 
 $bufResp = Query-Server $S "choose-buffer"
 $bufRows = if ($bufResp) {
-    ([regex]::Matches($bufResp, "buffer\d+:\s*\d+\s+bytes")).Count
+    ([regex]::Matches($bufResp, "(?m)^[A-Za-z0-9_-]+:\s*\d+\s+bytes")).Count
 } else { 0 }
 Add-Result "choose-buffer TCP handler returns rows" ($bufRows -ge 3) "rows=$bufRows"
 

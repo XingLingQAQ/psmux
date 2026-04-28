@@ -154,6 +154,22 @@ class Injector
                     {
                         if (SendKey(handle, 0x1B, (char)0x1B, 0, log)) injected++;
                     }
+                    else if (token == "UP")
+                    {
+                        if (SendKey(handle, 0x26, '\0', 0, log)) injected++;
+                    }
+                    else if (token == "DOWN")
+                    {
+                        if (SendKey(handle, 0x28, '\0', 0, log)) injected++;
+                    }
+                    else if (token == "LEFT")
+                    {
+                        if (SendKey(handle, 0x25, '\0', 0, log)) injected++;
+                    }
+                    else if (token == "RIGHT")
+                    {
+                        if (SendKey(handle, 0x27, '\0', 0, log)) injected++;
+                    }
                     else if (token.StartsWith("SLEEP:"))
                     {
                         int ms = int.Parse(token.Substring(6));

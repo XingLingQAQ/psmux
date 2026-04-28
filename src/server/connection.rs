@@ -2800,8 +2800,13 @@ fn dispatch_control_command(
             true
         }
         "list-sessions" | "ls" => {
+            let format_str = extract_flag_value(&args, "-F");
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::SessionInfo(rtx));
+            if let Some(fmt) = format_str {
+                let _ = tx.send(CtrlReq::SessionInfoFormat(rtx, fmt));
+            } else {
+                let _ = tx.send(CtrlReq::SessionInfo(rtx));
+            }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }

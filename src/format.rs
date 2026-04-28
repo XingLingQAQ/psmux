@@ -1757,6 +1757,13 @@ pub fn format_list_windows(app: &AppState, fmt: &str) -> String {
     lines.join("\n")
 }
 
+/// Format a list of sessions using a format string. psmux is single-session
+/// per server, so this returns one line for the current session (matching
+/// what tmux would emit for that server's session in its list-sessions -F).
+pub fn format_list_sessions(app: &AppState, fmt: &str) -> String {
+    expand_format(fmt, app)
+}
+
 /// Format a list of panes for the active window.
 pub fn format_list_panes(app: &AppState, fmt: &str, win_idx: usize) -> String {
     let win = match app.windows.get(win_idx) {

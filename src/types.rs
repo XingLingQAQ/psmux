@@ -908,6 +908,10 @@ pub enum CtrlReq {
     FocusPaneTemp(usize),
     FocusPaneByIndexTemp(usize),
     SessionInfo(mpsc::Sender<String>),
+    /// `list-sessions -F <fmt>` — render the session row using a tmux format
+    /// string. Drop-in compat with iTerm2 and other CC clients that always
+    /// pass `-F` to get structured output.
+    SessionInfoFormat(mpsc::Sender<String>, String),
     CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>),
     ClientAttach(u64),
     ClientDetach(u64),

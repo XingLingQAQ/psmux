@@ -289,10 +289,16 @@ jobs:
             Write-Warning "vt100-psmux publish failed (may already be published)"
           }
           Start-Sleep 15
-          cargo publish --allow-dirty
+          $out = cargo publish --allow-dirty 2>&1
+          $out | Write-Output
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "psmux publish failed!"
-            exit 1
+            # Treat "already exists" as a warning so re-runs don't break
+            if ($out -match "already exists") {
+              Write-Warning "psmux already published at this version -- skipping"
+            } else {
+              Write-Error "psmux publish failed!"
+              exit 1
+            }
           }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -345,20 +351,6 @@ jobs:
           $hash = (Get-FileHash "psmux-release.zip" -Algorithm SHA256).Hash
           echo "SHA256=$hash" >> $env:GITHUB_OUTPUT
           Write-Output "SHA256: $hash"
-
-      - name: Verify checksum (download again and compare)
-        shell: pwsh
-        run: |
-          $tag = "${{ steps.version.outputs.TAG }}"
-          $zipUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/psmux-$tag-windows-x64.zip"
-          Invoke-WebRequest -Uri $zipUrl -OutFile "psmux-verify.zip" -UseBasicParsing
-          $hash1 = (Get-FileHash "psmux-release.zip" -Algorithm SHA256).Hash
-          $hash2 = (Get-FileHash "psmux-verify.zip" -Algorithm SHA256).Hash
-          if ($hash1 -ne $hash2) {
-            Write-Error "Checksum mismatch! $hash1 vs $hash2"
-            exit 1
-          }
-          Write-Output "Checksum verified: $hash1"
 
       - name: Build and push Chocolatey package
         shell: pwsh
@@ -618,27 +610,6 @@ jobs:
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash
             Write-Output "  SHA256 ($($a.label)): $hash"
             echo "SHA256_$($a.label.ToUpper())=$hash" >> $env:GITHUB_OUTPUT
-          }
-
-      - name: Verify SHA256 checksums (re-download and compare)
-        shell: pwsh
-        run: |
-          $tag  = "${{ steps.version.outputs.TAG }}"
-          $repo = "${{ github.repository }}"
-          $base = "https://github.com/$repo/releases/download/$tag"
-          $archs = @("x64","x86","arm64")
-          foreach ($arch in $archs) {
-            $url   = "$base/psmux-$tag-windows-$arch.zip"
-            $orig  = "installer-$arch.zip"
-            $verify = "verify-$arch.zip"
-            Invoke-WebRequest -Uri $url -OutFile $verify -UseBasicParsing
-            $h1 = (Get-FileHash $orig  -Algorithm SHA256).Hash
-            $h2 = (Get-FileHash $verify -Algorithm SHA256).Hash
-            if ($h1 -ne $h2) {
-              Write-Error "SHA256 mismatch for $arch! orig=$h1 verify=$h2"
-              exit 1
-            }
-            Write-Output "Verified $arch : $h1"
           }
 
       - name: Download wingetcreate

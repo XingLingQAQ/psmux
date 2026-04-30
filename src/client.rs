@@ -1253,6 +1253,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// One-shot bell flag: server signals client to emit \x07 to the host terminal.
         #[serde(default)]
         bell: bool,
+        /// set-titles: server pushes the expanded set-titles-string here when
+        /// `set-titles on`.  Client emits OSC 0 to its host terminal whenever
+        /// this value changes so external terminal tabs (Windows Terminal,
+        /// iTerm2, etc.) follow the active pane / window title.
+        #[serde(default)]
+        host_title: Option<String>,
         /// Repeat key timeout in ms (default: 500, synced from server)
         #[serde(default = "default_repeat_time")]
         repeat_time: u64,
@@ -1368,6 +1374,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // avoid corrupting ratatui's output buffer.
     let mut pending_osc52: Option<String> = None;
     let mut pending_bell = false;
+    // Last OSC 0 (host terminal title) value emitted to the host terminal.
+    // Tracked across iterations so we only re-emit when the title changes.
+    let mut last_emitted_host_title: Option<String> = None;
     // VT input mode: periodically re-send mouse-enable escape sequences.
     // Covers SSH sessions and JetBrains JediTerm (which sends VT mouse
     // sequences through ConPTY instead of native MOUSE_EVENT records).
@@ -3765,6 +3774,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             pending_bell = true;
         }
 
+        // ── set-titles: capture host title for post-draw OSC 0 emit ──
+        // The server has already expanded set-titles-string, so we
+        // just compare against the last value we emitted and write a
+        // new OSC 0 sequence if it has changed.  Stored as a local so
+        // it survives `state` being moved into its other fields below.
+        let host_title_this_frame: Option<String> = state.host_title.clone();
+
         // Update prefix key from server config (if provided)
         if let Some(ref prefix_str) = state.prefix {
             if let Some((kc, km)) = parse_key_string(prefix_str) {
@@ -5058,6 +5074,25 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             pending_bell = false;
             let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
             let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+
+        // ── Post-draw: forward host terminal title (set-titles) ──────
+        // OSC 0 = "set both icon name and window title" — broadly
+        // supported by Windows Terminal, iTerm2, GNOME Terminal,
+        // Konsole, xterm, and matches what tmux's `tsl` capability
+        // emits on xterm-class terminals.  Only emit when the
+        // expanded title actually changed to avoid flooding the host
+        // terminal every frame.
+        if host_title_this_frame != last_emitted_host_title {
+            if let Some(ref title) = host_title_this_frame {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(b"\x1b]0;");
+                let _ = out.write_all(title.as_bytes());
+                let _ = out.write_all(b"\x07");
+                let _ = out.flush();
+            }
+            last_emitted_host_title = host_title_this_frame;
         }
 
         // ── SSH: periodic mouse-enable refresh ───────────────────────

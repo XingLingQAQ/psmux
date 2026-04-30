@@ -1390,6 +1390,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 combined_buf.push('}');
                             }
                         }
+                        // set-titles: when on, expand set-titles-string and ship
+                        // it so the client emits OSC 0 to its host terminal.
+                        if app.set_titles && combined_buf.ends_with('}') {
+                            let fmt = if app.set_titles_string.is_empty() {
+                                "#S:#I:#W"
+                            } else {
+                                app.set_titles_string.as_str()
+                            };
+                            let expanded = expand_format(fmt, &app);
+                            combined_buf.pop();
+                            combined_buf.push_str(",\"host_title\":\"");
+                            combined_buf.push_str(&json_escape_string(&expanded));
+                            combined_buf.push_str("\"}");
+                        }
                         let overlay_json = serialize_overlay_json(&app);
                         if !overlay_json.is_empty() && combined_buf.ends_with('}') {
                             combined_buf.pop();
@@ -4149,6 +4163,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         combined_buf.push('}');
                     }
+                }
+                // set-titles: when on, expand set-titles-string and ship
+                // it so the client emits OSC 0 to its host terminal.
+                if app.set_titles && combined_buf.ends_with('}') {
+                    let fmt = if app.set_titles_string.is_empty() {
+                        "#S:#I:#W"
+                    } else {
+                        app.set_titles_string.as_str()
+                    };
+                    let expanded = expand_format(fmt, &app);
+                    combined_buf.pop();
+                    combined_buf.push_str(",\"host_title\":\"");
+                    combined_buf.push_str(&json_escape_string(&expanded));
+                    combined_buf.push_str("\"}");
                 }
                 let overlay_json = serialize_overlay_json(&app);
                 if !overlay_json.is_empty() && combined_buf.ends_with('}') {

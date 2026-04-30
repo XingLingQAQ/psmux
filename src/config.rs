@@ -1614,3 +1614,7 @@ mod tests_issue198_cv_persist;
 #[cfg(test)]
 #[path = "../tests-rs/test_config_exhaustive.rs"]
 mod tests_config_exhaustive;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue268_set_titles.rs"]
+mod tests_issue268_set_titles;

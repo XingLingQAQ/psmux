@@ -3246,6 +3246,132 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         std::process::exit(0);
                     }
                 }
+                CtrlReq::ForceDetachClientByTty(tty, kill_parent) => {
+                    // Look up the client by tty_name (e.g. "/dev/pts/2") and force-detach.
+                    let target_cid: Option<u64> = app.client_registry.iter()
+                        .find(|(_, ci)| ci.tty_name == tty)
+                        .map(|(cid, _)| *cid);
+                    if let Some(cid) = target_cid {
+                        if kill_parent {
+                            crate::types::send_directive_to_client(cid, "DETACH-KILL-PARENT");
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        app.client_sizes.remove(&cid);
+                        let was_present = app.client_registry.remove(&cid).is_some();
+                        if was_present {
+                            app.attached_clients = app.attached_clients.saturating_sub(1);
+                        }
+                        if app.latest_client_id == Some(cid) {
+                            app.latest_client_id = app.client_registry.keys().max().copied();
+                        }
+                        crate::types::shutdown_client_stream(cid);
+                        if let Some((w, h)) = compute_effective_client_size(&app) {
+                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                            resize_all_panes(&mut app);
+                        }
+                        control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
+                            client: tty.clone(),
+                        });
+                        hook_event = Some("client-detached");
+                    }
+                }
+                CtrlReq::DetachAllOtherClients(except_cid, kill_parent) => {
+                    // Detach all clients except the one with except_cid.
+                    // Pass u64::MAX from CLI one-shot path to mean "no current client".
+                    let targets: Vec<(u64, String)> = app.client_registry.iter()
+                        .filter(|(cid, _)| **cid != except_cid)
+                        .map(|(cid, ci)| (*cid, ci.tty_name.clone()))
+                        .collect();
+                    for (cid, _tty) in &targets {
+                        if kill_parent {
+                            crate::types::send_directive_to_client(*cid, "DETACH-KILL-PARENT");
+                        }
+                    }
+                    if kill_parent && !targets.is_empty() {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    for (cid, tty) in &targets {
+                        app.client_sizes.remove(cid);
+                        if app.client_registry.remove(cid).is_some() {
+                            app.attached_clients = app.attached_clients.saturating_sub(1);
+                        }
+                        crate::types::shutdown_client_stream(*cid);
+                        control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
+                            client: tty.clone(),
+                        });
+                    }
+                    if !targets.is_empty() {
+                        if app.latest_client_id.map_or(false, |c| !app.client_registry.contains_key(&c)) {
+                            app.latest_client_id = app.client_registry.keys().max().copied();
+                        }
+                        if let Some((w, h)) = compute_effective_client_size(&app) {
+                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                            resize_all_panes(&mut app);
+                        }
+                        hook_event = Some("client-detached");
+                    }
+                    if app.attached_clients == 0 && app.destroy_unattached {
+                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                        let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
+                        let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                        let _ = std::fs::remove_file(&regpath);
+                        let _ = std::fs::remove_file(&keypath);
+                        crate::types::shutdown_persistent_streams();
+                        tree::kill_all_children_batch(&mut app.windows);
+                        if let Some(mut wp) = app.warm_pane.take() {
+                            wp.child.kill().ok();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        std::process::exit(0);
+                    }
+                }
+                CtrlReq::DetachAllClients(kill_parent) => {
+                    // Detach every attached client of this session.
+                    let targets: Vec<(u64, String)> = app.client_registry.iter()
+                        .map(|(cid, ci)| (*cid, ci.tty_name.clone()))
+                        .collect();
+                    for (cid, _) in &targets {
+                        if kill_parent {
+                            crate::types::send_directive_to_client(*cid, "DETACH-KILL-PARENT");
+                        }
+                    }
+                    if kill_parent && !targets.is_empty() {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    for (cid, tty) in &targets {
+                        app.client_sizes.remove(cid);
+                        if app.client_registry.remove(cid).is_some() {
+                            app.attached_clients = app.attached_clients.saturating_sub(1);
+                        }
+                        crate::types::shutdown_client_stream(*cid);
+                        control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
+                            client: tty.clone(),
+                        });
+                    }
+                    if !targets.is_empty() {
+                        app.latest_client_id = None;
+                        app.client_prefix_active = false;
+                        if let Some((w, h)) = compute_effective_client_size(&app) {
+                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                            resize_all_panes(&mut app);
+                        }
+                        hook_event = Some("client-detached");
+                    }
+                    if app.attached_clients == 0 && app.destroy_unattached {
+                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                        let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
+                        let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                        let _ = std::fs::remove_file(&regpath);
+                        let _ = std::fs::remove_file(&keypath);
+                        crate::types::shutdown_persistent_streams();
+                        tree::kill_all_children_batch(&mut app.windows);
+                        if let Some(mut wp) = app.warm_pane.take() {
+                            wp.child.kill().ok();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        std::process::exit(0);
+                    }
+                }
                 CtrlReq::SwitchClient(target, flag) => {
                     // Resolve the target session name based on the flag
                     let current = app.port_file_base();

@@ -90,6 +90,11 @@ SESSION COMMANDS:
     rename-session, rename  Rename the current session
     switch-client, switchc  Switch to another session
     list-clients, lsc       List connected clients
+    detach-client, detach   Detach attached client(s); session keeps running
+        -t <client>         Target a specific client (tty path or %id)
+        -s <session>        Detach all clients of a specific session
+        -a                  Detach all other clients (or all from CLI)
+        -P                  Also kill the parent shell on detach
     server-info, info       Show server information
 
 WINDOW COMMANDS:

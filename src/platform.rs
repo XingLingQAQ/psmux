@@ -1529,6 +1529,53 @@ pub mod process_kill {
         }
     }
 
+    /// Look up the parent process ID of the calling process via the snapshot
+    /// table.  Returns None if the snapshot fails or the current PID isn't
+    /// found (extremely unlikely).  Used by `detach-client -P` (issue #275).
+    pub fn current_parent_pid() -> Option<u32> {
+        unsafe {
+            let cur_pid = GetCurrentProcessIdSafe();
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE || snap == 0 { return None; }
+            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+            pe.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut found: Option<u32> = None;
+            if Process32FirstW(snap, &mut pe) != 0 {
+                if pe.th32_process_id == cur_pid {
+                    found = Some(pe.th32_parent_process_id);
+                }
+                while found.is_none() && Process32NextW(snap, &mut pe) != 0 {
+                    if pe.th32_process_id == cur_pid {
+                        found = Some(pe.th32_parent_process_id);
+                    }
+                }
+            }
+            CloseHandle(snap);
+            found
+        }
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        #[link_name = "GetCurrentProcessId"]
+        fn GetCurrentProcessIdSafe() -> u32;
+    }
+
+    /// Forcefully terminate the calling process's parent.  Used to implement
+    /// `detach-client -P` parity with tmux (which sends SIGHUP to the parent
+    /// shell on POSIX).  Returns true if the parent was located and a
+    /// termination request was issued.
+    pub fn kill_parent_process() -> bool {
+        if let Some(ppid) = current_parent_pid() {
+            // Sanity check: don't terminate PID 0 / 4 (System / kernel).
+            if ppid == 0 || ppid == 4 { return false; }
+            terminate_pid(ppid);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Kill an entire process tree: all descendants first (leaves → root order),
     /// then the root process itself.  Calls `child.kill()` via portable_pty as a
     /// fallback.  Does NOT call `child.wait()` so `try_wait()` still works for

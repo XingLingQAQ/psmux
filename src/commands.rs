@@ -2332,6 +2332,10 @@ mod tests_commands_audit;
 mod tests_parity;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue275_detach_client.rs"]
+mod tests_issue275_detach_client;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue179_bind_key_uppercase.rs"]
 mod tests_issue179_bind_key_uppercase;
 

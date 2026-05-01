@@ -1381,6 +1381,88 @@ fn run_main() -> io::Result<()> {
                 send_control(cmd)?;
                 return Ok(());
             }
+            // detach-client - Gracefully detach attached client(s) (issue #275)
+            "detach-client" | "detach" => {
+                let mut t_target: Option<String> = None;
+                let mut s_target: Option<String> = None;
+                let mut detach_all = false;
+                let mut kill_parent = false;
+                let mut shell_cmd: Option<String> = None;
+                let mut i = 1;
+                while i < cmd_args.len() {
+                    match cmd_args[i].as_str() {
+                        "-a" => { detach_all = true; }
+                        "-P" => { kill_parent = true; }
+                        "-t" => {
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                t_target = Some(v.to_string());
+                                i += 1;
+                            }
+                        }
+                        "-s" => {
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                s_target = Some(v.to_string());
+                                i += 1;
+                            }
+                        }
+                        "-E" => {
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                shell_cmd = Some(v.to_string());
+                                i += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                // Apply -L namespace prefix to -s session lookup so users can
+                // target a namespaced session by its short name.
+                let session_for_routing = if let Some(s) = &s_target {
+                    if let Some(ref l) = l_socket_name {
+                        format!("{}__{}", l, s)
+                    } else {
+                        s.clone()
+                    }
+                } else {
+                    env::var("PSMUX_TARGET_SESSION").unwrap_or_else(|_| {
+                        if let Some(ref l) = l_socket_name {
+                            format!("{}__{}", l, "default")
+                        } else {
+                            "default".to_string()
+                        }
+                    })
+                };
+                env::set_var("PSMUX_TARGET_SESSION", &session_for_routing);
+
+                // Build the command to forward.  -s is consumed by routing; we
+                // don't re-send it because the server is already this session.
+                let mut server_cmd = String::from("detach-client");
+                // CLI invocations have no "current attached client" to detach,
+                // so we silently promote a flag-less `psmux detach-client` to
+                // `-a` (detach all). With `-t` specified we leave it alone so
+                // the server force-detaches just that target.
+                let effective_all = detach_all || (t_target.is_none() && shell_cmd.is_none());
+                if effective_all { server_cmd.push_str(" -a"); }
+                if kill_parent { server_cmd.push_str(" -P"); }
+                if let Some(t) = &t_target {
+                    // Quote the value so tty paths with slashes survive arg parsing.
+                    server_cmd.push_str(&format!(" -t {}", crate::util::quote_arg(t)));
+                }
+                if let Some(c) = &shell_cmd {
+                    // -E is documented but currently a no-op (we do not exec
+                    // arbitrary shell commands on the server's behalf).
+                    server_cmd.push_str(&format!(" -E {}", crate::util::quote_arg(c)));
+                }
+                server_cmd.push('\n');
+
+                // If the target session has no port file, fall through with a
+                // friendly message (matches kill-session behavior).
+                if send_control(server_cmd).is_err() {
+                    eprintln!("psmux: no session '{}'", session_for_routing);
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             // kill-session - Kill a session
             "kill-session" | "kill-ses" => {
                 let mut target: Option<String> = None;

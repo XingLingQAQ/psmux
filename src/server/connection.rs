@@ -2012,14 +2012,47 @@ match cmd {
         let prompt_str = prompt.unwrap_or_else(|| format!("Run '{}'", command));
         let _ = tx.send(CtrlReq::ConfirmBefore(prompt_str, command));
     }
-    // tmux standard aliases
+    // tmux standard aliases (issue #275: full -a/-s/-t/-P parity)
     "detach-client" | "detach" => {
-        // Check for -t flag targeting a specific client (already parsed into raw_target)
-        let target_cid: Option<u64> = raw_target.as_ref()
+        let kill_parent = args.iter().any(|a| *a == "-P");
+        let detach_all_others = args.iter().any(|a| *a == "-a");
+        // -s <session> targets a specific session.  We're already routed to this
+        // server (one server per session), so -s anything is honored by detaching
+        // every client of this session.
+        let detach_session = args.windows(2).any(|w| w[0] == "-s");
+        // -t <target>: numeric ID, %ID, or tty_name like "/dev/pts/2"
+        let target_str = raw_target.clone();
+        let target_cid_numeric: Option<u64> = target_str.as_ref()
             .and_then(|t| t.trim_start_matches('%').parse::<u64>().ok());
-        if let Some(cid) = target_cid {
-            let _ = tx.send(CtrlReq::ForceDetachClient(cid));
+
+        if detach_session {
+            let _ = tx.send(CtrlReq::DetachAllClients(kill_parent));
+            // This client is part of the session, so it will be detached too.
+            attached_sent = false;
+        } else if detach_all_others {
+            let _ = tx.send(CtrlReq::DetachAllOtherClients(client_id, kill_parent));
+            // Current client stays attached.
+        } else if let Some(cid) = target_cid_numeric {
+            if cid == client_id {
+                if kill_parent {
+                    let _ = crate::types::send_directive_to_client(client_id, "DETACH-KILL-PARENT");
+                }
+                let _ = tx.send(CtrlReq::ClientDetach(client_id));
+                attached_sent = false;
+            } else {
+                if kill_parent {
+                    let _ = crate::types::send_directive_to_client(cid, "DETACH-KILL-PARENT");
+                }
+                let _ = tx.send(CtrlReq::ForceDetachClient(cid));
+            }
+        } else if let Some(tty) = target_str {
+            // Non-numeric -t value: treat as a tty_name lookup.
+            let _ = tx.send(CtrlReq::ForceDetachClientByTty(tty, kill_parent));
         } else {
+            // No flags, no -t: detach THIS client.
+            if kill_parent {
+                let _ = crate::types::send_directive_to_client(client_id, "DETACH-KILL-PARENT");
+            }
             let _ = tx.send(CtrlReq::ClientDetach(client_id));
             attached_sent = false;
         }
@@ -2889,6 +2922,35 @@ fn dispatch_control_command(
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }
+            true
+        }
+        "detach-client" | "detach" => {
+            // One-shot CLI dispatch path (issue #275).  No "current client" since
+            // the caller is a short-lived `psmux detach-client` process, not an
+            // attached TUI client.  Default behavior: detach EVERY attached client
+            // of this session.
+            let kill_parent = args.iter().any(|a| *a == "-P");
+            let detach_all = args.iter().any(|a| *a == "-a");
+            let detach_session = args.windows(2).any(|w| w[0] == "-s");
+            let target_str: Option<String> = extract_flag_value(&args, "-t").map(|s| s.to_string());
+            let target_cid_numeric: Option<u64> = target_str.as_ref()
+                .and_then(|t| t.trim_start_matches('%').parse::<u64>().ok());
+
+            if let Some(cid) = target_cid_numeric {
+                if kill_parent {
+                    let _ = crate::types::send_directive_to_client(cid, "DETACH-KILL-PARENT");
+                }
+                let _ = tx.send(CtrlReq::ForceDetachClient(cid));
+            } else if let Some(tty) = target_str {
+                let _ = tx.send(CtrlReq::ForceDetachClientByTty(tty, kill_parent));
+            } else if detach_all || detach_session {
+                // -a from CLI = no current to exclude → detach all.
+                let _ = tx.send(CtrlReq::DetachAllClients(kill_parent));
+            } else {
+                // No flags from CLI: detach all clients of this session.
+                let _ = tx.send(CtrlReq::DetachAllClients(kill_parent));
+            }
+            let _ = resp_tx.send(String::new());
             true
         }
         "kill-session" => {

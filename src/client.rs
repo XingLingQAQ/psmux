@@ -903,6 +903,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     });
 
     let mut quit = false;
+    // detach-client -P: server sets this via DETACH-KILL-PARENT directive.
+    // After we exit, kill the parent shell process for tmux -P parity (issue #275).
+    let mut kill_parent_on_exit = false;
     let mut prefix_armed = false;
     let mut prefix_armed_at = Instant::now();
     let mut prefix_repeating = false;
@@ -1442,6 +1445,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             let _ = writer.flush();
                             quit = true;
                         }
+                    } else if line.trim() == "DETACH-KILL-PARENT" {
+                        // detach-client -P: detach this client AND kill the
+                        // parent shell on exit (tmux -P parity, issue #275).
+                        kill_parent_on_exit = true;
+                        quit = true;
                     } else {
                         if client_log_enabled() {
                             client_log("frame", &format!("received {} bytes", line.len()));
@@ -2755,8 +2763,25 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         } else {
                                             // Split on \; or ; to support command chaining (issue #192)
                                             let sub_cmds = crate::config::split_chained_commands_pub(&trimmed);
+                                            // detach-client typed at the prompt must also quit
+                                            // THIS client unless `-a` (detach others) or
+                                            // `-t %<id>`/`-t <tty>` (target someone else) is
+                                            // specified.  Mirrors how prefix+d quits at the
+                                            // keybinding dispatch level (issue #275).
+                                            let mut quit_on_detach = false;
                                             for sub in &sub_cmds {
+                                                let parts: Vec<&str> = sub.split_whitespace().collect();
+                                                if parts.first().map_or(false, |w| *w == "detach-client" || *w == "detach") {
+                                                    let detach_others_only = parts.iter().any(|p| *p == "-a");
+                                                    let has_target = parts.windows(2).any(|w| w[0] == "-t");
+                                                    if !detach_others_only && !has_target {
+                                                        quit_on_detach = true;
+                                                    }
+                                                }
                                                 cmd_batch.push(format!("{}\n", sub));
+                                            }
+                                            if quit_on_detach {
+                                                quit = true;
                                             }
                                         }
                                     }
@@ -5279,6 +5304,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Clean disconnect on persistent connection
     let _ = writer.write_all(b"client-detach\n");
     let _ = writer.flush();
+    // detach-client -P parity (issue #275): kill the parent shell so the host
+    // terminal closes when the user explicitly requested it.
+    if kill_parent_on_exit {
+        #[cfg(windows)]
+        {
+            let _ = crate::platform::process_kill::kill_parent_process();
+        }
+    }
     Ok(())
 }
 

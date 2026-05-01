@@ -1099,6 +1099,19 @@ pub enum CtrlReq {
     ListClients(mpsc::Sender<String>),
     ListClientsFormat(mpsc::Sender<String>, String),
     ForceDetachClient(u64),
+    /// detach-client -t <tty>: force-detach a client by tty_name (e.g. "/dev/pts/2").
+    /// `kill_parent` is the tmux `-P` flag: also tell the client to kill its parent
+    /// shell before exiting (issue #275).
+    ForceDetachClientByTty(String, bool),
+    /// detach-client -a (or no-flag CLI invocation): detach every attached client
+    /// of THIS session except the one whose ID is given.  Pass `u64::MAX` from the
+    /// CLI one-shot path (no "current" client to exclude).  `kill_parent` honors
+    /// the tmux `-P` flag for force-detached clients.
+    DetachAllOtherClients(u64, bool),
+    /// detach-client -s <session> (where session matches THIS server) or
+    /// `psmux detach-client` from CLI: detach every attached client of this session.
+    /// `kill_parent` honors the tmux `-P` flag.
+    DetachAllClients(bool),
     /// switch-client -t <target> / -n / -p / -l: switch the attached client to another session.
     /// The String carries the resolved target session name (or "" for -n/-p/-l to be
     /// resolved server-side), and the second field carries the flag: 't', 'n', 'p', or 'l'.

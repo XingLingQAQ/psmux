@@ -47,6 +47,10 @@ pub enum WarmPanePatch {
     /// Resize the vt100 parser's scrollback cap.  Trims oldest rows
     /// if shrinking.  See `vt100::Screen::set_scrollback_len`.
     HistoryLimit(usize),
+    /// Toggle whether DEC 47/1049 alt-screen mode switches are honoured.
+    /// Off → TUI app output lands in main scrollback (#88).  Cheap to
+    /// apply: a single field flip on the parser, no shell restart.
+    AllowAlternateScreen(bool),
 }
 
 /// Decide what the warm pane needs given that a server option changed.
@@ -63,6 +67,13 @@ pub fn for_option_change(name: &str, app: &AppState) -> WarmPaneSync {
         // Kept cheap because users may set this in the prompt and we
         // do not want to throw away ~470ms of shell init for it.
         "history-limit" => WarmPaneSync::Patch(WarmPanePatch::HistoryLimit(app.history_limit)),
+
+        // Parser-only flag — cheap to flip on a running pane.
+        // Drives whether TUI apps render to alt grid (default) or
+        // straight to main grid + scrollback (#88).
+        "alternate-screen" => {
+            WarmPaneSync::Patch(WarmPanePatch::AllowAlternateScreen(app.allow_alternate_screen))
+        }
 
         // The shell binary itself differs — must respawn.
         "default-shell" => WarmPaneSync::Respawn("default-shell changed"),
@@ -148,8 +159,17 @@ pub fn for_post_config(app: &AppState) -> WarmPaneSync {
     }
 
     // history-limit only differs in the parser cap, no respawn.
+    // alternate-screen only differs in a parser flag, also no respawn.
+    // If both differ from defaults, the consume-time helper will
+    // reconcile both via `reconcile_consumed_parser`; here we only
+    // need to tell the policy module that *something* parser-level
+    // wants patching.  We bias to history-limit because it is the
+    // more common config knob in real-world setups.
     if app.history_limit != 2000 {
         return WarmPaneSync::Patch(WarmPanePatch::HistoryLimit(app.history_limit));
+    }
+    if !app.allow_alternate_screen {
+        return WarmPaneSync::Patch(WarmPanePatch::AllowAlternateScreen(false));
     }
 
     WarmPaneSync::Noop
@@ -170,6 +190,14 @@ pub fn apply(
 }
 
 fn apply_patch(app: &mut AppState, patch: WarmPanePatch) {
+    // Both patch kinds also need to be applied to *every existing
+    // pane*, not just the warm pane — otherwise the user's
+    // `set -g alternate-screen off` would only affect the next pane
+    // they open, surprising anyone who issued the change with a TUI
+    // already running.  These are O(panes × O(1)) parser flag flips,
+    // bounded and cheap.
+    apply_patch_to_existing_panes(app, &patch);
+
     let wp = match app.warm_pane.as_ref() {
         Some(wp) => wp,
         None => return,
@@ -182,6 +210,50 @@ fn apply_patch(app: &mut AppState, patch: WarmPanePatch) {
                 }
             }
         }
+        WarmPanePatch::AllowAlternateScreen(allowed) => {
+            if let Ok(mut parser) = wp.term.lock() {
+                if parser.screen().allow_alternate_screen() != allowed {
+                    parser.screen_mut().set_allow_alternate_screen(allowed);
+                }
+            }
+        }
+    }
+}
+
+/// Walk every live pane and apply the patch.  Critical for options
+/// that change perceived behaviour from the user's point of view —
+/// `alternate-screen off` would be useless if it only affected
+/// future panes.  history-limit propagation matches tmux semantics:
+/// existing buffers grow / shrink to the new cap.
+fn apply_patch_to_existing_panes(app: &mut AppState, patch: &WarmPanePatch) {
+    use crate::types::Node;
+    fn walk(node: &mut Node, patch: &WarmPanePatch) {
+        match node {
+            Node::Leaf(p) => {
+                if let Ok(mut parser) = p.term.lock() {
+                    match patch {
+                        WarmPanePatch::HistoryLimit(n) => {
+                            if parser.screen().scrollback_len() != *n {
+                                parser.screen_mut().set_scrollback_len(*n);
+                            }
+                        }
+                        WarmPanePatch::AllowAlternateScreen(allowed) => {
+                            if parser.screen().allow_alternate_screen() != *allowed {
+                                parser.screen_mut().set_allow_alternate_screen(*allowed);
+                            }
+                        }
+                    }
+                }
+            }
+            Node::Split { children, .. } => {
+                for child in children.iter_mut() {
+                    walk(child, patch);
+                }
+            }
+        }
+    }
+    for win in app.windows.iter_mut() {
+        walk(&mut win.root, patch);
     }
 }
 
@@ -210,13 +282,22 @@ fn respawn(app: &mut AppState, pty_system: &dyn portable_pty::PtySystem) {
 
 /// Helper for warm-pane consume sites in `pane.rs`.  When a warm
 /// pane is transplanted into a real session, its parser may still
-/// hold a stale scrollback cap (config raised history-limit after
-/// the pane was born and the patch was missed).  This is the safety
-/// net that guarantees consume-time consistency even if a future
-/// caller forgets to invoke `apply` on a state change.
-pub fn reconcile_consumed_parser(parser: &mut vt100::Parser, history_limit: usize) {
-    if parser.screen().scrollback_len() != history_limit {
-        parser.screen_mut().set_scrollback_len(history_limit);
+/// hold stale flags (history-limit raised, alt-screen toggled) after
+/// the pane was born.  This is the safety net that guarantees
+/// consume-time consistency even if a future caller forgets to
+/// invoke `apply` on a state change.
+pub fn reconcile_consumed_parser(parser: &mut vt100::Parser, app: &AppState) {
+    let screen = parser.screen();
+    let need_history = screen.scrollback_len() != app.history_limit;
+    let need_alt = screen.allow_alternate_screen() != app.allow_alternate_screen;
+    if need_history || need_alt {
+        let s = parser.screen_mut();
+        if need_history {
+            s.set_scrollback_len(app.history_limit);
+        }
+        if need_alt {
+            s.set_allow_alternate_screen(app.allow_alternate_screen);
+        }
     }
 }
 

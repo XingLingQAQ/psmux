@@ -13,6 +13,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "escape-time", scope: "server", option_type: "number", default: "500", description: "Time in ms to wait for escape sequence" },
     OptionDef { name: "focus-events", scope: "server", option_type: "boolean", default: "off", description: "Send focus events to applications" },
     OptionDef { name: "history-limit", scope: "server", option_type: "number", default: "2000", description: "Maximum scrollback lines per pane" },
+    OptionDef { name: "alternate-screen", scope: "server", option_type: "boolean", default: "on", description: "Honour DEC 47/1049 alt-screen mode (off = TUI output goes to scrollback, #88)" },
     OptionDef { name: "set-clipboard", scope: "server", option_type: "choice", default: "external", description: "OSC 52 clipboard integration" },
     OptionDef { name: "default-shell", scope: "server", option_type: "string", default: "", description: "Default shell for new panes" },
     OptionDef { name: "default-terminal", scope: "server", option_type: "string", default: "xterm-256color", description: "TERM value for new panes" },

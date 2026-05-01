@@ -137,6 +137,22 @@ pub struct Screen {
     /// that is NOT an OSC/DCS/APC string terminator.  Use `take_audible_bell()`
     /// to consume the counter.
     pub(crate) audible_bell_count: u32,
+
+    /// Controls how alternate-screen exits interact with main-grid
+    /// scrollback.  Default `true` = legacy behaviour: alt-screen
+    /// content is ephemeral, vanishes on exit (matches xterm/tmux
+    /// default).  When set `false`, the visible rows of the alt grid
+    /// are copied into main-grid scrollback at the moment of exit,
+    /// so a user running `capture-pane -S` or copy-mode page-up
+    /// after a TUI session sees what was on screen when the app left.
+    ///
+    /// We keep the option name `alternate-screen` to match tmux, but
+    /// the Windows implementation differs: ConPTY emits its own
+    /// "clear + restore" sequences around 1049 toggles regardless of
+    /// whether we honour the toggle, so simply dropping 1049 (the
+    /// tmux approach) does not preserve content on this platform.
+    /// Copy-on-exit is the equivalent end-user behaviour.
+    pub(crate) allow_alternate_screen: bool,
 }
 
 impl Screen {
@@ -162,6 +178,7 @@ impl Screen {
             squelch_cleared: false,
             squelch_clear_pending: false,
             audible_bell_count: 0,
+            allow_alternate_screen: true,
         }
     }
 
@@ -195,11 +212,15 @@ impl Screen {
         self.grid_mut().set_scrollback(rows);
     }
 
-    /// Returns the number of rows currently held in the scrollback buffer
-    /// (the actual retained count, not the configured maximum).
+    /// Returns the number of rows currently held in main-grid
+    /// scrollback (the actual retained count, not the configured
+    /// maximum).  Always reads the main grid, even while alt-screen
+    /// is active — `#{history_size}` and capture-pane-S are about
+    /// "what can the user scroll back to", and that lives on the
+    /// main grid regardless of which grid is currently rendering.
     #[must_use]
     pub fn scrollback_filled(&self) -> usize {
-        self.grid().scrollback_filled()
+        self.grid.scrollback_filled()
     }
 
     /// Updates the maximum scrollback buffer size for the main grid.  Rows
@@ -214,6 +235,26 @@ impl Screen {
     #[must_use]
     pub fn scrollback_len(&self) -> usize {
         self.grid().scrollback_len()
+    }
+
+    /// Whether DEC private modes 47/1049 (alternate screen) are honoured.
+    #[must_use]
+    pub fn allow_alternate_screen(&self) -> bool {
+        self.allow_alternate_screen
+    }
+
+    /// Toggle whether alt-screen content is preserved into main-grid
+    /// scrollback when the alt screen exits.  See the field comment.
+    /// If we are currently inside alt mode at the moment of toggling
+    /// off, also flush what's visible into scrollback right now —
+    /// otherwise a user who flipped the option on while a TUI is
+    /// already running would lose the current frame.
+    pub fn set_allow_alternate_screen(&mut self, allowed: bool) {
+        let was = self.allow_alternate_screen;
+        self.allow_alternate_screen = allowed;
+        if !allowed && was && self.mode(MODE_ALTERNATE_SCREEN) {
+            self.copy_alt_visible_to_main_scrollback();
+        }
     }
 
     /// Returns the current position in the scrollback.
@@ -843,7 +884,44 @@ impl Screen {
     }
 
     fn exit_alternate_grid(&mut self) {
+        // Issue #88: when the user has opted in via `alternate-screen
+        // off`, append the alt grid's currently-visible rows to the
+        // main grid's scrollback BEFORE flipping the mode.  Done in
+        // this order so the rows are read off the alt grid (which is
+        // still selected by `grid()` while MODE_ALTERNATE_SCREEN is
+        // set) and pushed into the main grid's buffer.  A no-op when
+        // the option is left at the default `on`.
+        if !self.allow_alternate_screen {
+            self.copy_alt_visible_to_main_scrollback();
+        }
         self.clear_mode(MODE_ALTERNATE_SCREEN);
+    }
+
+    /// Append every non-blank visible row of the alt grid to the
+    /// main grid's scrollback.  Trailing blank rows are skipped so a
+    /// TUI that didn't fill the screen does not leave a tail of empty
+    /// lines in scrollback.  Cheap: O(rows × cols) per exit, with the
+    /// usual scrollback eviction rules applied by main grid's append.
+    fn copy_alt_visible_to_main_scrollback(&mut self) {
+        // Snapshot the alt grid's visible rows; we will hand them to
+        // the main grid afterwards.
+        let alt_rows: Vec<crate::row::Row> = self
+            .alternate_grid
+            .drawing_rows()
+            .cloned()
+            .collect();
+
+        // Trim trailing blank rows — they're just empty lines beneath
+        // the TUI's last drawn row and would clutter scrollback.
+        let last_nonblank = alt_rows
+            .iter()
+            .rposition(|r| !r.is_blank())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        for row in alt_rows.into_iter().take(last_nonblank) {
+            self.grid.push_row_to_scrollback(row);
+        }
     }
 
     fn save_cursor(&mut self) {

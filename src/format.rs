@@ -1595,6 +1595,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "status" => if app.status_visible { "on".into() } else { "off".into() },
         "mode_keys" => app.mode_keys.clone(),
         "history_limit" => app.history_limit.to_string(),
+        "alternate_screen" => if app.allow_alternate_screen { "on".into() } else { "off".into() },
         // history_size reports the number of rows currently held in the
         // active pane's scrollback (the *retained* count), not the
         // configured maximum (#271).  Falls back to 0 when no active pane

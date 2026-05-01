@@ -93,7 +93,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
             if need_resize {
                 parser.screen_mut().set_size(rows, cols);
             }
-            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app.history_limit);
+            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app);
         }
         let epoch = std::time::Instant::now() - Duration::from_secs(2);
         let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
@@ -142,7 +142,9 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     drop(pair.slave);
 
     let scrollback = app.history_limit as u32;
-    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, scrollback as usize)));
+    let mut parser = vt100::Parser::new(size.rows, size.cols, scrollback as usize);
+    parser.screen_mut().set_allow_alternate_screen(app.allow_alternate_screen);
+    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(parser));
     let term_reader = term.clone();
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let dv_writer = data_version.clone();
@@ -206,7 +208,9 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     drop(pair.slave);
     let scrollback = app.history_limit as u32;
-    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback as usize)));
+    let mut parser = vt100::Parser::new(rows, cols, scrollback as usize);
+    parser.screen_mut().set_allow_alternate_screen(app.allow_alternate_screen);
+    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(parser));
     let term_reader = term.clone();
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let dv_writer = data_version.clone();
@@ -251,7 +255,9 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     drop(pair.slave);
 
     let scrollback = app.history_limit;
-    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, scrollback)));
+    let mut parser = vt100::Parser::new(size.rows, size.cols, scrollback);
+    parser.screen_mut().set_allow_alternate_screen(app.allow_alternate_screen);
+    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(parser));
     let term_reader = term.clone();
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let dv_writer = data_version.clone();
@@ -372,7 +378,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
             if need_resize {
                 parser.screen_mut().set_size(rows, cols);
             }
-            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app.history_limit);
+            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app);
         }
         let epoch = std::time::Instant::now() - Duration::from_secs(2);
         let new_pane_id = wp.pane_id;
@@ -408,7 +414,9 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – see create_window() comment.
     drop(pair.slave);
-    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, app.history_limit)));
+    let mut parser = vt100::Parser::new(size.rows, size.cols, app.history_limit);
+    parser.screen_mut().set_allow_alternate_screen(app.allow_alternate_screen);
+    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(parser));
     let term_reader = term.clone();
     let reader = pair.master.try_clone_reader().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1320,6 +1328,10 @@ mod test_issue165_prediction_view_style;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue271_warm_pane_history.rs"]
 mod test_issue271_warm_pane_history;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue88_alt_screen_toggle.rs"]
+mod test_issue88_alt_screen_toggle;
 
 #[cfg(test)]
 mod test_parser_audible_bell {

@@ -223,30 +223,45 @@ fn post_config_priority_respawn_beats_patch() {
 #[test]
 fn reconcile_consumed_parser_grows_cap_when_stale() {
     let mut p = vt100::Parser::new(4, 20, 2000);
-    reconcile_consumed_parser(&mut p, 100_000);
+    let mut app = fresh_app();
+    app.history_limit = 100_000;
+    reconcile_consumed_parser(&mut p, &app);
     assert_eq!(p.screen().scrollback_len(), 100_000);
 }
 
 #[test]
 fn reconcile_consumed_parser_is_noop_when_already_synced() {
-    // Should not allocate or do unnecessary work when caps match.
     let mut p = vt100::Parser::new(4, 20, 50_000);
-    reconcile_consumed_parser(&mut p, 50_000);
+    let mut app = fresh_app();
+    app.history_limit = 50_000;
+    reconcile_consumed_parser(&mut p, &app);
     assert_eq!(p.screen().scrollback_len(), 50_000);
 }
 
 #[test]
 fn reconcile_consumed_parser_shrinks_when_limit_lowered() {
-    // Defensive: if a future caller lowers history-limit, the cap
-    // should shrink and trim accordingly.  Not the common path, but
-    // the API must behave symmetrically.
     let mut p = vt100::Parser::new(2, 10, 2000);
     let mut data = String::new();
     for i in 0..30 { data.push_str(&format!("L{i}\r\n")); }
     p.process(data.as_bytes());
     assert!(p.screen().scrollback_filled() > 5);
 
-    reconcile_consumed_parser(&mut p, 5);
+    let mut app = fresh_app();
+    app.history_limit = 5;
+    reconcile_consumed_parser(&mut p, &app);
     assert_eq!(p.screen().scrollback_len(), 5);
     assert!(p.screen().scrollback_filled() <= 5);
+}
+
+#[test]
+fn reconcile_consumed_parser_propagates_alt_screen_flag() {
+    // The same helper also reconciles the allow_alternate_screen flag
+    // (#88).  When app config disables alt-screen handling, a fresh
+    // or transplanted parser must pick that up at consume time.
+    let mut p = vt100::Parser::new(4, 20, 2000);
+    assert!(p.screen().allow_alternate_screen());
+    let mut app = fresh_app();
+    app.allow_alternate_screen = false;
+    reconcile_consumed_parser(&mut p, &app);
+    assert!(!p.screen().allow_alternate_screen());
 }

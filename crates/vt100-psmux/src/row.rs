@@ -29,6 +29,13 @@ impl Row {
         self.wrapped = false;
     }
 
+    /// True when every cell on this row holds no glyph.  Used by the
+    /// alt-screen-to-scrollback copy path (issue #88) to skip the
+    /// trailing blank rows a TUI did not draw into.
+    pub fn is_blank(&self) -> bool {
+        !self.cells.iter().any(|c| c.has_contents())
+    }
+
     fn cells(&self) -> impl Iterator<Item = &crate::Cell> {
         self.cells.iter()
     }

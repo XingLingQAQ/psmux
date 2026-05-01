@@ -2705,6 +2705,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "choose-tree-preview" => { app.choose_tree_preview = false; }
                             "escape-time" => { app.escape_time_ms = 500; }
                             "history-limit" => { app.history_limit = 2000; }
+                            "alternate-screen" => { app.allow_alternate_screen = true; }
                             "display-time" => { app.display_time_ms = 750; }
                             "mode-keys" => { app.mode_keys = "emacs".to_string(); }
                             "status" => { app.status_visible = true; }

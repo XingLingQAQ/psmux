@@ -645,6 +645,13 @@ pub struct AppState {
     /// Whether warm pane/server pre-spawning is enabled (default: on).
     /// When off, new sessions/windows always cold-spawn a fresh shell.
     pub warm_enabled: bool,
+    /// Whether DEC private modes 47 / 1049 (alternate screen) are honoured
+    /// for new panes (default: on).  When off, full-screen TUI apps that
+    /// would normally enter the alt screen instead write straight to the
+    /// main grid, so their output ends up in scrollback and is reachable
+    /// by `capture-pane -S` and copy-mode (psmux issue #88).  Mirrors
+    /// tmux's `set -g alternate-screen on/off`.
+    pub allow_alternate_screen: bool,
     /// Pre-spawned warm pane: shell already loaded, ready for instant new-window.
     pub warm_pane: Option<WarmPane>,
     /// Plugin .ps1 scripts queued during config loading for post-startup execution.
@@ -826,6 +833,7 @@ impl AppState {
             last_mouse_y: 0,
             status_message: None,
             warm_enabled: std::env::var("PSMUX_NO_WARM").map(|v| v != "1" && v != "true").unwrap_or(true),
+            allow_alternate_screen: true,
             warm_pane: None,
             pending_plugin_scripts: Vec::new(),
             control_clients: HashMap::new(),

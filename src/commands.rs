@@ -1530,10 +1530,14 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "clear-history\n", &app.session_key);
             } else {
+                let allow_alt = app.allow_alternate_screen;
+                let history_limit = app.history_limit;
                 let win = &mut app.windows[app.active_idx];
                 if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
                     if let Ok(mut parser) = p.term.lock() {
-                        *parser = vt100::Parser::new(p.last_rows, p.last_cols, app.history_limit);
+                        let mut fresh = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
+                        fresh.screen_mut().set_allow_alternate_screen(allow_alt);
+                        *parser = fresh;
                     }
                 }
             }

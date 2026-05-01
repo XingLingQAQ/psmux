@@ -217,6 +217,24 @@ impl Grid {
         }
     }
 
+    /// Append a row to the back of scrollback, evicting the oldest if
+    /// the cap is reached.  Used by the alt-screen-to-scrollback copy
+    /// path (psmux issue #88).  Honours `scrollback_len = 0` (no-op),
+    /// matching how the normal in-flow scrolling treats that case.
+    pub fn push_row_to_scrollback(&mut self, row: crate::row::Row) {
+        if self.scrollback_len == 0 {
+            return;
+        }
+        self.scrollback.push_back(row);
+        while self.scrollback.len() > self.scrollback_len {
+            self.scrollback.pop_front();
+        }
+        if self.scrollback_offset > 0 {
+            self.scrollback_offset =
+                self.scrollback.len().min(self.scrollback_offset + 1);
+        }
+    }
+
     pub fn write_contents(&self, contents: &mut String) {
         let mut wrapping = false;
         for row in self.visible_rows() {

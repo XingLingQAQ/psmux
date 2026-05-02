@@ -381,6 +381,27 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} -> PTY pipe SGR mouse (Windows Terminal method)",
             col, row, vt_button, press, win_name));
         write_mouse_to_pty(pane, col, row, vt_button, press);
+
+        // For wheel events, also inject a Win32 MOUSE_EVENT record.
+        //
+        // Some TUI frameworks (Bubble Tea / Go apps like opencode) enable
+        // VT input mode (ENABLE_VIRTUAL_TERMINAL_INPUT) for keyboard but
+        // read mouse events as MOUSE_EVENT records via ReadConsoleInput.
+        // When VTI is on, ConPTY passes the SGR mouse sequence through
+        // as KEY_EVENT text instead of converting to MOUSE_EVENT, so the
+        // app's ReadConsoleInput loop never sees a mouse event.
+        //
+        // The Win32 MOUSE_EVENT injection bypasses ConPTY entirely and
+        // delivers the event directly to the child's console input buffer.
+        //
+        // This is done only for wheel events (not click/drag/hover) to
+        // minimize risk of duplicate events for apps where ConPTY already
+        // converts SGR to MOUSE_EVENT (e.g. crossterm with VTI off).
+        // (fixes #277)
+        if _event_flags & mouse_inject::MOUSE_WHEELED != 0 {
+            mouse_log(&format!("  -> also injecting Win32 MOUSE_EVENT (wheel, fixes #277)"));
+            inject_mouse(pane, col, row, _button_state, _event_flags);
+        }
     }
 }
 
@@ -963,8 +984,17 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };
         let button_state = ((wheel_delta as i32) << 16) as u32;
+        // Use center of pane for coordinates — some TUI frameworks
+        // (Bubble Tea) may ignore events at position (0,0) if it's
+        // outside the scrollable viewport.
+        let pane_area = rects.iter()
+            .find(|(p, _)| *p == win.active_path)
+            .map(|(_, a)| *a);
+        let (col, row) = pane_area.map_or((5, 5), |a| {
+            ((a.width / 2) as i16, (a.height / 2) as i16)
+        });
         if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
-            inject_mouse_combined(pane, 0, 0, sgr_btn, true,
+            inject_mouse_combined(pane, col, row, sgr_btn, true,
                 button_state, mouse_inject::MOUSE_WHEELED, &win_name);
         }
     } else if up && app.scroll_enter_copy_mode {

@@ -3583,10 +3583,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         //   • 1-2 char clipboard pastes already flush as send-text in the
         //     20ms path — early flush produces identical behaviour.
         //   • Stage2 / paste_confirmed states block this path.
+        //
+        // When paste-detection is OFF, flush ALL pending chars immediately
+        // regardless of count.  This bypasses the 20ms/300ms staging that
+        // would otherwise wrap clipboard-injected characters in bracketed
+        // paste even though the user explicitly disabled paste detection.
         #[cfg(windows)]
         {
+            let flush_all = !paste_detection_enabled;
             if !paste_confirmed && !paste_stage2
-                && paste_pend.len() >= 1 && paste_pend.len() <= 2
+                && paste_pend.len() >= 1
+                && (paste_pend.len() <= 2 || flush_all)
             {
                 if input_log_enabled() {
                     input_log("paste", &format!(

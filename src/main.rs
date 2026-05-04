@@ -1819,7 +1819,9 @@ fn run_main() -> io::Result<()> {
                 if let Some(t) = target { cmd.push_str(&format!(" -t {}", t)); }
                 if print_to_stdout { cmd.push_str(" -p"); }
                 if let Some(d) = duration_ms { cmd.push_str(&format!(" -d {}", d)); }
-                cmd.push_str(&format!(" {}", msg));
+                // Quote the message to preserve literal whitespace (tabs etc)
+                // that would otherwise be split by the server's command parser.
+                cmd.push_str(&format!(" \"{}\"", msg.replace('"', "\\\"")));
                 cmd.push('\n');
                 if print_to_stdout {
                     let resp = send_control_with_response(cmd)?;
@@ -2195,8 +2197,8 @@ fn run_main() -> io::Result<()> {
                 }
                 return Ok(());
             }
-            // set-option / set - Set an option
-            "set-option" | "set" => {
+            // set-option / set / set-window-option / setw - Set an option
+            "set-option" | "set" | "set-window-option" | "setw" => {
                 let cmd_str: String = cmd_args.iter().map(|s| {
                     let s = s.as_str();
                     if s.contains(' ') {

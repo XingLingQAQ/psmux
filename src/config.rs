@@ -1009,9 +1009,29 @@ pub fn ensure_prefix_self_binding(app: &mut AppState) {
 /// Normalize a key tuple for binding comparison.
 /// Strips SHIFT from Char events since the character itself encodes shift information.
 /// e.g., '|' already implies Shift was pressed, so (Char('|'), SHIFT) and (Char('|'), NONE) should match.
+///
+/// On Windows, also strips Ctrl+Alt from non-lowercase-letter Char events.
+/// AltGr on Windows is reported as Ctrl+Alt, so characters produced via AltGr
+/// (e.g. `[` `]` `{` `}` `@` `\` `|` `~` on German/Czech keyboards) arrive
+/// as Char('[') with CONTROL|ALT modifiers.  Stripping those fake modifiers
+/// lets the binding lookup match the registered `[` binding (issue #287).
 pub fn normalize_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyModifiers) {
     match key.0 {
-        KeyCode::Char(_) => (key.0, key.1.difference(KeyModifiers::SHIFT)),
+        KeyCode::Char(c) => {
+            let mut mods = key.1.difference(KeyModifiers::SHIFT);
+            // On Windows, AltGr is reported as Ctrl+Alt.  Non-lowercase-letter
+            // chars with both Ctrl and Alt are AltGr-produced — strip the fake
+            // Ctrl+Alt so they match plain bindings like `[`, `]`, `@`, etc.
+            #[cfg(windows)]
+            if mods.contains(KeyModifiers::CONTROL)
+                && mods.contains(KeyModifiers::ALT)
+                && !c.is_ascii_lowercase()
+            {
+                mods = mods.difference(KeyModifiers::CONTROL);
+                mods = mods.difference(KeyModifiers::ALT);
+            }
+            (key.0, mods)
+        }
         _ => key,
     }
 }
@@ -1646,3 +1666,7 @@ mod tests_config_exhaustive;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue268_set_titles.rs"]
 mod tests_issue268_set_titles;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue287_german_keyboard.rs"]
+mod tests_issue287_german_keyboard;

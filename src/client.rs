@@ -2465,7 +2465,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             // Event::Paste AND per-char Event::Key for one
                             // Ctrl+V — this gates the duplicate Char inserts
                             // into the overlay buffers below.
-                            let paste_burst_active = paste_suppress_until.map_or(false, |t| Instant::now() < t);
+                            #[cfg(windows)]
+                            let paste_burst_active =
+                                paste_suppress_until.map_or(false, |t| Instant::now() < t);
+                            #[cfg(not(windows))]
+                            let paste_burst_active = false;
                             match key.code {
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
                                 KeyCode::Down if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }

@@ -1136,11 +1136,12 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_height" => {
             if let Some(p) = target_pane() { p.last_rows.to_string() } else { "24".into() }
         }
-        // Milliseconds since the last printable HUMAN keystroke into this pane;
-        // empty if none yet. Read-only signal for tools that need live
-        // human-typing detection (distinct from injected input / app output).
-        "pane_last_input" => {
-            match target_pane().and_then(|p| p.last_human_input) {
+        // Milliseconds since this pane last received printable text on the
+        // INTERACTIVE input route (handle_key); empty if none yet. The injected
+        // route (send-keys / send-paste / send-text) does NOT update it. A
+        // read-only route signal — consumers own any policy on top.
+        "pane_last_text_input" => {
+            match target_pane().and_then(|p| p.last_text_input) {
                 Some(t) => t.elapsed().as_millis().to_string(),
                 None => String::new(),
             }

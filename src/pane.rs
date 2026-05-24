@@ -17,17 +17,18 @@ use crate::format::hostname_cached;
 /// real terminal keeps its user-configured default cursor.
 pub const CURSOR_SHAPE_UNSET: u8 = 255;
 
-/// Send a preemptive cursor-position report (\x1b[1;1R) to the ConPTY input pipe.
+/// Originally sent a preemptive cursor-position report (\x1b[1;1R) to the
+/// ConPTY input pipe at spawn time.  Disabled in issue #313: the ConPTY is
+/// created with `PSEUDOCONSOLE_WIN32_INPUT_MODE` which expects input sequences
+/// ending with `_`, not `R`.  The raw VT response confused the Win32 input
+/// parser, leaving it in a half-state that consumed the first user keystroke
+/// and triggered a PSReadLine bell on every freshly-attached pane.
 ///
-/// Windows ConPTY sends a Device Status Report (\x1b[6n]) during initialization
-/// and **blocks** until the host responds with a cursor-position report.  In
-/// portable-pty ≤0.2 this was handled internally, but 0.9+ exposes raw handles
-/// and the host must respond.  Writing the response preemptively (before the
-/// reader thread even starts) is safe because the data sits in the pipe buffer
-/// and ConPTY reads it when ready.
-pub fn conpty_preemptive_dsr_response(writer: &mut dyn std::io::Write) {
-    let _ = writer.write_all(b"\x1b[1;1R");
-    let _ = writer.flush();
+/// CPR queries from ConPTY (ESC\[6n) are now handled reactively by
+/// `scan_cpr_query` + `drain_cpr_pending`, which respond with the correct
+/// cursor position on demand.
+pub fn conpty_preemptive_dsr_response(_writer: &mut dyn std::io::Write) {
+    // no-op: reactive CPR responder handles all ESC[6n queries (#313)
 }
 
 /// Cached resolved shell path to avoid repeated `which::which()` PATH scans.

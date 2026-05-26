@@ -252,6 +252,11 @@ if line.trim() == "PERSISTENT" {
     // receivers here; the writer thread waits for each response and
     // writes it to TCP in order.
     let mut ws_bg = write_stream.try_clone().unwrap();
+    // Prevent the writer from blocking indefinitely when the client's TCP
+    // receive buffer fills up (e.g. during a slow render). Without a write
+    // timeout, a full socket causes write() to block forever, silently
+    // freezing frame delivery. 5 s matches the command-response timeout.
+    let _ = ws_bg.set_write_timeout(Some(Duration::from_secs(5)));
     let (resp_tx, resp_rx) = mpsc::channel::<mpsc::Receiver<String>>();
 
     // Register a bounded frame channel for server-pushed frames (event-driven
@@ -266,7 +271,35 @@ if line.trim() == "PERSISTENT" {
     // by frame channel backpressure.
     let directive_rx = crate::types::register_directive_channel(client_id);
 
+    // Clone the write socket so the Guard can shut down the connection when
+    // the writer exits. shutdown(Both) on any clone affects the underlying
+    // socket, causing the client's reader thread to receive EOF and reconnect
+    // instead of hanging indefinitely with a frozen last frame.
+    //
+    // We use write_stream (not ws_bg) as the source so that even under fd
+    // pressure the clone chain stays shallow.  If the clone fails here we
+    // return early — the client immediately sees a closed connection and
+    // reconnects, which is far better than hanging with no shutdown signal.
+    let ws_shutdown = match write_stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
     std::thread::spawn(move || {
+        // Deregister the frame channel and shut down the TCP connection when
+        // this thread exits for any reason (write timeout, resp_rx disconnect,
+        // etc.). The shutdown causes the client's reader thread to see EOF,
+        // which triggers reconnect rather than leaving the client frozen.
+        struct Guard { client_id: u64, shutdown: std::net::TcpStream }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = self.shutdown.shutdown(std::net::Shutdown::Both);
+                crate::types::deregister_frame_channel(self.client_id);
+                crate::types::remove_directive_channel(self.client_id);
+                crate::types::deregister_persistent_stream(self.client_id);
+            }
+        }
+        let _guard = Guard { client_id, shutdown: ws_shutdown };
+
         loop {
             // 0. Check for queued directives (non-blocking) — these take priority
             while let Ok(directive) = directive_rx.try_recv() {
@@ -276,29 +309,50 @@ if line.trim() == "PERSISTENT" {
             // 1. Drain all pending command responses (non-blocking after first)
             match resp_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(rrx) => {
-                    if let Ok(text) = rrx.recv() {
-                        if write!(ws_bg, "{}\n", text).is_err() { break; }
-                        if ws_bg.flush().is_err() { break; }
-                    }
-                    while let Ok(rrx) = resp_rx.try_recv() {
-                        if let Ok(text) = rrx.recv() {
+                    // Use a timeout matching the TCP write timeout (5 s) so the
+                    // writer thread cannot block indefinitely if the command
+                    // handler is slow or panics without sending a response.
+                    // A timeout (or disconnected sender) is treated as fatal:
+                    // break so Guard::drop fires, the client receives EOF, and
+                    // reconnects cleanly rather than stalling on a silent drop.
+                    match rrx.recv_timeout(Duration::from_secs(5)) {
+                        Ok(text) => {
                             if write!(ws_bg, "{}\n", text).is_err() { return; }
                             if ws_bg.flush().is_err() { return; }
+                        }
+                        Err(_) => return,
+                    }
+                    while let Ok(rrx) = resp_rx.try_recv() {
+                        match rrx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(text) => {
+                                if write!(ws_bg, "{}\n", text).is_err() { return; }
+                                if ws_bg.flush().is_err() { return; }
+                            }
+                            Err(_) => return,
                         }
                     }
                     continue;
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            // 2. Drain all queued frames from the bounded channel
-            if let Ok(frame_rx) = frame_chan.rx.lock() {
-                while let Ok(text) = frame_rx.try_recv() {
-                    if write!(ws_bg, "{}\n", text).is_err() { return; }
-                    if ws_bg.flush().is_err() { return; }
+            // 2. Drain all queued frames from the bounded channel.
+            // Drain into a local buffer while holding rx.lock(), then drop
+            // the lock before writing to TCP. Holding rx.lock() across a
+            // blocking flush would deadlock push_frame() on the server loop.
+            let mut pending_frames: Vec<String> = Vec::new();
+            match frame_chan.rx.lock() {
+                Ok(frame_rx) => {
+                    while let Ok(text) = frame_rx.try_recv() {
+                        pending_frames.push(text);
+                    }
                 }
-            } else {
-                return;
+                Err(_) => return,
+            }
+            // rx.lock released here — TCP writes happen with no lock held
+            for text in &pending_frames {
+                if write!(ws_bg, "{}\n", text).is_err() { return; }
+                if ws_bg.flush().is_err() { return; }
             }
         }
     });

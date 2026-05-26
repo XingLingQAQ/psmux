@@ -266,11 +266,11 @@ pub fn resize_all_panes(app: &mut AppState) {
                     let inner_width = rect.width.max(crate::pane::MIN_PANE_DIM);
                     
                     if pane.last_rows != inner_height || pane.last_cols != inner_width {
-                        let _ = pane.master.resize(portable_pty::PtySize { 
-                            rows: inner_height, 
-                            cols: inner_width, 
-                            pixel_width: 0, 
-                            pixel_height: 0 
+                        let _ = pane.master.resize(portable_pty::PtySize {
+                            rows: inner_height,
+                            cols: inner_width,
+                            pixel_width: 0,
+                            pixel_height: 0
                         });
                         if let Ok(mut parser) = pane.term.lock() {
                             parser.screen_mut().set_size(inner_height, inner_width);

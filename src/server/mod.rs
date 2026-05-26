@@ -2352,6 +2352,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     crate::session::remove_session_id_file(&app.port_file_base());
+                    crate::types::send_directive_to_all_clients("DETACH");
+                    std::thread::sleep(Duration::from_millis(50));
                     crate::types::shutdown_persistent_streams();
                     // Kill all child processes using a single process snapshot
                     tree::kill_all_children_batch(&mut app.windows);
@@ -3354,7 +3356,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cid) = target_cid {
                         if kill_parent {
                             crate::types::send_directive_to_client(cid, "DETACH-KILL-PARENT");
-                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            std::thread::sleep(Duration::from_millis(50));
                         }
                         app.client_sizes.remove(&cid);
                         let was_present = app.client_registry.remove(&cid).is_some();
@@ -3388,7 +3390,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     if kill_parent && !targets.is_empty() {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(Duration::from_millis(50));
                     }
                     for (cid, tty) in &targets {
                         app.client_sizes.remove(cid);
@@ -3437,7 +3439,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     if kill_parent && !targets.is_empty() {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(Duration::from_millis(50));
                     }
                     for (cid, tty) in &targets {
                         app.client_sizes.remove(cid);
@@ -3670,6 +3672,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
+                    crate::types::send_directive_to_all_clients("DETACH");
+                    std::thread::sleep(Duration::from_millis(50));
                     crate::types::shutdown_persistent_streams();
                     // Kill all child processes using a single process snapshot
                     tree::kill_all_children_batch(&mut app.windows);
@@ -4763,6 +4767,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                 let _ = std::fs::remove_file(&regpath);
                 let _ = std::fs::remove_file(&keypath);
+                crate::types::send_directive_to_all_clients("DETACH");
+                std::thread::sleep(Duration::from_millis(50));
                 crate::types::shutdown_persistent_streams();
                 // Kill warm pane's child (process::exit skips Drop)
                 if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }

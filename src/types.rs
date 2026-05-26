@@ -1272,6 +1272,16 @@ pub fn register_persistent_stream(client_id: u64, stream: &std::net::TcpStream) 
     }
 }
 
+/// Remove a specific client's entry from PERSISTENT_STREAMS without shutting
+/// it down. Called by the writer-thread Guard on normal disconnect — the socket
+/// is already shut down via ws_shutdown at that point, so we only need to drop
+/// the dead clone from the Vec to prevent unbounded accumulation.
+pub fn deregister_persistent_stream(client_id: u64) {
+    if let Ok(mut v) = PERSISTENT_STREAMS.lock() {
+        v.retain(|(cid, _)| *cid != client_id);
+    }
+}
+
 /// Shut down all tracked persistent client streams so their readers get EOF.
 pub fn shutdown_persistent_streams() {
     if let Ok(mut v) = PERSISTENT_STREAMS.lock() {
@@ -1355,15 +1365,19 @@ pub fn push_frame(frame: &str) {
                     // Frames are full snapshots, not deltas. If the client is
                     // behind, stale queued frames should not block the newest
                     // corrective frame from reaching the terminal.
-                    let rx = match channel.rx.lock() {
-                        Ok(rx) => rx,
-                        Err(_) => return false,
-                    };
-                    loop {
-                        match rx.try_recv() {
-                            Ok(_) => {}
-                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
+                    //
+                    // Use try_lock, not lock: the writer thread holds rx.lock()
+                    // while it drains into its local buffer (before TCP writes).
+                    // Blocking here would deadlock the server's main loop.
+                    // If try_lock fails the writer is mid-drain; skip our drain
+                    // and try_send anyway — the writer will free space shortly.
+                    if let Ok(rx) = channel.rx.try_lock() {
+                        loop {
+                            match rx.try_recv() {
+                                Ok(_) => {}
+                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
+                            }
                         }
                     }
                     matches!(
@@ -1380,6 +1394,15 @@ pub fn push_frame(frame: &str) {
 /// Check if any persistent clients are registered for push.
 pub fn has_frame_receivers() -> bool {
     FRAME_PUSH_CHANNELS.lock().map_or(false, |v| !v.is_empty())
+}
+
+/// Remove the frame channel for a specific client. Called by the writer thread
+/// on exit so the server stops pushing to dead channels and has_frame_receivers()
+/// returns false when no live clients remain.
+pub fn deregister_frame_channel(client_id: u64) {
+    if let Ok(mut v) = FRAME_PUSH_CHANNELS.lock() {
+        v.retain(|(cid, _)| *cid != client_id);
+    }
 }
 
 /// Per-client directive channels (queued, not overwritten like frame slots).

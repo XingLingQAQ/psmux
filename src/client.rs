@@ -877,6 +877,78 @@ struct ClientDragState {
     total_pixels: u16,
 }
 
+/// Connect to the server, authenticate, enter persistent mode, spawn the reader
+/// thread, and return a (writer, frame_rx) pair ready for the event loop.
+/// Sets a 5-second write timeout so blocked writes never freeze the client.
+fn establish_connection(addr: &str, key: &str) -> io::Result<Connection> {
+    let stream = std::net::TcpStream::connect(addr)?;
+    stream.set_nodelay(true)?;
+    let mut writer = stream.try_clone()?;
+    writer.set_nodelay(true)?;
+    writer.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = BufReader::new(stream);
+
+    let _ = writer.write_all(format!("AUTH {}\n", key).as_bytes());
+    let _ = writer.flush();
+    let mut auth_line = String::new();
+    reader.read_line(&mut auth_line)?;
+    if !auth_line.trim().starts_with("OK") {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "auth failed"));
+    }
+
+    let _ = writer.write_all(b"PERSISTENT\n");
+    let _ = writer.write_all(b"client-attach\n");
+    let _ = writer.flush();
+
+    // 2-second read timeout keeps the thread from blocking forever on process exit.
+    let _ = reader.get_ref().set_read_timeout(Some(Duration::from_secs(2)));
+    let (frame_tx, frame_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = String::with_capacity(64 * 1024);
+        loop {
+            buf.clear();
+            loop {
+                match reader.read_line(&mut buf) {
+                    Ok(0) => return,
+                    Ok(_) => break,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Do NOT clear buf here. read_line appends to whatever is
+                        // already in buf, so a partial line from a previous
+                        // fill_buf call is preserved across timeouts. Clearing
+                        // would break the framing and corrupt the next message.
+                        continue;
+                    }
+                    Err(_) => return,
+                }
+            }
+            let line = std::mem::take(&mut buf);
+            buf = String::with_capacity(64 * 1024);
+            if frame_tx.send(line).is_err() { return; }
+        }
+    });
+
+    Ok((writer, frame_rx))
+}
+
+/// A live connection: write half + incoming-frame channel.
+type Connection = (std::net::TcpStream, std::sync::mpsc::Receiver<String>);
+
+/// Retry connecting up to 5 times: one immediate attempt, then up to 4 more
+/// with increasing backoff (500ms, 1s, 1.5s, 2s). Returns None if all fail.
+fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
+    for attempt in 0..5u64 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(attempt * 500));
+        }
+        if let Ok(result) = establish_connection(addr, key) {
+            return Some(result);
+        }
+    }
+    None
+}
+
 pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::PsmuxWriter>>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
@@ -891,60 +963,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     }
 
     // ── Open persistent TCP connection ───────────────────────────────────
-    let stream = std::net::TcpStream::connect(&addr)?;
-    stream.set_nodelay(true)?; // Disable Nagle's algorithm for low latency
-    let mut writer = stream.try_clone()?;
-    writer.set_nodelay(true)?;
-    let mut reader = BufReader::new(stream);
-
-    // AUTH handshake
-    let _ = writer.write_all(format!("AUTH {}\n", session_key).as_bytes());
-    let _ = writer.flush();
-    let mut auth_line = String::new();
-    reader.read_line(&mut auth_line)?;
-    if !auth_line.trim().starts_with("OK") {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "auth failed"));
-    }
-
-    // Enter persistent mode + attach
-    let _ = writer.write_all(b"PERSISTENT\n");
-    let _ = writer.write_all(b"client-attach\n");
-    let _ = writer.flush();
-
-    // Spawn a dedicated reader thread so the event loop never blocks on I/O.
-    // The reader thread reads lines from the server and sends them via channel.
-    // Use a 2-second read timeout so the thread unblocks periodically.
-    // Without this, process::exit(0) on the server side may not deliver a
-    // TCP RST promptly on Windows, leaving read_line() blocked forever and
-    // the client stuck after the last pane exits.
-    let _ = reader.get_ref().set_read_timeout(Some(std::time::Duration::from_secs(2)));
-    let (frame_tx, frame_rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut reader = reader;
-        let mut buf = String::with_capacity(64 * 1024);
-        loop {
-            buf.clear();
-            loop {
-                match reader.read_line(&mut buf) {
-                    Ok(0) => return, // EOF — server closed connection
-                    Ok(_) => break,  // Got a complete line, send it
-                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
-                        || e.kind() == std::io::ErrorKind::WouldBlock =>
-                    {
-                        // Timeout: buf may contain a partial line from a
-                        // previous fill_buf.  Do NOT clear it — read_line
-                        // will resume appending on the next call.  This
-                        // keeps the protocol stream intact.
-                        continue;
-                    }
-                    Err(_) => return, // Real error — connection died
-                }
-            }
-            let line = std::mem::take(&mut buf);
-            buf = String::with_capacity(64 * 1024);
-            if frame_tx.send(line).is_err() { return; }
-        }
-    });
+    let (mut writer, mut frame_rx) = establish_connection(&addr, &session_key)?;
+    // Pending background reconnect: Some(rx) while a reconnect thread is running.
+    // Kept as None in normal operation. When the channel yields Some(result),
+    // the result replaces writer/frame_rx; if it yields None all attempts failed.
+    let mut reconnect_pending: Option<std::sync::mpsc::Receiver<Option<Connection>>> = None;
 
     let mut quit = false;
     // detach-client -P: server sets this via DETACH-KILL-PARENT directive.
@@ -1468,6 +1491,29 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // actually changes (avoids resetting WT's blink timer every frame).
     let mut last_cursor_style: u8 = 255;
     loop {
+        // ── Poll background reconnect result (non-blocking) ──────────────────
+        // If a background reconnect thread has finished, apply its result here
+        // before any other step so the rest of the loop sees the fresh channels.
+        if let Some(ref rx) = reconnect_pending {
+            if let Ok(result) = rx.try_recv() {
+                reconnect_pending = None;
+                if let Some((new_writer, new_rx)) = result {
+                    if !quit {
+                        // Normal reconnect: apply fresh writer + frame channel.
+                        writer = new_writer;
+                        frame_rx = new_rx;
+                        force_dump = true;
+                        dump_in_flight = false;
+                    }
+                    // If quit is already set (user detached while reconnect was
+                    // in-flight), let new_writer drop here so the TcpStream
+                    // closes immediately — server-side Guard fires right away
+                    // rather than waiting for the 5 s write timeout.
+                } else {
+                    quit = true;
+                }
+            }
+        }
         // Expire stale key_send_instant after 30ms — ConPTY echo should
         // have arrived by then; stop force-dumping to save CPU.
         if let Some(ks) = key_send_instant {
@@ -1506,6 +1552,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             let _ = writer.flush();
                             quit = true;
                         }
+                    } else if line.trim() == "DETACH" {
+                        // Server-initiated clean shutdown (session ended, kill-session, etc.)
+                        // Set quit before the TCP connection closes so the Disconnected
+                        // handler does not spawn a reconnect thread.
+                        quit = true;
                     } else if line.trim() == "DETACH-KILL-PARENT" {
                         // detach-client -P: detach this client AND kill the
                         // parent shell on exit (tmux -P parity, issue #275).
@@ -1519,7 +1570,24 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => { quit = true; break; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // TCP connection dropped. If the server already removed its port
+                    // file (all clean-shutdown paths do this before calling
+                    // shutdown_persistent_streams), treat the disconnect as intentional
+                    // and quit immediately instead of burning 5 s of reconnect backoff.
+                    if !quit && !std::path::Path::new(&path).exists() {
+                        quit = true;
+                    } else if reconnect_pending.is_none() && !quit {
+                        let addr_c = addr.clone();
+                        let key_c = session_key.clone();
+                        let (rtx, rrx) = std::sync::mpsc::channel();
+                        reconnect_pending = Some(rrx);
+                        std::thread::spawn(move || {
+                            let _ = rtx.send(try_reconnect(&addr_c, &key_c));
+                        });
+                    }
+                    break;
+                }
             }
         }
         if quit && !got_frame { break; }

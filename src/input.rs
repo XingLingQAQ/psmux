@@ -1883,6 +1883,20 @@ pub(crate) fn is_text_input_key(key: &KeyEvent) -> bool {
     )
 }
 
+/// True when this key event represents plain Ctrl+C (or raw ETX / 0x03)
+/// without Alt modifiers. Used to keep interrupt behavior on Windows.
+pub(crate) fn is_ctrl_c_key_event(key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char(c) => {
+            (key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && c.eq_ignore_ascii_case(&'c'))
+                || (!key.modifiers.contains(KeyModifiers::ALT) && c == '\u{0003}')
+        }
+        _ => false,
+    }
+}
+
 /// Apply `f` to every pane that will RECEIVE the current interactive key --
 /// every non-dead pane under sync-input, else the active pane if alive -- so the
 /// route-signal timestamps match what's actually routed.
@@ -2001,6 +2015,7 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
         //   2. KeyCode::Char('\x0b') with NO modifiers (raw control byte)
         // We handle both variants here.
         if let KeyCode::Char(c) = key.code {
+            let is_ctrl_c = is_ctrl_c_key_event(&key);
             let (inject_char, is_ctrl_letter) = if key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT)
                 && c.is_ascii_alphabetic()
@@ -2022,25 +2037,29 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
 
                 if app.sync_input {
                     let win = &mut app.windows[app.active_idx];
-                    fn inject_ctrl_all(node: &mut Node, ch: char, raw: u8) {
+                    fn inject_ctrl_all(node: &mut Node, ch: char, raw: u8, is_ctrl_c: bool) {
                         match node {
                             Node::Leaf(p) if !p.dead => {
                                 let _ = p.writer.write_all(&[raw]);
                                 let _ = p.writer.flush();
                                 #[cfg(windows)]
                                 if let Some(pid) = p.child_pid {
-                                    crate::platform::mouse_inject::send_modified_key_event(pid, ch, true, false, false);
+                                    if is_ctrl_c {
+                                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                    } else {
+                                        crate::platform::mouse_inject::send_modified_key_event(pid, ch, true, false, false);
+                                    }
                                 }
                                 crate::debug_log::input_log("ctrl-key",
                                     &format!("sync inject_ctrl char='{}' pid={:?}", ch, p.child_pid));
                             }
                             Node::Leaf(_) => {}
                             Node::Split { children, .. } => {
-                                for child in children { inject_ctrl_all(child, ch, raw); }
+                                for child in children { inject_ctrl_all(child, ch, raw, is_ctrl_c); }
                             }
                         }
                     }
-                    inject_ctrl_all(&mut win.root, inject_char, ctrl_char);
+                    inject_ctrl_all(&mut win.root, inject_char, ctrl_char, is_ctrl_c);
                 } else {
                     let win = &mut app.windows[app.active_idx];
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
@@ -2049,7 +2068,11 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
                             let _ = active.writer.flush();
                             #[cfg(windows)]
                             if let Some(pid) = active.child_pid {
-                                crate::platform::mouse_inject::send_modified_key_event(pid, inject_char, true, false, false);
+                                if is_ctrl_c {
+                                    crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                } else {
+                                    crate::platform::mouse_inject::send_modified_key_event(pid, inject_char, true, false, false);
+                                }
                             }
                             crate::debug_log::input_log("ctrl-key",
                                 &format!("inject_ctrl char='{}' pid={:?}", inject_char, active.child_pid));
@@ -3261,7 +3284,11 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 #[cfg(windows)]
                 if c.is_ascii_alphabetic() {
                     if let Some(pid) = p.child_pid {
-                        crate::platform::mouse_inject::send_modified_key_event(pid, c, true, false, false);
+                        if c.eq_ignore_ascii_case(&'c') {
+                            crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                        } else {
+                            crate::platform::mouse_inject::send_modified_key_event(pid, c, true, false, false);
+                        }
                     }
                 }
             }

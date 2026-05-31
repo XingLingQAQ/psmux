@@ -40,3 +40,28 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+
+  test:
+    name: Test Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build x64 release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Run Rust input tests
+        run: 'cargo test --bin psmux -- "ctrl_c_key_event_"'
+
+      - name: Run PR smoke tests
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "target\x86_64-pc-windows-msvc\release\psmux.exe").Path
+          $env:PSMUX_EXE = $exe
+          .\tests\test_smoke_pr.ps1

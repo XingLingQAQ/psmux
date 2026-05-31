@@ -59,9 +59,9 @@ jobs:
       - name: Run Rust input tests
         run: cargo test --test test_input
 
-      - name: Run issue #338 Ctrl+C regression test
+      - name: Run PR smoke tests
         shell: pwsh
         run: |
           $exe = (Resolve-Path "target\release\psmux.exe").Path
           Set-Alias psmux $exe
-          .\tests\test_issue338_ctrlc_line_cancel.ps1
+          .\tests\test_smoke_pr.ps1

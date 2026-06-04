@@ -4885,6 +4885,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::commands::fire_hooks(&mut app, "pane-exited");
             }
             if app.exit_empty && all_empty {
+                warm_debug(&format!("EXIT_EMPTY firing for session '{}' (all panes empty/dead) -> removing port file + process::exit", app.session_name));
                 // Notify CC clients that the session is ending so iTerm2
                 // closes the native window cleanly (same path as KillServer).
                 if !app.control_clients.is_empty() {

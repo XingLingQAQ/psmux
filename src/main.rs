@@ -844,57 +844,75 @@ fn run_main() -> io::Result<()> {
                         "__warm__".to_string()
                     };
                     let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
-                    if std::path::Path::new(&warm_port_path).exists() {
-                        if let Ok(warm_port_str) = std::fs::read_to_string(&warm_port_path) {
-                            if let Ok(warm_port) = warm_port_str.trim().parse::<u16>() {
-                                let warm_addr = format!("127.0.0.1:{}", warm_port);
-                                if std::net::TcpStream::connect_timeout(
-                                    &warm_addr.parse().unwrap(),
-                                    Duration::from_millis(100),
-                                ).is_ok() {
-                                    let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
-                                    if !warm_key.is_empty() {
-                                        let client_cwd = std::env::current_dir()
-                                            .ok()
-                                            .and_then(|p| p.to_str().map(|s| s.to_string()));
-                                        let claim_cmd = if let Some(ref cwd) = client_cwd {
-                                            format!("claim-session {} {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd))
-                                        } else {
-                                            format!("claim-session {}\n", crate::util::quote_arg(&name))
-                                        };
-                                        match crate::session::send_auth_cmd_response(
-                                            &warm_addr, &warm_key,
-                                            claim_cmd.as_bytes(),
-                                        ) {
-                                            Ok(resp) if resp.contains("OK") => {
-                                                if let Some(ref wn) = window_name {
-                                                    let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                    // Atomically CLAIM the warm server before connecting. The
+                    // __warm__.port file is a shared handoff: under rapid
+                    // new-session, several clients could read the SAME file (and
+                    // OS ephemeral-port reuse can make a stale entry point at an
+                    // already-claimed server), which intermittently dropped a
+                    // session. Renaming the port file is atomic on the same dir,
+                    // so exactly one client wins the claim; losers cold-spawn.
+                    let warm_port_opt = std::fs::read_to_string(&warm_port_path)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u16>().ok());
+                    let claim_path = format!("{}\\.psmux\\{}.claiming.{}", home, warm_base, std::process::id());
+                    if let Some(warm_port) = warm_port_opt {
+                        if std::fs::rename(&warm_port_path, &claim_path).is_ok() {
+                            let warm_addr = format!("127.0.0.1:{}", warm_port);
+                            let result = if std::net::TcpStream::connect_timeout(
+                                &warm_addr.parse().unwrap(),
+                                Duration::from_millis(100),
+                            ).is_ok() {
+                                let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
+                                if !warm_key.is_empty() {
+                                    let client_cwd = std::env::current_dir()
+                                        .ok()
+                                        .and_then(|p| p.to_str().map(|s| s.to_string()));
+                                    let claim_cmd = if let Some(ref cwd) = client_cwd {
+                                        format!("claim-session {} {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd))
+                                    } else {
+                                        format!("claim-session {}\n", crate::util::quote_arg(&name))
+                                    };
+                                    match crate::session::send_auth_cmd_response(
+                                        &warm_addr, &warm_key,
+                                        claim_cmd.as_bytes(),
+                                    ) {
+                                        Ok(resp) if resp.contains("OK") => {
+                                            if let Some(ref wn) = window_name {
+                                                let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                let _ = crate::session::send_auth_cmd(
+                                                    &warm_addr, &new_key,
+                                                    format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
+                                                );
+                                            }
+                                            // Apply -e environment variables to the claimed warm session
+                                            if !env_vars.is_empty() {
+                                                let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                for (k, v) in &env_vars {
                                                     let _ = crate::session::send_auth_cmd(
                                                         &warm_addr, &new_key,
-                                                        format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
+                                                        format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
                                                     );
                                                 }
-                                                // Apply -e environment variables to the claimed warm session
-                                                if !env_vars.is_empty() {
-                                                    let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
-                                                    for (k, v) in &env_vars {
-                                                        let _ = crate::session::send_auth_cmd(
-                                                            &warm_addr, &new_key,
-                                                            format!("set-environment {} {}\n", crate::util::quote_arg(k), crate::util::quote_arg(v)).as_bytes(),
-                                                        );
-                                                    }
-                                                }
-                                                true
                                             }
-                                            _ => false,
+                                            true
                                         }
-                                    } else { false }
-                                } else {
-                                    let _ = std::fs::remove_file(&warm_port_path);
-                                    false
-                                }
-                            } else { false }
-                        } else { false }
+                                        _ => false,
+                                    }
+                                } else { false }
+                            } else {
+                                false
+                            };
+                            // The server writes <session>.port on a successful
+                            // claim; our renamed handoff file is now orphaned
+                            // either way, so remove it. On failure this also
+                            // ensures the dead/stale warm entry does not linger.
+                            let _ = std::fs::remove_file(&claim_path);
+                            result
+                        } else {
+                            // Lost the claim race (another client renamed it
+                            // first) or the file vanished — fall back to cold spawn.
+                            false
+                        }
                     } else { false }
                 } else { false };
 
@@ -3300,10 +3318,20 @@ fn run_main() -> io::Result<()> {
         };
         let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
         let mut warm_claimed = false;
-        if !warm_disabled && std::path::Path::new(&warm_port_path).exists() {
+        // Atomically CLAIM the warm server before connecting (see the detached
+        // path above for the full rationale): renaming the shared __warm__.port
+        // file is atomic, so exactly one concurrent new-session wins a given warm
+        // server and the rest cold-spawn. Prevents the rapid-creation race where
+        // two clients claim the same warm and one session is lost.
+        let warm_port_opt = if warm_disabled { None } else {
+            std::fs::read_to_string(&warm_port_path).ok().and_then(|s| s.trim().parse::<u16>().ok())
+        };
+        let warm_claim_path = format!("{}\\.psmux\\{}.claiming.{}", home, warm_base, std::process::id());
+        if let Some(port) = warm_port_opt {
+            if std::fs::rename(&warm_port_path, &warm_claim_path).is_ok() {
             let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
-            if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
-                if let Ok(port) = port_str.trim().parse::<u16>() {
+            {
+                {
                     let addr = format!("127.0.0.1:{}", port);
                     if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
                         &addr.parse().unwrap(),
@@ -3348,6 +3376,9 @@ fn run_main() -> io::Result<()> {
                     }
                 }
             }
+            }
+            // Orphaned handoff file: server wrote <session>.port on success.
+            let _ = std::fs::remove_file(&warm_claim_path);
         }
 
 

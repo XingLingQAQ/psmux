@@ -521,6 +521,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     app.control_port = Some(port);
+    warm_debug(&format!("server STARTUP: session='{}' bound port={}", app.session_name, port));
 
     // Write port and key files IMMEDIATELY after binding, BEFORE loading
     // config or creating windows.  run-shell scripts (e.g. PPM) need the
@@ -2518,8 +2519,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // claim so the CLI falls back to a cold-spawn, which is the
                     // reliable path. Only a genuine warm server may be claimed.
                     if app.session_name != "__warm__" {
+                        warm_debug(&format!("CLAIM REFUSED: this server is '{}' (port={:?}), requested name='{}'", app.session_name, app.control_port, name));
                         let _ = resp.send("ERR: not a warm server (already claimed)\n".to_string());
                     } else {
+                    warm_debug(&format!("CLAIM ACCEPT: __warm__ (port={:?}) -> '{}'", app.control_port, name));
                     // Same as RenameSession but with a synchronous response
                     // so the CLI knows the rename completed before attaching.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();

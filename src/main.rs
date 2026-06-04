@@ -896,10 +896,24 @@ fn run_main() -> io::Result<()> {
                                             }
                                             true
                                         }
-                                        _ => false,
+                                        // We have ALREADY atomically claimed this
+                                        // warm (won the .port rename) and sent
+                                        // claim-session to a live server, so it WILL
+                                        // become our session. A slow/missing response
+                                        // here must NOT trigger a cold spawn: doing so
+                                        // would create a SECOND server with the same
+                                        // name (duplicate -> desynced .port/.key ->
+                                        // the session appears lost). Commit to the
+                                        // claim; the post-claim port-wait below
+                                        // verifies completion (and errors cleanly if
+                                        // the warm somehow died mid-claim).
+                                        _ => true,
                                     }
                                 } else { false }
                             } else {
+                                // Connect failed: the warm is dead and will NOT become
+                                // our session, so a cold spawn is correct (no duplicate
+                                // is possible because nothing claimed this name).
                                 false
                             };
                             // The server writes <session>.port on a successful
@@ -3349,6 +3363,15 @@ fn run_main() -> io::Result<()> {
                             let _ = write!(stream, "claim-session {}\n", crate::util::quote_arg(&session_name));
                         }
                         let _ = stream.flush();
+                        // Committed: we atomically own this warm (won the .port
+                        // rename) and have sent claim-session, so it WILL become our
+                        // session. Set warm_claimed NOW so a slow/missing response
+                        // does not trigger a duplicate cold spawn (the duplicate was
+                        // the residual cause of rapid-creation session loss). The OK
+                        // read below still waits for the rename to finish (issue
+                        // #136), and the port-file wait after this block covers a
+                        // slow response.
+                        warm_claimed = true;
                         // Use send_auth_cmd_response pattern: read AUTH
                         // "OK" line first, then read the claim-session
                         // response.  Previously a single raw read() would
@@ -3397,14 +3420,17 @@ fn run_main() -> io::Result<()> {
                 cmd.stderr(std::process::Stdio::null());
                 let _child = cmd.spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to spawn server: {e}")))?;
             }
+        }
 
-            // Wait for server to start (fast polling — port file is written early)
-            for _ in 0..500 {
-                if std::path::Path::new(&port_path).exists() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+        // Wait for the session's port file before attaching. This covers BOTH the
+        // cold spawn (server writes it on startup) AND a committed warm claim whose
+        // rename of __warm__.port -> <session>.port may still be completing — so the
+        // attach never races ahead of the rename (issue #136).
+        for _ in 0..500 {
+            if std::path::Path::new(&port_path).exists() {
+                break;
             }
+            std::thread::sleep(Duration::from_millis(10));
         }
 
         // Now attach to the session

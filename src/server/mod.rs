@@ -109,6 +109,28 @@ fn ensure_session_registry_files(home: &str, app: &AppState) {
     }
 }
 
+/// Diagnostic-only logging for warm-server lifecycle races. Gated behind
+/// PSMUX_WARM_DEBUG=1 so it is a no-op in normal operation and tests. Writes to
+/// %TEMP%\psmux_warm_debug.log (never inside the repo).
+fn warm_debug(msg: &str) {
+    if std::env::var("PSMUX_WARM_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        let tmp = env::var("TEMP")
+            .or_else(|_| env::var("TMP"))
+            .unwrap_or_else(|_| ".".to_string());
+        let path = format!("{}\\psmux_warm_debug.log", tmp);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(
+                &mut f,
+                format!("[{} pid={}] {}\n", ts, std::process::id(), msg).as_bytes(),
+            );
+        }
+    }
+}
+
 /// Check if the active pane is currently squelched (hiding injected cd+cls).
 /// Uses the non-consuming `squelch_cleared()` so the layout serialiser can
 /// still properly consume the sentinel via `take_squelch_cleared()`.
@@ -144,6 +166,7 @@ fn spawn_warm_server(app: &AppState) {
         "__warm__".to_string()
     };
     let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+    warm_debug(&format!("spawn_warm_server entry base={} port_exists={}", warm_base, std::path::Path::new(&warm_port_path).exists()));
     if std::path::Path::new(&warm_port_path).exists() {
         // Check if it's actually alive
         if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
@@ -153,15 +176,18 @@ fn spawn_warm_server(app: &AppState) {
                     &addr.parse().unwrap(),
                     Duration::from_millis(100),
                 ).is_ok() {
+                    warm_debug("early-return: existing warm alive");
                     return; // warm server already running
                 }
             }
         }
         // Stale port file — remove it (and matching key file)
+        warm_debug("removing STALE warm port/key (existed but connect failed)");
         let _ = std::fs::remove_file(&warm_port_path);
         let warm_key_path = format!("{}\\.psmux\\{}.key", home, warm_base);
         let _ = std::fs::remove_file(&warm_key_path);
     }
+    warm_debug("SPAWNING new warm server");
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
     let mut args: Vec<String> = vec!["server".into(), "-s".into(), "__warm__".into()];
     if let Some(ref sn) = app.socket_name {
@@ -854,6 +880,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = wp.writer.flush();
                     }
                 }
+                // Also answer CPR queries for an active popup PTY pane. Like the
+                // warm pane it is not in any window tree, but an interactive popup
+                // shell (PSReadLine / fzf) blocks on the ESC[6n response and would
+                // otherwise render blank forever (#351).
+                if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
+                    if pane.cpr_pending.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                        let (r, c) = pane.term.lock()
+                            .map(|g| g.screen().cursor_position())
+                            .unwrap_or((0, 0));
+                        let response = format!("\x1b[{};{}R", r + 1, c + 1);
+                        use std::io::Write as _;
+                        let _ = pane.writer.write_all(response.as_bytes());
+                        let _ = pane.writer.flush();
+                    }
+                }
             }
         }
         // When a popup PTY is active, always push frames so interactive
@@ -1018,7 +1059,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Hide warm pane when explicit start_dir is given (wrong CWD)
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
                     if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref()) {
-                        let _ = resp.send(format!("psmux: split-window: {e}"));
+                        let msg = format!("split-window: {e}");
+                        app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                        let _ = resp.send(format!("psmux: {msg}"));
                     } else {
                         let _ = resp.send(String::new());
                     }
@@ -1082,6 +1125,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let prev_path = app.windows[app.active_idx].active_path.clone();
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
                     if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref()) {
+                        app.status_message = Some((format!("split-window: {e}"), std::time::Instant::now(), None));
                         eprintln!("psmux: split-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
@@ -2460,6 +2504,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("after-rename-session");
                 }
                 CtrlReq::ClaimSession(name, client_cwd, resp) => {
+                    // Guard against clobbering an already-claimed session. Under
+                    // rapid `new-session`, a stale __warm__.port (or OS ephemeral
+                    // port reuse) can route a claim to a server that has ALREADY
+                    // been claimed — its session_name is no longer "__warm__".
+                    // Renaming it again would rename the live session away and
+                    // destroy it (observed as rapid new-session intermittently
+                    // losing 1-4 of N sessions ~2s after creation). Refuse the
+                    // claim so the CLI falls back to a cold-spawn, which is the
+                    // reliable path. Only a genuine warm server may be claimed.
+                    if app.session_name != "__warm__" {
+                        let _ = resp.send("ERR: not a warm server (already claimed)\n".to_string());
+                    } else {
                     // Same as RenameSession but with a synchronous response
                     // so the CLI knows the rename completed before attaching.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
@@ -2560,6 +2616,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Spawn a replacement warm server for the NEXT new-session
                     spawn_warm_server(&app);
                     hook_event = Some("after-rename-session");
+                    }
                 }
                 CtrlReq::SwapPane(dir) => {
                     // tmux: swap-pane without -Z permanently unzooms (#82)
@@ -3814,8 +3871,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { let _ = env::set_current_dir(dir); }
-                    // Spawn popup as a real Pane via the popup module. Empty
-                    // commands launch the default interactive shell.
+                    // Spawn the popup as a real PTY-backed Pane. An EMPTY command
+                    // means "run an interactive shell" (tmux parity, issue #351):
+                    // create_popup_pane() launches the shell as a REPL in that case.
                     let inner_h = height.saturating_sub(2);
                     let inner_w = width.saturating_sub(2);
                     let pane_result = crate::popup::create_popup_pane(
@@ -3829,16 +3887,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     );
                     if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
 
-                    app.mode = Mode::PopupMode {
-                        command: command.clone(),
-                        output: String::new(),
-                        process: None,
-                        width,
-                        height,
-                        close_on_exit,
-                        popup_pane: pane_result,
-                        scroll_offset: 0,
-                    };
+                    if pane_result.is_some() {
+                        app.mode = Mode::PopupMode {
+                            command: command.clone(),
+                            output: String::new(),
+                            process: None,
+                            width,
+                            height,
+                            close_on_exit,
+                            popup_pane: pane_result,
+                            scroll_offset: 0,
+                        };
+                    } else {
+                        // PTY spawn failed — fall back to a static, closable popup
+                        // so the user is never stuck with a blank, unresponsive box.
+                        app.mode = Mode::PopupMode {
+                            command: command.clone(),
+                            output: "Failed to start popup shell. Press 'q' or Escape to close\n".to_string(),
+                            process: None,
+                            width,
+                            height,
+                            close_on_exit: true,
+                            popup_pane: None,
+                            scroll_offset: 0,
+                        };
+                    }
                     state_dirty = true;
                 }
                 CtrlReq::ConfirmBefore(prompt, cmd) => {

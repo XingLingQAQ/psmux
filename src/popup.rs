@@ -16,6 +16,19 @@ use std::sync::{Arc, Mutex};
 use crate::layout::serialize_screen_rows;
 use crate::types::{Pane, AppState, Mode};
 
+/// Diagnostic-only popup logging, gated by PSMUX_POPUP_DEBUG=1 (no-op otherwise).
+/// Writes to %TEMP%\psmux_popup_debug.log (never inside the repo).
+fn popup_debug(msg: &str) {
+    if std::env::var("PSMUX_POPUP_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        let tmp = std::env::var("TEMP").or_else(|_| std::env::var("TMP")).unwrap_or_else(|_| ".".to_string());
+        let path = format!("{}\\psmux_popup_debug.log", tmp);
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(&mut f, format!("[{} pid={}] {}\n", ts, std::process::id(), msg).as_bytes());
+        }
+    }
+}
+
 // ── Popup pane creation ─────────────────────────────────────────────
 
 /// Spawn a PTY-backed `Pane` for use inside a popup overlay.
@@ -64,45 +77,65 @@ pub fn create_popup_pane(
     cmd_builder.env("COLORTERM", "truecolor");
     cmd_builder.env("PSMUX_SESSION", session_name);
     crate::pane::apply_user_environment(&mut cmd_builder, environment);
+    // NOTE: the interactive-shell-for-empty-command behavior (tmux parity, #351)
+    // is handled above where cmd_builder is constructed: an empty command uses
+    // build_command(None, true, false) to launch the default shell as a REPL.
+    // The remaining half of the #351 fix (answering ESC[6n so PSReadLine renders)
+    // is the shared spawn_reader_thread + cpr_pending wiring below.
 
     let child = pair.slave.spawn_command(cmd_builder).ok()?;
+    popup_debug(&format!("create_popup_pane: spawned child for command=[{}] rows={} cols={}", command, rows, cols));
     drop(pair.slave); // required for ConPTY
 
     let term: Arc<Mutex<vt100::Parser>> =
         Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
     let term_reader = term.clone();
 
-    // Reader thread (same as regular pane reader)
-    if let Ok(mut reader) = pair.master.try_clone_reader() {
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match std::io::Read::read(&mut reader, &mut buf) {
-                    Ok(n) if n > 0 => {
-                        if let Ok(mut p) = term_reader.lock() {
-                            p.process(&buf[..n]);
-                        }
-                    }
-                    _ => break,
-                }
-            }
-        });
-    }
-
-    let mut pty_writer = pair.master.take_writer().ok()?;
-    crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);
-
-    // Brief delay so the reader thread processes initial output before the
-    // first frame is serialized to clients.
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    let epoch = std::time::Instant::now() - std::time::Duration::from_secs(2);
+    // Shared signal Arcs. Using the SAME reader thread as regular panes is what
+    // makes interactive popups work: spawn_reader_thread scans for ESC[6n (CPR)
+    // queries and raises cpr_pending / CPR_DATA_PENDING so the server can answer
+    // them. Without that, PSReadLine (and fzf, etc.) block forever on startup
+    // waiting for the cursor-position report and the popup renders blank (#351).
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
         crate::pane::CURSOR_SHAPE_UNSET,
     ));
     let bell_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cpr_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+    match pair.master.try_clone_reader() {
+        Ok(reader) => {
+            crate::pane::spawn_reader_thread(
+                reader,
+                term_reader,
+                data_version.clone(),
+                cursor_shape.clone(),
+                bell_pending.clone(),
+                cpr_pending.clone(),
+                output_ring.clone(),
+            );
+        }
+        Err(e) => {
+            popup_debug(&format!("popup reader: try_clone_reader FAILED: {}", e));
+        }
+    }
+
+    let pty_writer = pair.master.take_writer().ok()?;
+
+    // Brief delay so the reader thread processes initial output before the
+    // first frame is serialized to clients.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    if std::env::var("PSMUX_POPUP_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        if let Ok(p) = term.lock() {
+            let contents = p.screen().contents();
+            let preview: String = contents.chars().take(120).collect();
+            popup_debug(&format!("post-50ms screen contents len={} preview=[{}]", contents.len(), preview.replace('\n', "\\n")));
+        }
+    }
+
+    let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    let epoch = std::time::Instant::now() - std::time::Duration::from_secs(2);
 
     Some(Pane {
         master: pair.master,
@@ -126,15 +159,13 @@ pub fn create_popup_pane(
         mouse_input_cache: None,
         cursor_shape,
         bell_pending,
-        // cpr_pending is intentionally unused for popups: the popup spawns its
-        // own inline reader thread (see lines ~71-85 of this file) that never
-        // calls scan_cpr_query.  Popups are not expected to run interactive
-        // shells, so CPR detection is not wired up here.
-        cpr_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        // cpr_pending is now driven by the shared spawn_reader_thread above, so
+        // the server can answer ESC[6n queries for interactive popup shells (#351).
+        cpr_pending,
         copy_state: None,
         pane_style: None,
         squelch_until: None,
-        output_ring: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        output_ring,
     })
 }
 

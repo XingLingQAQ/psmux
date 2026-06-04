@@ -26,8 +26,14 @@ function Write-Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red;   $scri
 # Run a psmux command in the rbArg namespace. Returns the joined string output;
 # sets $script:LastExit to the exit code.
 function Invoke-Psmux {
-    param([Parameter(ValueFromRemainingArguments = $true)] $Args)
-    $out = & psmux -L rbArg @Args 2>&1
+    # NOTE: use the automatic $args, NOT a [Parameter(ValueFromRemainingArguments)]
+    # param. The latter turns this into an advanced function whose common
+    # parameters (-ProgressAction, -PipelineVariable, ...) SWALLOW a leading -p
+    # (e.g. `display-message -p`), failing with "parameter name 'p' is ambiguous"
+    # BEFORE psmux is ever invoked. That left $script:LastExit stale at 0 and made
+    # display-message -p cases spuriously look like "exit 0". The plain $args form
+    # passes every flag through verbatim.
+    $out = & psmux -L rbArg @args 2>&1
     $script:LastExit = $LASTEXITCODE
     if ($null -eq $out) { return "" }
     return ($out | Out-String)

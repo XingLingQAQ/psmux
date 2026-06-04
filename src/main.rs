@@ -81,6 +81,82 @@ fn color_to_ansi(c: ratatui::style::Color, fg: bool) -> String {
     }
 }
 
+/// Returns Some(true) if the window spec (index or name) exists in the target
+/// server, Some(false) if it definitively does not, or None if the server could
+/// not be queried (in which case the caller should NOT block the command).
+/// Routing uses the already-set PSMUX_TARGET_SESSION (from the global -t parse).
+fn cli_window_exists(window_spec: &str) -> Option<bool> {
+    // Clear PSMUX_TARGET_FULL for the query: it holds the (possibly bad) target
+    // window we are validating, which would otherwise scope list-windows to that
+    // nonexistent window and return nothing. We want ALL windows of the session.
+    let saved_full = std::env::var("PSMUX_TARGET_FULL").ok();
+    std::env::remove_var("PSMUX_TARGET_FULL");
+    let resp = crate::session::send_control_with_response(
+        "list-windows -F #{window_index}|#{window_name}\n".to_string(),
+    );
+    if let Some(v) = saved_full { std::env::set_var("PSMUX_TARGET_FULL", v); }
+    let resp = resp.ok()?;
+    let mut any = false;
+    for line in resp.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "OK" { continue; }
+        let mut parts = line.splitn(2, '|');
+        let idx = parts.next().unwrap_or("").trim();
+        let name = parts.next().unwrap_or("").trim();
+        // Only count lines that actually look like "<index>|<name>".
+        if idx.parse::<usize>().is_ok() {
+            any = true;
+            if idx == window_spec || name == window_spec { return Some(true); }
+        }
+    }
+    if any { Some(false) } else { None }
+}
+
+/// Returns Some(true)/Some(false) for whether a "%<id>" pane id exists anywhere in
+/// the target server, or None if it could not be queried. Uses `list-panes -a`
+/// because pane ids are globally unique across windows (a pane index is not, so we
+/// only validate the unambiguous %id form to avoid false negatives).
+fn cli_pane_id_exists(pane_id: &str) -> Option<bool> {
+    let saved_full = std::env::var("PSMUX_TARGET_FULL").ok();
+    std::env::remove_var("PSMUX_TARGET_FULL");
+    let resp = crate::session::send_control_with_response(
+        "list-panes -a -F #{pane_id}\n".to_string(),
+    );
+    if let Some(v) = saved_full { std::env::set_var("PSMUX_TARGET_FULL", v); }
+    let resp = resp.ok()?;
+    let mut any = false;
+    for line in resp.lines() {
+        let line = line.trim();
+        if !line.starts_with('%') { continue; }
+        any = true;
+        if line == pane_id { return Some(true); }
+    }
+    if any { Some(false) } else { None }
+}
+
+/// Returns Some(true)/Some(false) for whether a pane index exists in the ACTIVE
+/// window of the target session, or None if it could not be queried. Used for the
+/// "<session>.<index>" target form (no explicit window), which refers to the active
+/// window. PSMUX_TARGET_FULL is cleared so the query is not scoped to the (possibly
+/// nonexistent) target pane.
+fn cli_pane_index_exists(idx_spec: &str) -> Option<bool> {
+    let saved_full = std::env::var("PSMUX_TARGET_FULL").ok();
+    std::env::remove_var("PSMUX_TARGET_FULL");
+    let resp = crate::session::send_control_with_response(
+        "list-panes -F #{pane_index}\n".to_string(),
+    );
+    if let Some(v) = saved_full { std::env::set_var("PSMUX_TARGET_FULL", v); }
+    let resp = resp.ok()?;
+    let mut any = false;
+    for line in resp.lines() {
+        let line = line.trim();
+        if line.parse::<usize>().is_err() { continue; }
+        any = true;
+        if line == idx_spec { return Some(true); }
+    }
+    if any { Some(false) } else { None }
+}
+
 fn main() {
     if let Err(e) = run_main() {
         // Print a user-friendly error message instead of Rust's Debug format
@@ -1379,6 +1455,31 @@ fn run_main() -> io::Result<()> {
                     }
                     i += 1;
                 }
+                // tmux parity: error when a pane target does not exist. The global
+                // -t parse stores the target in PSMUX_TARGET_FULL.
+                if let Ok(full) = std::env::var("PSMUX_TARGET_FULL") {
+                    if full.starts_with('%') {
+                        // "%<id>" pane id: globally unique, validate across all panes.
+                        if cli_pane_id_exists(&full) == Some(false) {
+                            eprintln!("psmux: can't find pane: {}", full);
+                            std::process::exit(1);
+                        }
+                    } else if !full.contains(':') {
+                        // "<session>.<index>" form (no window): the pane index refers
+                        // to the active window. Validate only a purely-numeric index
+                        // so session names that merely contain a dot are not blocked.
+                        if let Some(dot) = full.rfind('.') {
+                            let pane_part = &full[dot + 1..];
+                            if !pane_part.is_empty()
+                                && pane_part.chars().all(|c| c.is_ascii_digit())
+                                && cli_pane_index_exists(pane_part) == Some(false)
+                            {
+                                eprintln!("psmux: can't find pane: {}", full);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
@@ -1401,6 +1502,22 @@ fn run_main() -> io::Result<()> {
                         _ => {}
                     }
                     i += 1;
+                }
+                // tmux parity: error (nonzero exit) when an explicit window target
+                // does not exist, instead of silently doing nothing. Only validated
+                // when the target contains ':' (an unambiguous window specifier), so
+                // valid `select-window -t <session>` calls are never blocked.
+                // The global -t parse moves the target into PSMUX_TARGET_FULL (and
+                // strips it from cmd_args), so read the window specifier from there.
+                if let Ok(full) = std::env::var("PSMUX_TARGET_FULL") {
+                    if let Some(ci) = full.find(':') {
+                        let win_part = &full[ci + 1..];
+                        let window_spec = win_part.split('.').next().unwrap_or(win_part);
+                        if !window_spec.is_empty() && cli_window_exists(window_spec) == Some(false) {
+                            eprintln!("psmux: can't find window: {}", window_spec);
+                            std::process::exit(1);
+                        }
+                    }
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
@@ -2087,6 +2204,15 @@ fn run_main() -> io::Result<()> {
             }
             // display-message - Display a message
             "display-message" | "display" => {
+                // A target containing "::" is always malformed (a valid target is
+                // session:window.pane with single colons), so reject it with a
+                // nonzero exit rather than silently resolving to the active session.
+                if let Ok(full) = std::env::var("PSMUX_TARGET_FULL") {
+                    if full.contains("::") {
+                        eprintln!("psmux: bad target: {}", full);
+                        std::process::exit(1);
+                    }
+                }
                 let mut message: Vec<String> = Vec::new();
                 let mut target: Option<String> = None;
                 let mut print_to_stdout = false;

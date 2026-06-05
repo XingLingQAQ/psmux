@@ -129,6 +129,51 @@ fn modified_enter_not_buffered_for_paste() {
     ));
 }
 
+#[cfg(windows)]
+#[test]
+fn non_control_key_not_buffered_even_when_paste_pending() {
+    assert!(!should_buffer_leading_paste_control(
+        &KeyCode::Backspace,
+        KeyModifiers::empty(),
+        true,
+        true,
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn leading_enter_waits_past_zero_latency_flush_when_detection_on() {
+    assert!(!should_zero_latency_flush_paste_pend("\n", true, false, false));
+}
+
+#[cfg(windows)]
+#[test]
+fn leading_tab_waits_past_zero_latency_flush_when_detection_on() {
+    assert!(!should_zero_latency_flush_paste_pend("\t", true, false, false));
+}
+
+#[cfg(windows)]
+#[test]
+fn leading_control_flushes_immediately_when_detection_off() {
+    assert!(should_zero_latency_flush_paste_pend("\n", false, false, false));
+    assert!(should_zero_latency_flush_paste_pend("\t", false, false, false));
+}
+
+#[cfg(windows)]
+#[test]
+fn normal_short_typing_still_flushes_immediately() {
+    assert!(should_zero_latency_flush_paste_pend("a", true, false, false));
+    assert!(should_zero_latency_flush_paste_pend("ab", true, false, false));
+}
+
+#[cfg(windows)]
+#[test]
+fn paste_states_do_not_zero_latency_flush() {
+    assert!(!should_zero_latency_flush_paste_pend("a", true, true, false));
+    assert!(!should_zero_latency_flush_paste_pend("a", true, false, true));
+    assert!(!should_zero_latency_flush_paste_pend("abc", true, false, false));
+}
+
 // ── Issue #164: status-format[] must parse inline styles end-to-end ──
 
 /// Verify that status_format strings from JSON deserialization flow through

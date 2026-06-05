@@ -3936,11 +3936,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // paste even though the user explicitly disabled paste detection.
         #[cfg(windows)]
         {
-            let flush_all = !paste_detection_enabled;
-            if !paste_confirmed && !paste_stage2
-                && paste_pend.len() >= 1
-                && (paste_pend.len() <= 2 || flush_all)
-            {
+            if should_zero_latency_flush_paste_pend(
+                &paste_pend,
+                paste_detection_enabled,
+                paste_confirmed,
+                paste_stage2,
+            ) {
                 if input_log_enabled() {
                     input_log("paste", &format!(
                         "zero-latency flush {} char(s) as typing",
@@ -5740,13 +5741,35 @@ fn should_buffer_leading_paste_control(
     paste_detection_enabled: bool,
     paste_pend_non_empty: bool,
 ) -> bool {
+    if !matches!(code, KeyCode::Enter | KeyCode::Tab) {
+        return false;
+    }
     if paste_pend_non_empty {
         return true;
     }
     if !paste_detection_enabled || !modifiers.is_empty() {
         return false;
     }
-    matches!(code, KeyCode::Enter | KeyCode::Tab)
+    true
+}
+
+#[cfg(windows)]
+fn should_zero_latency_flush_paste_pend(
+    paste_pend: &str,
+    paste_detection_enabled: bool,
+    paste_confirmed: bool,
+    paste_stage2: bool,
+) -> bool {
+    if paste_confirmed || paste_stage2 || paste_pend.is_empty() {
+        return false;
+    }
+    if !paste_detection_enabled {
+        return true;
+    }
+    if paste_pend.starts_with('\n') || paste_pend.starts_with('\t') {
+        return false;
+    }
+    paste_pend.len() <= 2
 }
 
 /// Returns true if the buffer contains any non-ASCII characters (IME / CJK input).

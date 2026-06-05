@@ -3328,8 +3328,21 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Enter => {
                                     #[cfg(windows)]
                                     {
-                                        if !paste_pend.is_empty() {
+                                        // If paste detection is enabled, treat plain Enter as
+                                        // bufferable even when it's the first key in the burst.
+                                        // This prevents a leading pasted newline from being
+                                        // forwarded as an immediate submit before the rest of
+                                        // the clipboard payload arrives.
+                                        if should_buffer_leading_paste_control(
+                                            &key.code,
+                                            key.modifiers,
+                                            paste_detection_enabled,
+                                            !paste_pend.is_empty(),
+                                        ) {
                                             paste_pend.push('\n');
+                                            if paste_pend_start.is_none() {
+                                                paste_pend_start = Some(Instant::now());
+                                            }
                                         } else {
                                             cmd_batch.push(format!("send-key {}\n", modified_key_name("Enter", key.modifiers)));
                                         }
@@ -3340,8 +3353,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Tab => {
                                     #[cfg(windows)]
                                     {
-                                        if !paste_pend.is_empty() {
+                                        if should_buffer_leading_paste_control(
+                                            &key.code,
+                                            key.modifiers,
+                                            paste_detection_enabled,
+                                            !paste_pend.is_empty(),
+                                        ) {
                                             paste_pend.push('\t');
+                                            if paste_pend_start.is_none() {
+                                                paste_pend_start = Some(Instant::now());
+                                            }
                                         } else {
                                             cmd_batch.push("send-key tab\n".into());
                                         }
@@ -5710,6 +5731,22 @@ fn flush_paste_pend_as_text(
     paste_pend.clear();
     *paste_pend_start = None;
     *paste_stage2 = false;
+}
+
+#[cfg(windows)]
+fn should_buffer_leading_paste_control(
+    code: &KeyCode,
+    modifiers: KeyModifiers,
+    paste_detection_enabled: bool,
+    paste_pend_non_empty: bool,
+) -> bool {
+    if paste_pend_non_empty {
+        return true;
+    }
+    if !paste_detection_enabled || !modifiers.is_empty() {
+        return false;
+    }
+    matches!(code, KeyCode::Enter | KeyCode::Tab)
 }
 
 /// Returns true if the buffer contains any non-ASCII characters (IME / CJK input).

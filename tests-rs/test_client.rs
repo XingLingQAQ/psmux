@@ -85,6 +85,50 @@ fn flush_paste_pend_short_ascii_sends_as_text() {
     assert!(cmds[1].starts_with("send-text "));
 }
 
+#[cfg(windows)]
+#[test]
+fn leading_plain_enter_is_buffered_when_paste_detection_on() {
+    assert!(should_buffer_leading_paste_control(
+        &KeyCode::Enter,
+        KeyModifiers::empty(),
+        true,
+        false,
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn leading_plain_tab_is_buffered_when_paste_detection_on() {
+    assert!(should_buffer_leading_paste_control(
+        &KeyCode::Tab,
+        KeyModifiers::empty(),
+        true,
+        false,
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn leading_enter_not_buffered_when_detection_off() {
+    assert!(!should_buffer_leading_paste_control(
+        &KeyCode::Enter,
+        KeyModifiers::empty(),
+        false,
+        false,
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn modified_enter_not_buffered_for_paste() {
+    assert!(!should_buffer_leading_paste_control(
+        &KeyCode::Enter,
+        KeyModifiers::SHIFT,
+        true,
+        false,
+    ));
+}
+
 // ── Issue #164: status-format[] must parse inline styles end-to-end ──
 
 /// Verify that status_format strings from JSON deserialization flow through

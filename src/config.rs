@@ -22,25 +22,62 @@ fn set_current_config_file(path: &str) {
 
 /// Quick scan of the config file to check if `set -g warm off` is present.
 /// Used by the client side before attempting warm server claim.
-pub fn is_warm_disabled_by_config() -> bool {
-    let content = if let Ok(config_file) = env::var("PSMUX_CONFIG_FILE") {
+/// Read the user's effective config file content: the PSMUX_CONFIG_FILE override
+/// (with ~ expansion) if set, otherwise the first existing file in the default
+/// search path.  Shared by the lightweight, server-less config probes that run
+/// in the CLI before any server exists.
+pub fn read_user_config_content() -> Option<String> {
+    // Strip a leading UTF-8 BOM (Notepad / PowerShell Set-Content -Encoding UTF8
+    // on Windows prepend EF BB BF) so first-line directives are recognised,
+    // matching parse_config_content().
+    let strip_bom = |s: String| s.strip_prefix('\u{FEFF}').map(str::to_string).unwrap_or(s);
+    if let Ok(config_file) = env::var("PSMUX_CONFIG_FILE") {
         let expanded = if config_file.starts_with('~') {
             let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
             config_file.replacen('~', &home, 1)
         } else {
             config_file
         };
-        std::fs::read_to_string(expanded).ok()
-    } else {
-        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-        let paths = [
-            format!("{}/.psmux.conf", home),
-            format!("{}/.psmuxrc", home),
-            format!("{}/.tmux.conf", home),
-            format!("{}/.config/psmux/psmux.conf", home),
-        ];
-        paths.iter().find_map(|p| std::fs::read_to_string(p).ok())
-    };
+        return std::fs::read_to_string(expanded).ok().map(strip_bom);
+    }
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+    let paths = [
+        format!("{}/.psmux.conf", home),
+        format!("{}/.psmuxrc", home),
+        format!("{}/.tmux.conf", home),
+        format!("{}/.config/psmux/psmux.conf", home),
+    ];
+    paths.iter().find_map(|p| std::fs::read_to_string(p).ok()).map(strip_bom)
+}
+
+/// If the user's config has a top-level `new-session` (or `new`) directive,
+/// return its arguments (empty for a bare `new-session`); otherwise None.
+///
+/// tmux runs `new-session` from the config at server start, so a later
+/// `attach-session` with no running server still finds a session to attach to.
+/// psmux has no persistent server, so the CLI uses this to bootstrap that
+/// session (see the attach path in main.rs, #362).  Only a simple top-level
+/// directive is matched — `new-session` as the first token of a line — which is
+/// the documented idiom; lines where `new-session` is an argument (e.g.
+/// `bind-key x new-session`) are not matched.
+pub fn config_new_session_args() -> Option<Vec<String>> {
+    let content = read_user_config_content()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        let mut toks = trimmed.split_whitespace();
+        match toks.next() {
+            Some("new-session") | Some("new") => {
+                return Some(toks.map(|s| s.to_string()).collect());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub fn is_warm_disabled_by_config() -> bool {
+    let content = read_user_config_content();
     if let Some(content) = content {
         for line in content.lines() {
             let trimmed = line.trim();
@@ -1895,3 +1932,7 @@ mod tests_issue268_set_titles;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue287_german_keyboard.rs"]
 mod tests_issue287_german_keyboard;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue362_config_new_session.rs"]
+mod tests_issue362_config_new_session;

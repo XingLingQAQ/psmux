@@ -707,6 +707,28 @@ fn run_main() -> io::Result<()> {
                             "0".to_string()
                         }
                     });
+                // #362: tmux runs `new-session` from the config at server start,
+                // so `attach-session` works even with no server running. psmux has
+                // no persistent server, so when no session exists yet and the
+                // config requests a new-session, bootstrap it: delegate to our own
+                // `new-session` (which loads the config — the `new-session` line is
+                // a no-op during config load, so there is no recursion — then
+                // creates the session and attaches in this same console). Honour
+                // the config's new-session args (e.g. -s NAME) but drop -d/-D so we
+                // attach rather than leave it detached.
+                if crate::session::list_session_names_ns(l_socket_name.as_deref()).is_empty() {
+                    if let Some(ns_args) = crate::config::config_new_session_args() {
+                        let exe = env::current_exe()?;
+                        let mut child = std::process::Command::new(exe);
+                        if let Some(ref l) = l_socket_name { child.arg("-L").arg(l); }
+                        child.arg("new-session");
+                        for a in ns_args.iter().filter(|a| a.as_str() != "-d" && a.as_str() != "-D") {
+                            child.arg(a);
+                        }
+                        let _ = child.status()?;
+                        return Ok(());
+                    }
+                }
                 env::set_var("PSMUX_SESSION_NAME", name);
                 env::set_var("PSMUX_REMOTE_ATTACH", "1");
             }

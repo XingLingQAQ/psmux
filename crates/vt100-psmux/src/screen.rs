@@ -134,6 +134,12 @@ pub struct Screen {
     /// terminal (Windows Terminal, etc.).
     osc52_clipboard: Option<(Vec<u8>, Vec<u8>)>,
 
+    /// OSC 8 hyperlink store.  URIs are interned here; a cell's `Attrs.link`
+    /// is the index into this Vec plus 1 (0 = no link), mirroring tmux's
+    /// per-screen hyperlink table.  Grows for the life of the screen, which is
+    /// fine: real workloads use a bounded set of distinct URIs.
+    hyperlinks: Vec<String>,
+
     /// Set to `true` when the screen is cleared (CSI 2J) while
     /// `squelch_clear_pending` is active.  The layout serialiser
     /// checks this flag to know that `cls` has finished.
@@ -186,6 +192,7 @@ impl Screen {
             osc7_path: None,
             osc94_progress: None,
             osc52_clipboard: None,
+            hyperlinks: Vec::new(),
             squelch_cleared: false,
             squelch_clear_pending: false,
             audible_bell_count: 0,
@@ -803,6 +810,41 @@ impl Screen {
     /// Terminal, etc.) can perform the actual copy.
     pub fn take_clipboard(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
         self.osc52_clipboard.take()
+    }
+
+    /// Begin an OSC 8 hyperlink: intern `uri` and set it as the current pen's
+    /// link so cells written afterwards carry it.  `_id_params` is the OSC 8
+    /// id field (e.g. `id=foo`); we key on the URI, which is sufficient for
+    /// rendering.  An empty `uri` clears the current link.
+    pub fn set_hyperlink(&mut self, _id_params: &[u8], uri: &[u8]) {
+        if uri.is_empty() {
+            self.attrs.link = 0;
+            return;
+        }
+        let uri = String::from_utf8_lossy(uri);
+        let id = if let Some(pos) =
+            self.hyperlinks.iter().position(|u| u == uri.as_ref())
+        {
+            pos + 1
+        } else {
+            self.hyperlinks.push(uri.into_owned());
+            self.hyperlinks.len()
+        };
+        self.attrs.link = id as u32;
+    }
+
+    /// Clear the current pen hyperlink (OSC 8 with an empty URI).
+    pub fn clear_hyperlink(&mut self) {
+        self.attrs.link = 0;
+    }
+
+    /// Resolve a hyperlink id (as stored in `Attrs.link`) to its URI.
+    #[must_use]
+    pub fn hyperlink_uri(&self, id: u32) -> Option<&str> {
+        if id == 0 {
+            return None;
+        }
+        self.hyperlinks.get((id - 1) as usize).map(String::as_str)
     }
 
     /// Peek at the pending OSC 52 clipboard payload without consuming it.
@@ -1632,4 +1674,8 @@ mod tests;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue155_sgr_attrs.rs"]
 mod test_issue155_sgr_attrs;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_issue361_osc8_hyperlink.rs"]
+mod test_issue361_osc8_hyperlink;
 

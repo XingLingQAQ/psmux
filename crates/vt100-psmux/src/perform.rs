@@ -241,6 +241,19 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"9999", ..] => {
                 self.screen.squelch_cleared = true;
             }
+            [b"8", id_params, uri_rest @ ..] => {
+                // OSC 8 ; params ; URI  — hyperlink. The URI may itself contain
+                // ';' (which the OSC parser splits into extra params), so rejoin
+                // the trailing parts. An empty URI closes the current link.
+                let mut uri = Vec::new();
+                for (i, part) in uri_rest.iter().enumerate() {
+                    if i > 0 {
+                        uri.push(b';');
+                    }
+                    uri.extend_from_slice(part);
+                }
+                self.screen.set_hyperlink(id_params, &uri);
+            }
             [b"52", ty, data] => {
                 match (
                     ty.iter().all(|c| CLIPBOARD_SELECTOR.contains(c)),

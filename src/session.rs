@@ -632,15 +632,16 @@ where
 pub enum SessionLiveness {
     /// Server authenticated and returned its session-info line (the payload).
     Alive(String),
-    /// Definitively gone: connection refused, an `ERROR` auth rejection (a
-    /// different server reused the port), or connected-then-silent past the
-    /// read timeout. Its registry files should be reaped. A genuinely live
-    /// server that was momentarily too slow self-heals: the server rewrites
-    /// its `.port`/`.key`/`.sid` every 5s (see `ensure_session_registry_files`).
+    /// Definitively gone: the connection failed (refused / unreachable — on
+    /// loopback any connect failure means nothing is listening), an `ERROR`
+    /// auth rejection (a different server reused the port), or connected then
+    /// silent past the read timeout. Its registry files should be reaped. A
+    /// genuinely live server that was momentarily too slow self-heals: it
+    /// rewrites its `.port`/`.key`/`.sid` every 5s (see
+    /// `ensure_session_registry_files`).
     Dead,
-    /// Could not even establish a connection due to a transient (non-refused)
-    /// error. Identity is unknown, so it is left in place and shown as
-    /// `(not responding)` rather than deleted.
+    /// No usable AUTH key on disk, so identity cannot be verified at all.
+    /// Left in place and shown as `(not responding)` rather than deleted.
     Unreachable,
 }
 
@@ -661,15 +662,20 @@ fn probe_session_liveness(
         Some(k) => k,
         None => return SessionLiveness::Unreachable,
     };
+    // On loopback a live server always completes the TCP handshake (the kernel
+    // accepts into the listen backlog even before the app calls accept()), so
+    // ANY connect failure means nothing usable is listening -> Dead. We do not
+    // branch on the error kind: Windows does not always surface a clean
+    // `ConnectionRefused` for a free port.
     let mut s = match std::net::TcpStream::connect_timeout(&sock, connect_timeout) {
         Ok(s) => s,
-        Err(e) if e.kind() == ErrorKind::ConnectionRefused => return SessionLiveness::Dead,
-        Err(_) => return SessionLiveness::Unreachable,
+        Err(_) => return SessionLiveness::Dead,
     };
     let _ = s.set_read_timeout(Some(read_timeout));
     let _ = s.set_nodelay(true);
     if write!(s, "AUTH {}\n", key).is_err() || s.write_all(b"session-info\n").is_err() {
-        return SessionLiveness::Unreachable;
+        // Connection broke right after connect -> not a healthy server.
+        return SessionLiveness::Dead;
     }
     let _ = s.flush();
     let mut br = std::io::BufReader::new(std::io::Read::take(s, MAX_AUTHED_RESPONSE_BYTES));

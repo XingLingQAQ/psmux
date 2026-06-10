@@ -898,6 +898,10 @@ fn run_main() -> io::Result<()> {
                 // Check if session already exists AND is actually running
                 let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                 let port_path = format!("{}\\.psmux\\{}.port", home, port_file_base);
+                // PID of the server we spawn on the cold path (None when we adopt
+                // a warm server or attach to a remote one). The readiness gate
+                // below uses it to fail fast if the freshly spawned server dies.
+                let mut server_pid: Option<u32> = None;
                 if std::path::Path::new(&port_path).exists() {
                     // Verify server is actually running
                     let server_alive = if let Ok(port_str) = std::fs::read_to_string(&port_path) {
@@ -1124,7 +1128,7 @@ fn run_main() -> io::Result<()> {
                 // Spawn server with a hidden console window via CreateProcessW.
                 // This gives ConPTY a real console while keeping the window invisible.
                 #[cfg(windows)]
-                crate::platform::spawn_server_hidden(&exe, &server_args)?;
+                { server_pid = Some(crate::platform::spawn_server_hidden(&exe, &server_args)?); }
                 #[cfg(not(windows))]
                 {
                     let mut cmd = std::process::Command::new(&exe);
@@ -1140,44 +1144,93 @@ fn run_main() -> io::Result<()> {
                 // Wait for server to create port file (up to 5 seconds)
                 // Poll fast (10ms) — the server writes the port file early,
                 // before spawning ConPTY/pwsh, so it should appear quickly.
-                for _ in 0..500 {
+                //
+                // Wait for the server to become READY before returning, gating on
+                // ACTUAL readiness rather than mere socket reachability. The server
+                // writes its .port file and binds/accepts BEFORE it creates the
+                // initial window and BEFORE its main request loop runs; under load
+                // any of those steps can take seconds. The old tight check (5s port
+                // poll + one 100ms connect) wrongly declared a slow-but-healthy
+                // server dead — and even deleted its .port file, orphaning a live
+                // session. Instead, loop until one of these terminal conditions:
+                //
+                //   READY (rc=0):
+                //     - .port present + readable + a TCP connect succeeds, AND
+                //     - for detached sessions, list-windows is non-empty (the
+                //       initial window exists). list-windows is answered only by
+                //       the main loop, which runs only after create_window, so a
+                //       non-empty reply IS the "command finished server-side"
+                //       signal — matching how tmux gates on command completion.
+                //
+                //   FAST-FAIL (rc=1), so we NEVER block on a doomed server:
+                //     - .port vanished after we first saw it: the server hit a
+                //       create_window failure / panic (its panic hook removes the
+                //       .port) and exited. The client never deletes the .port
+                //       itself — the server owns it.
+                //     - the server PROCESS we spawned has died: covers a hard kill
+                //       / abrupt exit / any path that skips the panic-hook cleanup
+                //       and would otherwise leave a stale .port. We only consult
+                //       this AFTER the readiness check fails for the iteration, so
+                //       a healthy reachable server is never declared dead.
+                //
+                //   DEADLINE (rc=1): a hard 15s upper bound. The fast-fail signals
+                //     above catch every real failure within ~20ms, so in practice
+                //     this only ever fires for the pathological "process alive but
+                //     create_window genuinely hangs forever" case — bounded, never
+                //     an infinite hang. 15s comfortably exceeds the measured worst
+                //     case window-creation latency under heavy concurrent load
+                //     (~9s), so it does not reintroduce false failures.
+                env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
+                let ready_deadline = std::time::Instant::now() + Duration::from_secs(15);
+                let mut port_seen = false;
+                let mut ready = false;
+                loop {
                     if std::path::Path::new(&port_path).exists() {
+                        port_seen = true;
+                        let connectable = std::fs::read_to_string(&port_path).ok()
+                            .and_then(|s| s.trim().parse::<u16>().ok())
+                            .map(|port| {
+                                let addr = format!("127.0.0.1:{}", port);
+                                std::net::TcpStream::connect_timeout(
+                                    &addr.parse().unwrap(),
+                                    Duration::from_millis(200),
+                                ).is_ok()
+                            })
+                            .unwrap_or(false);
+                        if connectable {
+                            if !detached {
+                                // Attached: connectivity is enough — we attach below.
+                                ready = true;
+                                break;
+                            }
+                            // Detached: also require the initial window to exist.
+                            if let Ok(resp) = send_control_with_response("list-windows\n".to_string()) {
+                                if !resp.trim().is_empty() { ready = true; break; }
+                            }
+                        }
+                    } else if port_seen {
+                        // .port vanished after appearing → server cleaned up and exited.
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(10));
+                    // Readiness not met this iteration → consult the process-death
+                    // fast-fail signal (cold path only; None when we adopted a warm
+                    // or remote server). A dead PID here means the server exited
+                    // without leaving a usable session.
+                    if let Some(pid) = server_pid {
+                        if !crate::platform::process_is_alive(pid) { break; }
+                    }
+                    if std::time::Instant::now() >= ready_deadline { break; }
+                    std::thread::sleep(Duration::from_millis(20));
                 }
-
-                // Verify the server is actually alive — the TCP listener is
-                // already active when the port file appears (we moved file write
-                // before create_window), so this connect should succeed instantly.
-                if !std::path::Path::new(&port_path).exists() {
+                if !ready {
                     eprintln!("psmux: failed to create session '{}'", name);
                     std::process::exit(1);
                 }
-                {
-                    let server_alive = if let Ok(port_str) = std::fs::read_to_string(&port_path) {
-                        if let Ok(port) = port_str.trim().parse::<u16>() {
-                            let addr = format!("127.0.0.1:{}", port);
-                            std::net::TcpStream::connect_timeout(
-                                &addr.parse().unwrap(),
-                                Duration::from_millis(100)
-                            ).is_ok()
-                        } else { false }
-                    } else { false };
-                    if !server_alive {
-                        let _ = std::fs::remove_file(&port_path);
-                        eprintln!("psmux: session '{}' exited immediately (check shell command)", name);
-                        std::process::exit(1);
-                    }
-                }
-                
+
                 if detached {
-                    // If -P flag, print pane info before returning
+                    // The readiness wait above already confirmed the initial
+                    // window exists. If -P, print the pane info before returning.
                     if print_info {
-                        // Set target session so send_control_with_response connects to the right server
-                        env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
-                        // Give server a moment to initialize
-                        std::thread::sleep(Duration::from_millis(200));
                         // Query the server for pane info using display-message
                         let fmt = if let Some(ref f) = format_str {
                             f.clone()

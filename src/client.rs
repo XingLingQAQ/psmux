@@ -2681,15 +2681,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 popup_rect_last = None;
                                 if choose_tree_preview_default { preview_enabled = true; }
                                 let dir = format!("{}\\.psmux", home);
-                                // Reap registry files for sessions whose server
-                                // is gone (crashed, or killed by a reboot) before
-                                // listing — otherwise their port files linger and
-                                // surface here as "(not responding)" zombies.
-                                crate::session::cleanup_stale_port_files();
-                                // Collect (label, addr, key) for every reachable port file first,
-                                // then fan out the per-session AUTH+session-info fetches in parallel.
-                                // Sequential fetches made the picker open in O(N * read_timeout);
-                                // parallelism keeps it bounded by the single-fetch timeout.
+                                // Collect (label, addr, key) for every port file, then run ONE
+                                // bounded liveness probe per session in parallel. This both lists
+                                // and prunes: total wall time is ~one probe window regardless of
+                                // how many sessions exist, so the picker stays responsive (no
+                                // sequential O(N * timeout) cleanup pass).
                                 let mut targets: Vec<(String, String, String)> = Vec::new();
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
                                     for e in entries.flatten() {
@@ -2709,13 +2705,35 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         }
                                     }
                                 }
-                                let fetched = crate::session::fetch_session_infos_parallel(
+                                let verdicts = crate::session::classify_sessions_parallel(
                                     targets,
-                                    Duration::from_millis(25),
-                                    Duration::from_millis(150),
-                                    |label| format!("{}: (not responding)", label),
+                                    Duration::from_millis(50),
+                                    Duration::from_millis(250),
                                 );
-                                session_entries.extend(fetched);
+                                for (label, liveness) in verdicts {
+                                    match liveness {
+                                        crate::session::SessionLiveness::Alive(info) => {
+                                            session_entries.push((label, info));
+                                        }
+                                        crate::session::SessionLiveness::Dead => {
+                                            // Server gone (crashed, killed by a reboot, or its
+                                            // port reused by another server). Reap it so it never
+                                            // shows as a "(not responding)" zombie. A live-but-slow
+                                            // server self-heals on its next 5s registry tick.
+                                            if crate::debug_log::session_log_enabled() {
+                                                crate::debug_log::session_log("picker",
+                                                    &format!("reaping dead session '{}' from chooser", label));
+                                            }
+                                            crate::session::remove_session_registry(&label);
+                                        }
+                                        crate::session::SessionLiveness::Unreachable => {
+                                            // Could not connect (transient, non-refused). Keep it
+                                            // and show the honest "(not responding)" rather than
+                                            // deleting on an ambiguous failure.
+                                            session_entries.push((label.clone(), format!("{}: (not responding)", label)));
+                                        }
+                                    }
+                                }
                                 if session_entries.is_empty() {
                                     session_entries.push((current_session.clone(), format!("{}: (current)", current_session)));
                                 }

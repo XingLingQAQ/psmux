@@ -342,3 +342,85 @@ fn pre_boot_registry_is_reaped_regardless_of_port() {
     let fresh = boot + Duration::from_secs(30);
     assert!(!is_pre_boot(fresh, boot, margin), "post-boot file must be kept");
 }
+
+#[test]
+fn liveness_authenticated_server_is_alive() {
+    let (addr, done) = spawn_fake_server(|mut s| {
+        drain_client_request(&mut s); // AUTH + session-info (two lines)
+        let _ = s.write_all(b"OK\n");
+        let _ = s.write_all(b"mysession: 2 windows (created Mon Apr 20 11:10:58 2026)\n");
+        let _ = s.flush();
+        thread::sleep(Duration::from_millis(50));
+    });
+
+    let v = probe_session_liveness(
+        &addr,
+        "key",
+        Duration::from_millis(300),
+        Duration::from_millis(400),
+    );
+
+    match v {
+        SessionLiveness::Alive(info) => assert!(info.contains("mysession"), "info: {info}"),
+        other => panic!("expected Alive, got {other:?}"),
+    }
+    let _ = done.recv_timeout(Duration::from_secs(2));
+}
+
+#[test]
+fn liveness_auth_rejection_is_dead() {
+    // The reboot/reused-port case: a different server rejects our key.
+    let (addr, done) = spawn_fake_server(|mut s| {
+        drain_client_request(&mut s);
+        let _ = s.write_all(b"ERROR: Invalid session key\n");
+        let _ = s.flush();
+    });
+
+    let v = probe_session_liveness(
+        &addr,
+        "stale-key",
+        Duration::from_millis(300),
+        Duration::from_millis(400),
+    );
+
+    assert_eq!(v, SessionLiveness::Dead, "auth rejection must be Dead");
+    let _ = done.recv_timeout(Duration::from_secs(2));
+}
+
+#[test]
+fn liveness_connection_refused_is_dead() {
+    // Bind then drop so the port is guaranteed free -> connect refused.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to grab a port");
+    let addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+
+    let v = probe_session_liveness(
+        &addr,
+        "key",
+        Duration::from_millis(300),
+        Duration::from_millis(200),
+    );
+
+    assert_eq!(v, SessionLiveness::Dead, "refused connect must be Dead");
+}
+
+#[test]
+fn liveness_connected_but_silent_is_dead() {
+    // A listener that accepts (via backlog) but never speaks our protocol.
+    // Bounded: we wait one read timeout, then declare it Dead (honors
+    // "no response within the timeout -> kill"); a real server self-heals.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
+    let addr = listener.local_addr().unwrap().to_string();
+
+    let start = std::time::Instant::now();
+    let v = probe_session_liveness(
+        &addr,
+        "key",
+        Duration::from_millis(300),
+        Duration::from_millis(150),
+    );
+
+    assert_eq!(v, SessionLiveness::Dead, "silent peer must be Dead after timeout");
+    assert!(start.elapsed() < Duration::from_secs(2), "probe must stay bounded, not hang");
+    drop(listener);
+}

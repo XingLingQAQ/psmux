@@ -584,6 +584,10 @@ pub fn fetch_session_info(
 /// `inputs` is `(label, addr, key)`. Output preserves input order and
 /// pairs each label with the fetched info or the supplied `fallback`
 /// (typically `"<label>: (not responding)"`).
+///
+/// Retained for the #250 regression suite; the picker now uses
+/// `classify_sessions_parallel`, which both lists and prunes in one pass.
+#[allow(dead_code)]
 pub fn fetch_session_infos_parallel<F>(
     inputs: Vec<(String, String, String)>,
     connect_timeout: Duration,
@@ -621,6 +625,135 @@ where
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
     results
+}
+
+/// Liveness verdict for one session, produced by a single bounded probe.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionLiveness {
+    /// Server authenticated and returned its session-info line (the payload).
+    Alive(String),
+    /// Definitively gone: connection refused, an `ERROR` auth rejection (a
+    /// different server reused the port), or connected-then-silent past the
+    /// read timeout. Its registry files should be reaped. A genuinely live
+    /// server that was momentarily too slow self-heals: the server rewrites
+    /// its `.port`/`.key`/`.sid` every 5s (see `ensure_session_registry_files`).
+    Dead,
+    /// Could not even establish a connection due to a transient (non-refused)
+    /// error. Identity is unknown, so it is left in place and shown as
+    /// `(not responding)` rather than deleted.
+    Unreachable,
+}
+
+/// Single bounded liveness probe: connect, AUTH with the session's own key,
+/// ask for `session-info`, and classify the reply. Never retries or blocks
+/// beyond `connect_timeout + read_timeout`.
+fn probe_session_liveness(
+    addr: &str,
+    key: &str,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> SessionLiveness {
+    let sock: std::net::SocketAddr = match addr.parse() {
+        Ok(a) => a,
+        Err(_) => return SessionLiveness::Dead,
+    };
+    let key = match validate_auth_key(key) {
+        Some(k) => k,
+        None => return SessionLiveness::Unreachable,
+    };
+    let mut s = match std::net::TcpStream::connect_timeout(&sock, connect_timeout) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::ConnectionRefused => return SessionLiveness::Dead,
+        Err(_) => return SessionLiveness::Unreachable,
+    };
+    let _ = s.set_read_timeout(Some(read_timeout));
+    let _ = s.set_nodelay(true);
+    if write!(s, "AUTH {}\n", key).is_err() || s.write_all(b"session-info\n").is_err() {
+        return SessionLiveness::Unreachable;
+    }
+    let _ = s.flush();
+    let mut br = std::io::BufReader::new(std::io::Read::take(s, MAX_AUTHED_RESPONSE_BYTES));
+    let mut line = String::new();
+    match std::io::BufRead::read_line(&mut br, &mut line) {
+        Ok(0) => SessionLiveness::Dead,
+        Ok(_) => {
+            let t = line.trim();
+            if t.starts_with("ERROR") {
+                return SessionLiveness::Dead;
+            }
+            if t == "OK" {
+                // Ack consumed; the next line is the real payload.
+                line.clear();
+                match std::io::BufRead::read_line(&mut br, &mut line) {
+                    Ok(0) => SessionLiveness::Dead,
+                    Ok(_) => {
+                        let t2 = line.trim();
+                        if t2.is_empty() || t2 == "OK" || t2.starts_with("ERROR") {
+                            SessionLiveness::Dead
+                        } else {
+                            SessionLiveness::Alive(t2.to_string())
+                        }
+                    }
+                    Err(_) => SessionLiveness::Dead,
+                }
+            } else {
+                // Ack pipelined with the payload in one line.
+                SessionLiveness::Alive(t.to_string())
+            }
+        }
+        Err(_) => SessionLiveness::Dead,
+    }
+}
+
+/// Classify many sessions in parallel with a single bounded probe each.
+///
+/// Like `fetch_session_infos_parallel`, total wall time is ~one probe window
+/// regardless of N (each session runs on its own thread). Returns the liveness
+/// verdict per input label, preserving order, so the caller can reap the dead
+/// ones and render the rest. This is what keeps the session picker responsive:
+/// it replaces a sequential cleanup pass (O(N * timeout)) with one parallel
+/// round-trip that both lists and prunes.
+pub fn classify_sessions_parallel(
+    inputs: Vec<(String, String, String)>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Vec<(String, SessionLiveness)> {
+    if inputs.is_empty() {
+        return Vec::new();
+    }
+    if inputs.len() == 1 {
+        let (label, addr, key) = &inputs[0];
+        let v = probe_session_liveness(addr, key, connect_timeout, read_timeout);
+        return vec![(label.clone(), v)];
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = inputs
+            .iter()
+            .map(|(label, addr, key)| {
+                let label = label.clone();
+                let addr = addr.clone();
+                let key = key.clone();
+                scope.spawn(move || {
+                    let v = probe_session_liveness(&addr, &key, connect_timeout, read_timeout);
+                    (label, v)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+}
+
+/// Reap a single session's registry files (`.port`/`.key`/`.sid`) by base name.
+///
+/// Used when a probe proves the session is dead. Safe against a live server:
+/// it re-creates these files on its next 5s registry tick.
+pub fn remove_session_registry(base: &str) {
+    let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let port_path = format!("{}\\.psmux\\{}.port", home, base);
+    remove_session_registry_files(Path::new(&port_path));
 }
 
 pub fn send_control(line: String) -> io::Result<()> {

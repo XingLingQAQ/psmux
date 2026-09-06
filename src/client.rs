@@ -1965,6 +1965,11 @@ pub(crate) fn no_such_session(name: &str) -> io::Error {
 }
 
 pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
+    // A client process exists only while a terminal is attached, so hold the
+    // 1ms timer period for its whole life. Without it every sub-tick wait in
+    // this process, including the input poll below, rounds up to the default
+    // 15.6ms tick. See src/timer_res.rs.
+    crate::timer_res::set_high(true);
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok())
@@ -2762,6 +2767,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
         let poll_ms = if paste_pend_active { 1 }
             else if got_frame { 0 }
+            else if key_send_instant.map_or(false, |t| t.elapsed().as_millis() < 60) {
+                // A key is out and its echo has not come back yet. The server
+                // PUSHES that frame, so the only thing standing between the
+                // frame landing on the socket and it reaching the screen is
+                // how long this loop sleeps before looking.
+                //
+                // This has to sit ABOVE the dump_in_flight arm. Sending a key
+                // sets force_dump, which immediately puts a dump-state on the
+                // wire, so dump_in_flight is true for exactly the window where
+                // the echo is expected — and that arm then slept 5ms per
+                // iteration while the pushed frame carrying the echo sat
+                // unread on the socket. The window is short (it closes the
+                // moment a new frame renders, and hard-stops at 60ms) and only
+                // open while actually typing.
+                1
+            }
             else if dump_in_flight { 5 }
             else if force_dump { 0 }
             else if typing_active {

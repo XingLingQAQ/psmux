@@ -451,6 +451,12 @@ fn drain_plugin_req(
                 app.user_options.insert(option, format!("{}{}", existing, value));
             } else {
                 match option.as_str() {
+                    // An ARRAY option appends an ITEM, not characters: tmux's
+                    // `-a` on codepoint-widths adds to the array rather than
+                    // string-concatenating onto the last entry.
+                    "codepoint-widths" => {
+                        crate::server::options::append_codepoint_widths(app, &value);
+                    }
                     "status-left" => app.status_left.push_str(&value),
                     "status-right" => app.status_right.push_str(&value),
                     "status-style" => app.status_style.push_str(&value),
@@ -4338,6 +4344,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.user_options.insert(option, format!("{}{}", existing, value));
                     } else {
                         match option.as_str() {
+                            // ARRAY option: `-a` appends an item (see the
+                            // sibling arm in the main request loop).
+                            "codepoint-widths" => {
+                                crate::server::options::append_codepoint_widths(&mut app, &value);
+                            }
                             "status-left" => { app.status_left.push_str(&value); }
                             "status-right" => { app.status_right.push_str(&value); }
                             "status-style" => { app.status_style.push_str(&value); }

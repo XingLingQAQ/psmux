@@ -1391,6 +1391,9 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
                 }
             }
         }
+        "codepoint-widths" => {
+            crate::server::options::set_codepoint_widths(app, value);
+        }
         "command-alias" => {
             if let Some(pos) = value.find('=') {
                 let alias = value[..pos].trim().to_string();

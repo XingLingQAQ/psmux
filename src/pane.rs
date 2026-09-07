@@ -90,6 +90,7 @@ pub fn spawn_pane_write_queue(
                     continue;
                 }
                 let _ = inner.flush();
+                crate::pty_trace::mark("w", 0, &buf);
             }
         });
     Box::new(QueuedPaneWriter { tx })
@@ -2570,6 +2571,7 @@ pub fn spawn_reader_thread(
             match reader.read(&mut local) {
                 Ok(n) if n > 0 => {
                     zero_reads = 0;
+                    crate::pty_trace::mark("r", pane_id, &local[..n]);
                     // Push raw bytes into staging (no parser lock involved).
                     let (lock, cv) = &*staging_r;
                     if let Ok(mut buf) = lock.lock() {
@@ -2776,6 +2778,7 @@ pub fn spawn_reader_thread(
             // startup probe windows.
             dv_writer.fetch_add(1, Ordering::Release);
             crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+            crate::pty_trace::mark("p", pane_id, &bytes);
         }
     });
 }

@@ -2632,7 +2632,22 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
         let win = &app.windows[app.active_idx];
         if let Some(pane) = crate::tree::active_pane(&win.root, &win.active_path) {
             if !pane.dead && !kill {
-                return Err(io::Error::new(io::ErrorKind::Other, "pane still active"));
+                // tmux spawn.c: "pane <session>:<window>.<pane> still active".
+                // This is a ROUTINE, user-caused refusal, not a server fault:
+                // the caller must get it back as a per-request error (the
+                // `?` that used to carry it out of `run_server` destroyed the
+                // whole session on a mistyped respawn-pane).
+                let pane_idx = crate::tree::pane_index_in_window(&win.root, &win.active_path)
+                    .unwrap_or(0);
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "pane {}:{}.{} still active",
+                        app.session_name,
+                        app.win_display_index(app.active_idx),
+                        pane_idx
+                    ),
+                ));
             }
         }
     }

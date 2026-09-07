@@ -4158,9 +4158,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let _ = resp.send(reply);
                 }
-                CtrlReq::RespawnPane(workdir, kill, command, empty) => {
-                    respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill, command.as_deref(), empty)?;
-                    hook_event = Some("after-respawn-pane");
+                CtrlReq::RespawnPane(workdir, kill, command, empty, resp) => {
+                    // A refused respawn is a COMMAND error, not a server fault.
+                    // The `?` that used to sit here carried "pane ... still
+                    // active" (respawn-pane on a live pane without -k, the
+                    // documented tmux refusal) out of the event loop and out of
+                    // `run_server`, so the server exited and every window and
+                    // pane in the session died — while the client, which never
+                    // read a reply, printed nothing and exited 0.
+                    match respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill, command.as_deref(), empty) {
+                        Ok(()) => {
+                            hook_event = Some("after-respawn-pane");
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(e) => {
+                            // tmux cmd-respawn-pane.c: cmdq_error(item,
+                            // "respawn pane failed: %s", cause) -> exit 1.
+                            let msg = format!("respawn pane failed: {}", e);
+                            // Attached (TUI) clients have no reply stream for
+                            // this path, so mirror the error into the status
+                            // bar the way move-window does.
+                            app.status_message = Some((msg.clone(), Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                    }
                 }
                 CtrlReq::BindKey(table_name, key, command, repeat) => {
                     if let Some(kc) = parse_key_string(&key) {
@@ -5952,10 +5974,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::RespawnWindow(workdir, command) => {
-                    // Kill all panes in the active window and respawn
-                    respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), true, command.as_deref(), false)?;
-                    state_dirty = true;
+                CtrlReq::RespawnWindow(workdir, command, resp) => {
+                    // Kill all panes in the active window and respawn. Same
+                    // rule as RespawnPane above: a spawn refusal here (bad -c
+                    // directory, unspawnable command) is the caller's error and
+                    // must not unwind the event loop.
+                    match respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), true, command.as_deref(), false) {
+                        Ok(()) => {
+                            state_dirty = true;
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(e) => {
+                            // tmux cmd-respawn-window.c: "respawn window failed: %s".
+                            let msg = format!("respawn window failed: {}", e);
+                            app.status_message = Some((msg.clone(), Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                    }
                 }
                 CtrlReq::PopupInput(data) => {
                     if let Mode::PopupMode { ref mut popup_pane, .. } = app.mode {

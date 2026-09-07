@@ -1,115 +1,123 @@
 # Issue #639 working notes (DELETE BEFORE FINAL COMMIT)
 
 Reporter: sdaheng, psmux 3.3.8, Win10 21H2.
-Symptom: ssh to a box, run psmux there, run `tig` (any full screen app), quit it,
-and the Chinese (double width) characters are STILL PAINTED on the screen.
+Symptom: ssh to a box, run psmux there, run `tig`, quit it, and the Chinese
+(double width) characters are STILL PAINTED on the screen.
 
-Baseline binary for this investigation:
-`C:\Users\godwin\Documents\workspace\psmux\.claude\worktrees\agent-a6b74dd9d56cbb991\target\release\psmux.exe`
-built from a7332de with a CLEAN tree (so it is a true master baseline).
-The shared `C:\Users\godwin\.cargo\bin\psmux.exe` was mid-reinstall by another
-agent (renamed aside) and is NOT usable as a baseline right now.
+## VERDICT: NOT REPRODUCIBLE on this machine. No fix invented.
 
-## Harness (all files in ./i639_scratch, mirrored in the session scratchpad)
+Baseline binary: this worktree's `target\release\psmux.exe`, built from a clean
+tree at a7332de. (`C:\Users\godwin\.cargo\bin\psmux.exe` was mid-reinstall by
+another agent and unusable.) No wide-char commits exist between v3.3.8 and HEAD,
+so this build is equivalent to the reporter's version for this code path.
 
-- `i639_fixture.ps1`   - runs INSIDE a pane, emits a chosen escape-sequence case.
-                         Uses `[Console]::Out.Write` (NOT Write-Host) because
-                         NO_COLOR=1 in this shell strips Write-Host escapes.
-                         Sets `[Console]::OutputEncoding` to UTF8 no-BOM.
-- `i639_drive.ps1`     - creates a session running the fixture, then dumps
-                         `capture-pane -p` with per-codepoint `U+XXXX` output.
-                         This inspects the EMULATOR GRID.
-- `i639_fixture2.ps1`  - same but with a 5s idle phase first so an attached
-                         client can be hosted before the interesting transition.
-- `i639_client_bytes.ps1` - hosts `psmux attach` inside a CreatePseudoConsole
-                         (tests/conptycap.cs, flags=8 PASSTHROUGH) and dumps
-                         every byte the CLIENT writes to its outer terminal.
-                         This inspects the RENDERER OUTPUT (what ssh carries).
-- `i639_replay.py`     - INDEPENDENT reference terminal. Replays the captured
-                         client byte stream with correct xterm wide-glyph
-                         semantics (lead cell + continuation cell; touching
-                         EITHER half destroys BOTH) and prints the visible
-                         screen. Not psmux code, so it cannot hide a psmux bug.
+## The three layers checked
 
-## Harness trust check (MUST stay green)
+    GRID    what psmux's emulator holds          capture-pane -p
+    BYTES   what the attached CLIENT paints      conptycap.cs CreatePseudoConsole
+    SCREEN  BYTES as a correct terminal sees it  an independent Python reference
+                                                 terminal with DEC wide-glyph rules
 
-`i639_drive.ps1 -Case known_good` prints CJK back through capture-pane:
+GRID alone cannot see this bug: `capture-pane` renders a wide glyph from its
+lead cell and deliberately SKIPS the trailing half
+(`src/copy_mode.rs::push_capture_cell`), so a stranded half is invisible there.
+That is why every case below was also checked at the BYTES/SCREEN layer.
+
+## Harness trust gate (kept green throughout)
 
     L0: [中文测试字符]
        cp: U+4E2D U+6587 U+6D4B U+8BD5 U+5B57 U+7B26
 
-So the harness round trips CJK. Any later CJK loss is psmux, not the shell.
+Traps hit and fixed along the way, both of which had FAKED a clean result:
+  1. `W "..." + (expr)` in PowerShell passes THREE arguments, so the first fuzz
+     runs emitted only cursor moves and compared two blank screens.
+  2. The E2E script did not set `[Console]::OutputEncoding`, so capture-pane
+     output arrived as "?" and CJK counts were 0. The known-good gate caught it.
 
-## What "reference replay is clean for the simple case" meant, CONCRETELY
+## Cases checked, all CLEAN (SCREEN == GRID, row for row)
 
-Case `altscreen` in `i639_fixture2.ps1`, pane 60x20:
+| # | case | layer | result |
+|---|------|-------|--------|
+| 1 | CJK only | GRID | clean |
+| 2 | CJK then `ab` over the pair | GRID | clean |
+| 3 | CJK then `X` over the LEAD half | GRID | clean, orphan became a space |
+| 4 | CJK then ED(2) | GRID | clean |
+| 5 | alt screen enter/CJK/leave | GRID+SCREEN | clean, `ESC[36X` covers all 36 cols |
+| 6 | cufskip: renderer skips a wide span | GRID+SCREEN | clean |
+| 7 | tigsim: primary has content, alt has ASCII+CJK | GRID+SCREEN | clean |
+| 8 | rightedge, odd pane width 61 | GRID+SCREEN | clean |
+| 9 | oddcol, every pair straddles an even boundary | GRID+SCREEN | clean |
+| 10 | shrink, short ASCII over a long CJK row, no erase | GRID+SCREEN | clean |
+| 11 | scrolling region + CJK then clear | GRID+SCREEN | clean |
+| 12 | full repaint on a LATE attach | GRID+SCREEN | clean |
+| 13 | split-window narrowing under CJK | GRID+SCREEN | clean |
+| 14 | full-width CJK (80 cols) then narrowed to 40, reflow | GRID+SCREEN | clean |
+| 15 | randomized property test, 320 incremental mutations, dense final screen | GRID+SCREEN | 8/8 seeds clean |
+| 16 | the same through conhost RE-RENDER (ConPTY flags=0, the Win10 path) | GRID+SCREEN | 2/2 seeds clean |
+| 17 | Rust erase matrix, 20 ops x 24 offsets | emulator cells | 480/480 clean |
 
-1. `ESC[H ESC[2J` then `PHASE0-IDLE`, sleep 5s (client attaches here).
-2. `ESC[?1049h` (enter alt screen), `ESC[H ESC[2J`.
-3. Ten rows of `ESC[<i>;1H` + 18 CJK chars (`中文测试字符` x3) = 36 COLUMNS.
-4. sleep 3s, `ESC[?1049l` (leave alt screen), sleep 3s.
-5. `ESC[H ESC[2J` then `MARKERAFTER`.
-
-The attached client's outgoing byte stream was captured (1274 bytes). The
-post-alt-exit repaint it emitted was, verbatim (`cat -v`):
+Verbatim post-alt-exit repaint psmux emits (case 5, `cat -v`):
 
     ^[[?25l^[[HPHASE0-IDLE^[[25X^M
-    ^[[36X^M    (x9, one per CJK row)
-    ...
+    ^[[36X^M      (x9, one per CJK row)
     ^[[36X^[[36C^[[1;12H^[[?25h
 
-i.e. ECH (`ESC[nX`) counts of 25 and 36 COLUMNS, which exactly cover the 36
-columns the 18 CJK glyphs occupied. Feeding that same stream through
-`i639_replay.py` (the independent reference terminal) produced:
+11 + 25 = 36 and 36 = the exact column count of the 18 CJK glyphs. Correct.
 
-    R00|MARKERAFTER|
-    R01..R18 empty
-    R19|[i639_base0:pwsh*   "SUPERFLOW" 02:36 08-Sep-26|
+## Two controls that make the "clean" results meaningful
 
-NO ghost. So for this shape the renderer erases the wide cells correctly, and
-the assertion was "replayed screen has no CJK codepoints left".
+* LAX terminal control: replaying the same byte stream through a reference
+  terminal that does NOT implement "touching either half destroys both" gives
+  the IDENTICAL screen. So psmux does not lean on that terminal rule; it
+  repaints both halves explicitly. Robust.
+* AMBIGUOUS-WIDE control: replaying through a terminal that renders East Asian
+  Ambiguous characters as TWO columns (what a CJK-locale terminal does) DOES
+  produce leftovers, e.g. `short 11234568` where the strict terminal shows
+  `short 1`. This is the one mechanism that reproduces the reported symptom,
+  and it is a WIDTH DISAGREEMENT between psmux and the outer terminal, not a
+  psmux erase bug. tmux has the same disposition (utf8_width treats ambiguous
+  as 1), so this is not a parity gap either.
 
-## RULED OUT SO FAR (emulator grid, via capture-pane, 1 iteration each)
+## tmux parity finding
 
-All of these produced the CORRECT grid, i.e. NOT the bug:
+tmux `screen-write.c:screen_write_overwrite` does two things: if the cell being
+written is PADDING it walks BACKWARD to the owning character and clears it, and
+it then walks FORWARD clearing the padding the old character owned.
+psmux `crates/vt100-psmux/src/screen.rs::text` does exactly both (clears
+`pos.col - 1` when the target is a continuation, and sets the continuation to a
+space when the target is wide), and `Cell::set`/`Cell::clear` zero the flag byte
+so neither IS_WIDE nor IS_WIDE_CONTINUATION can survive a rewrite. Every erase
+path (`erase_all`, `erase_row_forward/backward`, `erase_cells`, `delete_cells`,
+`insert_cells`) routes through `Row::erase` -> `Row::clear_wide`, which is the
+same rule. tmux resets the orphaned half to `grid_default_cell`, which is a
+SPACE, and psmux writes a space too. PARITY HOLDS. The only difference is that
+tmux walks a RUN of padding cells (it supports width > 2) while psmux handles
+one, which cannot matter for width-2 CJK.
 
-| case             | sequence                                        | result |
-|------------------|-------------------------------------------------|--------|
-| known_good       | CJK only                                        | `中文测试字符` OK |
-| overwrite_short  | CJK row, then `ESC[H` + `ab` (2 cols)           | `ab文测试字符` OK |
-| overwrite_odd    | CJK row, then `ESC[H` + `X` (1 col, splits pair)| `X 文测试字符` OK - orphan half correctly became a SPACE |
-| erase_2j         | CJK row, then `ESC[2J` + `AFTER`                | `AFTER` OK |
-| altscreen (grid) | enter alt, CJK, leave alt, ascii                | clean OK |
+Single `unicode-width 0.2.2` across the whole workspace (checked Cargo.lock), so
+psmux and vt100-psmux cannot disagree about a character's width internally.
 
-## RULED OUT SO FAR (renderer byte stream + independent replay)
+## Deliverables
 
-| case       | result |
-|------------|--------|
-| altscreen  | clean, see verbatim bytes above |
+* `tests-rs/test_issue639_wide_char_clear.rs` (registered in Cargo.toml), 16
+  tests, includes the 480 case erase matrix. 16/16 pass.
+* `tests/test_issue639_wide_char_clear.ps1`, 4 checks including an explicit
+  known-good CJK round-trip gate. 4/4 pass.
 
-## NOT YET TRIED (do these next, one variable at a time, 5+ iterations each)
+## Diagnostic to ask sdaheng for
 
-1. Primary screen that already HAS ASCII CONTENT before entering the alt screen
-   (tig returns to a shell with scrollback, my test returned to a near-blank
-   screen - the diff is between "CJK alt row" and "ASCII primary row").
-2. CUF skip over wide glyphs: row `AAAA中文中文BBBB`, change only `BBBB`.
-   If the renderer's skip distance is counted in CHARACTERS not COLUMNS the
-   cursor drifts and the old CJK survives. STRONGEST remaining hypothesis.
-3. Scrolling region (`ESC[r`) + CJK, then clear. tig uses one.
-4. CJK straddling the RIGHT EDGE of the pane (odd pane width, glyph does not fit).
-5. Pane RESIZE while CJK is on screen, especially narrowing that splits a pair.
-6. Detach / reattach full repaint (reporter is over ssh).
-7. Split panes: a wide glyph next to a vertical pane border.
-
-## tmux parity reference (to be read)
-
-`C:\Users\godwin\Documents\workspace\tmux`: `grid.c` GRID_FLAG_PADDING,
-`screen-write.c` screen_write_collect_clear / screen_write_cell,
-`utf8.c` utf8_width. tmux = one cell of width 2 + a PADDING cell; clearing or
-overwriting EITHER half must destroy BOTH.
-
-## Cleanup reminders
-
-Sessions are prefixed `i639_` under `-L i639ns` / `-L i639bn`.
-Kill only PIDs whose ExecutablePath is inside this worktree. Never by name.
-Remove `$env:USERPROFILE\.psmux\i639_*` leftovers.
+1. Which terminal is at the LOCAL end of the ssh session, and its exact version
+   (Windows Terminal, PuTTY, conhost, iTerm2, GNOME Terminal, ...).
+2. The Windows display language / system locale of the LOCAL machine, and
+   whether the terminal is set to a CJK code page (chcp 936 / 950 / 932).
+   This is the single hypothesis that survived: a terminal that renders East
+   Asian AMBIGUOUS characters as two columns disagrees with psmux, and tig's
+   commit graph is made of exactly those characters.
+3. Whether the ghost is in the PANE BODY or on the psmux STATUS LINE.
+4. `psmux capture-pane -p -e > dump.txt` taken WHILE the ghost is visible. If
+   the dump is clean but the screen is dirty, it is the renderer or the outer
+   terminal; if the dump is dirty too, it is the emulator.
+5. Does it also happen with a plain `clear` after `cat` of a Chinese file, i.e.
+   is `tig` required at all?
+6. Does it reproduce running psmux LOCALLY on that same box (no ssh)? That
+   isolates ssh and the local terminal from psmux.

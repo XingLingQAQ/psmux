@@ -1952,6 +1952,7 @@ fn run_main() -> io::Result<()> {
                 let ready_deadline = std::time::Instant::now() + Duration::from_secs(15);
                 let mut port_seen = false;
                 let mut ready = false;
+                let mut poll_step_ms: u64 = READY_POLL_FIRST_MS;
                 loop {
                     if std::path::Path::new(&port_path).exists() {
                         port_seen = true;
@@ -1994,7 +1995,8 @@ fn run_main() -> io::Result<()> {
                         if !crate::platform::process_is_alive(pid) { break; }
                     }
                     if std::time::Instant::now() >= ready_deadline { break; }
-                    std::thread::sleep(Duration::from_millis(20));
+                    std::thread::sleep(Duration::from_millis(poll_step_ms));
+                    poll_step_ms = next_ready_poll_step_ms(poll_step_ms);
                 }
                 if !ready {
                     eprintln!("psmux: failed to create session '{}'", name);
@@ -5642,6 +5644,42 @@ fn is_ssh_session() -> bool {
         || env::var("SSH_TTY").is_ok()
 }
 
+/// First sleep between `new-session` readiness probes, in milliseconds.
+pub(crate) const READY_POLL_FIRST_MS: u64 = 1;
+/// Ceiling the readiness poll backs off to, in milliseconds. This was the old
+/// flat interval, kept as the ceiling so a genuinely slow start costs no more
+/// wakeups than it used to.
+pub(crate) const READY_POLL_MAX_MS: u64 = 20;
+
+/// How long to sleep before the next `new-session` readiness probe, given the
+/// previous sleep.
+///
+/// The sleep between probes is pure launch latency: whatever is left of it when
+/// the session actually becomes usable is time the user waits for nothing. The
+/// interval used to be a flat 20ms, which cost a measured ~19.6ms median on a
+/// warm-claimed `new-session -d` whose server was already reachable at ~29.5ms
+/// — 40% of the whole ~49ms launch spent asleep past the finish line, and it
+/// quantised the launch time into visible 20ms steps (51 / 68 / 88 / 104ms
+/// depending only on where the boundary happened to fall).
+///
+/// Doubling from 1ms up to that same ceiling keeps the early probes on the fast
+/// paths (a warm claim is reachable in tens of ms) while the backoff stops a
+/// slow cold start from turning into a poll storm against a server that is
+/// still spawning its shell: reaching 1s of waiting costs ~55 probes rather
+/// than the 50 the flat interval used.
+/// The floor matters as much as the ceiling: doubling a zero stays zero, and a
+/// zero sleep would turn this wait into a busy loop hammering a server that is
+/// still trying to spawn its shell. The loop only ever feeds this its own
+/// previous value, which starts at `READY_POLL_FIRST_MS`, so zero is
+/// unreachable today — clamping keeps it unreachable if a future caller starts
+/// the ramp somewhere else.
+pub(crate) fn next_ready_poll_step_ms(prev_ms: u64) -> u64 {
+    prev_ms
+        .max(READY_POLL_FIRST_MS)
+        .saturating_mul(2)
+        .min(READY_POLL_MAX_MS)
+}
+
 /// Decide whether a detached-session readiness probe's `list-windows` reply
 /// means the initial window exists. A non-empty body is >0 windows (the
 /// tmux-text form is "" for zero windows) — EXCEPT a protocol-level error
@@ -5710,3 +5748,7 @@ mod sbai_7120_tests {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue627_unqualified_targets.rs"]
 mod tests_issue627_unqualified_targets;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_ready_poll_backoff.rs"]
+mod tests_ready_poll_backoff;

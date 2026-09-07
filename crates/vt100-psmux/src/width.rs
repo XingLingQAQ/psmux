@@ -80,8 +80,14 @@ pub fn parse_entry(entry: &str) -> Option<WidthOverride> {
     let (spec, width_str) = (&entry[..split], &entry[split + 1..]);
 
     // strtonum(cp, 0, 2, &errstr): the whole token must be an integer in
-    // 0..=2. An empty string, a sign, or trailing text is an error there.
-    let width: u8 = width_str.parse().ok()?;
+    // 0..=2. tmux's strtonum is `strtoll` plus a `*ep != '\0'` check
+    // (compat/strtonum.c:52), so it accepts what strtoll accepts at the FRONT
+    // -- leading whitespace and a leading '+' -- but rejects any trailing
+    // text. A negative value parses and is then refused by the `< minval`
+    // bound. Rust's `u8::from_str` already accepts a leading '+' and rejects
+    // trailing text and negatives, so only the leading whitespace needs
+    // matching explicitly.
+    let width: u8 = width_str.trim_start().parse().ok()?;
     if width > MAX_OVERRIDE_WIDTH {
         return None;
     }

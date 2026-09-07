@@ -37,6 +37,36 @@ pub(crate) struct FloatJson {
     #[serde(default)] pub rows: Vec<crate::layout::RowRunsJson>,
 }
 
+/// Extract the `-T <table>` argument of a `switch-client` command line.
+///
+/// Issue #640: `switch-client -T <table>` is not session navigation. tmux's
+/// `cmd_switch_client_exec` returns as soon as `-T` is present, after setting
+/// `tc->keytable`, so the flag has to be recognised before the `-n`/`-p`/`-l`
+/// arms are considered. Returns `None` for every other `switch-client` form.
+///
+/// The tokenizer is the same one the server's command dispatcher uses, so a
+/// quoted table name (`switch-client -T "my table"`) parses identically here.
+pub fn switch_client_table_arg(cmd: &str) -> Option<String> {
+    let parts = crate::commands::parse_command_line(cmd);
+    if !matches!(parts.first().map(|s| s.as_str()), Some("switch-client") | Some("switchc")) {
+        return None;
+    }
+    let mut i = 1;
+    while i < parts.len() {
+        if parts[i] == "-T" {
+            return parts.get(i + 1).filter(|t| !t.is_empty()).cloned();
+        }
+        // `-Tname` (tmux's getopt accepts the value glued to the flag).
+        if let Some(rest) = parts[i].strip_prefix("-T") {
+            if !rest.is_empty() && !rest.starts_with('-') {
+                return Some(rest.to_string());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Extract the actual command from a confirm-before argument string.
 /// Handles: `confirm-before -p 'prompt text' kill-pane`
 /// Returns the command to execute after confirmation (e.g. "kill-pane").
@@ -2050,6 +2080,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut prefix_armed = false;
     let mut prefix_armed_at = Instant::now();
     let mut prefix_repeating = false;
+    // `switch-client -T <table>` latch (issue #640). tmux keeps the client in
+    // the named table (`c->keytable`) until the next key is dispatched: that
+    // key is looked up in the custom table, then the client falls back to the
+    // default (root) table. The prefix key always wins and forces the prefix
+    // table, exactly as in `server_client_handle_key`'s `table_changed` block.
+    let mut key_table_latch: Option<String> = None;
     // Track whether IME was open before we suppressed it for prefix mode (issue #286).
     #[cfg(windows)]
     let mut ime_was_open = false;
@@ -3354,6 +3390,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // are not intercepted by the input method (issue #286).
                             #[cfg(windows)]
                             { ime_was_open = crate::platform::ime_disable(); }
+                            // tmux: "The prefix always takes precedence and
+                            // forces a switch to the prefix table", so a
+                            // pending `switch-client -T` latch is dropped here.
+                            key_table_latch = None;
                             prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; cmd_batch.push("prefix-begin\n".into());
                         }
                         // NOTE: when the prefix key is pressed while the prefix is
@@ -3369,7 +3409,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // table takes exclusive priority, matching tmux: once the prefix
                         // is pressed a key bound in both tables must fire its prefix
                         // binding, not its root binding (issue #472).
-                        else if !prefix_armed && !command_input && !renaming && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
+                        // A pending `switch-client -T` latch is checked before
+                        // the root table, so `key_table_latch.is_none()` gates
+                        // this arm and lets the dispatch arm below run instead.
+                        else if !prefix_armed && key_table_latch.is_none() && !command_input && !renaming && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             synced_bindings.iter().any(|b| {
                                 b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
@@ -3393,7 +3436,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                         }
-                        else if prefix_armed {
+                        else if prefix_armed
+                            || (key_table_latch.is_some() && !command_input && !renaming && !pane_renaming
+                                && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer
+                                && confirm_cmd.is_none())
+                        {
                             // Pending flags for complex client-side UI commands
                             // (shared between synced_bindings dispatch and pre-sync hardcoded fallback)
                             let mut do_choose_tree = false;
@@ -3401,11 +3448,28 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             let mut do_choose_buffer = false;
                             let mut do_session_nav: Option<bool> = None; // Some(true)=next, Some(false)=prev
 
+                            // Which table this key is looked up in. The prefix
+                            // table when the prefix is armed, otherwise the
+                            // table a previous `switch-client -T` latched. The
+                            // latch is consumed here (tmux resets the client to
+                            // the default table as soon as a key is handled),
+                            // so a binding that latches a new table below wins.
+                            let latched_table = if prefix_armed { None } else { key_table_latch.take() };
+                            let active_table: &str = latched_table.as_deref().unwrap_or("prefix");
+
                             // Check synced bindings from server (includes defaults from PREFIX_DEFAULTS)
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
-                            let user_binding = synced_bindings.iter().find(|b| {
-                                b.t == "prefix" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                            let mut user_binding = synced_bindings.iter().find(|b| {
+                                b.t == active_table && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
                             });
+                            // tmux: a key with no binding in a custom table
+                            // falls back to the root table before being
+                            // swallowed ("trying in root table").
+                            if user_binding.is_none() && latched_table.is_some() {
+                                user_binding = synced_bindings.iter().find(|b| {
+                                    b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                });
+                            }
                             if let Some(entry) = user_binding {
                                 // Dispatch binding (handles both defaults and user overrides).
                                 // Client-side UI commands need special handling here since
@@ -3490,8 +3554,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     do_choose_buffer = true;
                                 } else if cmd == "choose-session" {
                                     do_choose_session = true;
-                                } else if cmd.starts_with("switch-client") {
-                                    do_session_nav = Some(cmd.contains("-n"));
+                                } else if cmd.starts_with("switch-client") || cmd.starts_with("switchc") {
+                                    // `switch-client -T <table>` is not session
+                                    // navigation: it latches the named key
+                                    // table so the NEXT key is looked up there
+                                    // (issue #640). The server is told too so
+                                    // `#{client_key_table}` reports it.
+                                    if let Some(tbl) = switch_client_table_arg(cmd) {
+                                        cmd_batch.push(format!("switch-client -T {}\n", crate::util::quote_arg_if_needed(&tbl)));
+                                        key_table_latch = Some(tbl);
+                                    } else {
+                                        do_session_nav = Some(cmd.contains("-n"));
+                                    }
                                 } else {
                                     // Generic: split on \; for command chaining (issue #192)
                                     let sub_cmds = crate::config::split_chained_commands_pub(&entry.c);
@@ -3499,7 +3573,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         cmd_batch.push(format!("{}\n", sub));
                                     }
                                 }
-                            } else if synced_bindings.is_empty() {
+                            } else if synced_bindings.is_empty() && latched_table.is_none() {
                             // Pre-sync hardcoded fallback (only used before first server state sync)
                             match key.code {
                                 KeyCode::Char('c') => { cmd_batch.push("new-window\n".into()); }
@@ -3891,7 +3965,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
                             );
                             let is_user_repeat = user_binding.map_or(false, |e| e.r);
-                            if is_repeatable_default || is_user_repeat {
+                            if latched_table.is_some() {
+                                // The key came from a `switch-client -T` table,
+                                // not from the prefix table: the prefix is not
+                                // armed, so there is nothing to disarm and no
+                                // repeat window to open. tmux drops the client
+                                // back to the default table, which `take()`
+                                // above already did; tell the server unless the
+                                // binding latched another table.
+                                prefix_repeating = false;
+                                if key_table_latch.is_none() {
+                                    cmd_batch.push("switch-client -T root\n".into());
+                                }
+                            } else if is_repeatable_default || is_user_repeat {
                                 prefix_armed_at = Instant::now();
                                 prefix_repeating = true;
                             } else {
@@ -7752,3 +7838,7 @@ mod test_issue626_border_attrs_default;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_border_indicators.rs"]
 mod test_pane_border_indicators;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue640_switch_client_table.rs"]
+mod test_issue640_switch_client_table;

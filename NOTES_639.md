@@ -55,6 +55,7 @@ Traps hit and fixed along the way, both of which had FAKED a clean result:
 | 15 | randomized property test, 320 incremental mutations, dense final screen | GRID+SCREEN | 8/8 seeds clean |
 | 16 | the same through conhost RE-RENDER (ConPTY flags=0, the Win10 path) | GRID+SCREEN | 2/2 seeds clean |
 | 17 | Rust erase matrix, 20 ops x 24 offsets | emulator cells | 480/480 clean |
+| 18 | OUTER terminal resize 80 -> odd 41 under full-width CJK | GRID+SCREEN | 3/3 clean |
 
 Verbatim post-alt-exit repaint psmux emits (case 5, `cat -v`):
 
@@ -104,16 +105,19 @@ psmux and vt100-psmux cannot disagree about a character's width internally.
 * `tests/test_issue639_wide_char_clear.ps1`, 4 checks including an explicit
   known-good CJK round-trip gate. 4/4 pass.
 
-## The one variable I could NOT control
+## Outer terminal resize: gap CLOSED, also clean
 
-Resizing the OUTER terminal (dragging the ssh client window, i.e. SIGWINCH to
-the psmux client) while CJK is on screen. `tests/conptycap.cs` creates a
-pseudo console at a fixed size and never calls `ResizePseudoConsole`, so the
-client's ratatui buffer never had to be resized under a live wide glyph. A
-`Buffer::resize` followed by a diff against the resized previous buffer is a
-classic place for stale cells to survive. Everything else on the coordinator's
-list was exercised. Covering this properly means teaching conptycap to resize
-mid-run; worth doing if the reporter says a resize is involved.
+Originally untestable because `tests/conptycap.cs` never calls
+`ResizePseudoConsole`. `i639_scratch/i639_conptyresize.cs` adds that: it resizes
+the pseudo console once, mid capture, and logs `RESIZE_AT_BYTES=<n>` so the
+replay can start at that offset and read the tail at the NEW width (the bytes
+before it were painted at the old width and would be misread otherwise).
+
+80x20 -> 41x20 (ODD on purpose, so a wide pair must refuse the last column)
+with every row full of CJK: 3/3 iterations clean, GRID=360 SCREEN=360 CJK
+glyphs, 20 glyphs per 41 column row with the odd column correctly left blank.
+
+So every variable on the coordinator's list has now been exercised.
 
 ## Diagnostic to ask sdaheng for
 
@@ -132,3 +136,7 @@ mid-run; worth doing if the reporter says a resize is involved.
    is `tig` required at all?
 6. Does it reproduce running psmux LOCALLY on that same box (no ssh)? That
    isolates ssh and the local terminal from psmux.
+7. Does forcing a full redraw clear the ghost (resize the window, or detach and
+   reattach)? If a full repaint clears it, the fault is in the incremental diff;
+   if the ghost survives a full repaint, it is the emulator or the terminal.
+   This one question splits the remaining search space in half.

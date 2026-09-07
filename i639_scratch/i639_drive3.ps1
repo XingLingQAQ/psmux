@@ -12,6 +12,7 @@ param(
   [int]$Iterations = 1,
   [int]$DrainMs = 20000,
   [string]$Fixture = "i639_fixture3.ps1",
+  [string]$PtyFlags = "8",
   [switch]$AttachLate    # draw first, attach after: probes the FULL repaint path
 )
 
@@ -53,7 +54,7 @@ set NO_COLOR=
   $outBin = Join-Path $root "i639_bytes_$Tag`_$Case`_$it.bin"
   Remove-Item $outBin -Force -EA SilentlyContinue
   $env:CONPTYCAP_DRAIN_MS = "$DrainMs"
-  Start-Process -FilePath $capExe -ArgumentList @($outBin,"$Cols","$Rows","8",$launch) -Wait -WindowStyle Minimized
+  Start-Process -FilePath $capExe -ArgumentList @($outBin,"$Cols","$Rows",$PtyFlags,$launch) -Wait -WindowStyle Minimized
 
   # GRID: the emulator's own view, taken after the client is gone.
   $grid = (& $Exe -L $ns capture-pane -t $sess -p 2>&1 | Out-String)

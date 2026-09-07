@@ -6,7 +6,8 @@ param(
   [int]$Cols = 80,
   [int]$Rows = 20,
   [int]$Seeds = 3,
-  [int]$FirstSeed = 1
+  [int]$FirstSeed = 1,
+  [string]$PtyFlags = "8"
 )
 $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -37,7 +38,7 @@ set NO_COLOR=
   $outBin = Join-Path $root "i639_bytes_fz_$s.bin"
   Remove-Item $outBin -Force -EA SilentlyContinue
   $env:CONPTYCAP_DRAIN_MS = "40000"
-  Start-Process -FilePath $capExe -ArgumentList @($outBin,"$Cols","$Rows","8",$launch) -Wait -WindowStyle Minimized
+  Start-Process -FilePath $capExe -ArgumentList @($outBin,"$Cols","$Rows",$PtyFlags,$launch) -Wait -WindowStyle Minimized
 
   $grid = (& $Exe -L $ns capture-pane -t $sess -p 2>&1 | Out-String)
   & $Exe -L $ns kill-session -t $sess 2>$null | Out-Null

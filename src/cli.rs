@@ -121,21 +121,41 @@ const ARGS_TEMPLATES: &[(&str, &str, &str)] = &[
     ("unbind-key",            "unbind",     "anqT:"),
     ("unlink-window",         "unlinkw",    "kt:"),
     ("wait-for",              "wait",       "EF:LSUlvw:"),
+    ("new-pane",              "newp",       "bB:c:de:EfF:hIkl:LMm:Op:PR:s:S:t:T:vWx:X:y:Y:Z"),
     // psmux-only commands.  tmux has no cmd_entry for these, so the templates
-    // are derived from psmux's own handlers (see src/main.rs / connection.rs).
+    // come from psmux's own handlers (docs/tmux_args_reference.md is the
+    // per-command flag list psmux actually parses).
     ("choose-session",        "",           "F:f:K:kNO:rt:yZ"),
     ("choose-window",         "",           "F:f:K:kNO:rt:yZ"),
     ("server-info",           "info",       ""),
+    ("send-paste",            "",           "t:"),
+];
+
+/// Value-taking flags psmux adds to a command that tmux's template does not
+/// declare.  Kept separate so ARGS_TEMPLATES stays a verbatim transcription of
+/// tmux and every psmux-specific rule is visible in one place.
+const PSMUX_EXTRA_FLAGS: &[(&str, &str)] = &[
+    // psmux's new-window takes `-T <title>`; tmux's does not.
+    ("new-window", "T:"),
+    // psmux routes `-t <target>` on these three; tmux's templates have no `t`.
+    ("unbind-key", "t:"),
+    ("list-buffers", "t:"),
+    ("list-keys", "t:"),
 ];
 
 /// Aliases psmux accepts that tmux does not define, mapped to the canonical
-/// command whose template they share.
+/// command whose template they share (docs/tmux_args_reference.md).
 const EXTRA_ALIASES: &[(&str, &str)] = &[
-    // psmux accepts split-pane/splitp as synonyms of split-window.
     ("split-pane", "split-window"),
     ("splitp", "split-window"),
-    // psmux's CLI also answers to these abbreviations.
     ("kill-ses", "kill-session"),
+    ("a", "attach-session"),
+    ("at", "attach-session"),
+    ("resp", "respawn-pane"),
+    ("send-key", "send-keys"),
+    ("show-option", "show-options"),
+    ("show-window-option", "show-window-options"),
+    ("warmup", "start-server"),
 ];
 
 /// How a flag letter consumes a value, per its command's tmux template.
@@ -150,17 +170,36 @@ enum FlagValue {
     Optional,
 }
 
-/// The tmux `.args` template for `command`, resolving aliases.
-pub fn args_template(command: &str) -> Option<&'static str> {
-    let canonical = EXTRA_ALIASES
+/// Resolve a psmux-only alias to the command whose template it shares.
+fn canonical_command(command: &str) -> &str {
+    EXTRA_ALIASES
         .iter()
         .find(|(alias, _)| *alias == command)
         .map(|(_, target)| *target)
-        .unwrap_or(command);
+        .unwrap_or(command)
+}
+
+/// The canonical entry `(name, alias, template)` for `command`, if any.
+fn args_entry(command: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    let canonical = canonical_command(command);
     ARGS_TEMPLATES
         .iter()
         .find(|(name, alias, _)| *name == canonical || (!alias.is_empty() && *alias == canonical))
-        .map(|(_, _, template)| *template)
+}
+
+/// The tmux `.args` template for `command`, resolving aliases.
+pub fn args_template(command: &str) -> Option<&'static str> {
+    args_entry(command).map(|(_, _, template)| *template)
+}
+
+/// Value-taking flags psmux adds to `command` on top of tmux's template.
+fn psmux_extra_flags(command: &str) -> &'static str {
+    let Some((name, _, _)) = args_entry(command) else { return "" };
+    PSMUX_EXTRA_FLAGS
+        .iter()
+        .find(|(cmd, _)| cmd == name)
+        .map(|(_, extra)| *extra)
+        .unwrap_or("")
 }
 
 /// Classify `flag` against `template`, mirroring tmux's
@@ -225,6 +264,11 @@ pub fn validate_flag_arguments<S: AsRef<str>>(command: &str, args: &[S]) -> Resu
     let Some(template) = args_template(command) else {
         return Ok(());
     };
+    let extra = psmux_extra_flags(command);
+    let kind_of = |flag: char| match flag_value_kind(template, flag) {
+        FlagValue::None => flag_value_kind(extra, flag),
+        kind => kind,
+    };
     let mut i = 0;
     while i < args.len() {
         let token = args[i].as_ref();
@@ -237,7 +281,7 @@ pub fn validate_flag_arguments<S: AsRef<str>>(command: &str, args: &[S]) -> Resu
         while k < letters.len() {
             let flag = letters[k];
             k += 1;
-            match flag_value_kind(template, flag) {
+            match kind_of(flag) {
                 FlagValue::None => continue, // boolean, or not ours to police
                 kind => {
                     if k < letters.len() {

@@ -371,6 +371,50 @@ fn flag_value_kind_reads_the_tmux_template_grammar() {
 }
 
 #[test]
+fn psmux_only_aliases_resolve_to_their_canonical_command() {
+    // docs/tmux_args_reference.md is the list of names psmux answers to.
+    for (alias, canonical) in [
+        ("a", "attach-session"),
+        ("at", "attach-session"),
+        ("resp", "respawn-pane"),
+        ("send-key", "send-keys"),
+        ("show-option", "show-options"),
+        ("show-window-option", "show-window-options"),
+        ("warmup", "start-server"),
+        ("kill-ses", "kill-session"),
+        ("splitp", "split-window"),
+        ("split-pane", "split-window"),
+    ] {
+        assert_eq!(args_template(alias), args_template(canonical), "{}", alias);
+    }
+    assert_eq!(err("a", &["-t"]), "-t expects an argument");
+    assert_eq!(err("resp", &["-c"]), "-c expects an argument");
+    assert_eq!(err("send-key", &["-N"]), "-N expects an argument");
+    assert_eq!(err("show-option", &["-t"]), "-t expects an argument");
+}
+
+#[test]
+fn psmux_only_value_flags_are_covered_too() {
+    // Flags psmux parses that tmux's own template does not declare. Listed
+    // separately from ARGS_TEMPLATES so the tmux transcription stays verbatim.
+    assert_eq!(err("new-window", &["-T"]), "-T expects an argument");
+    assert_eq!(err("neww", &["-T"]), "-T expects an argument");
+    assert_eq!(err("unbind-key", &["-t"]), "-t expects an argument");
+    assert_eq!(err("unbind", &["-t"]), "-t expects an argument");
+    assert_eq!(err("list-buffers", &["-t"]), "-t expects an argument");
+    assert_eq!(err("list-keys", &["-t"]), "-t expects an argument");
+    // ...and they still take a value happily.
+    ok("new-window", &["-T", "title", "-t", "sess"]);
+    ok("unbind-key", &["-t", "sess", "-T", "root", "F1"]);
+    ok("list-keys", &["-t", "sess"]);
+    // psmux-only COMMANDS carry templates too.
+    assert_eq!(err("send-paste", &["-t"]), "-t expects an argument");
+    assert_eq!(err("new-pane", &["-t"]), "-t expects an argument");
+    assert_eq!(err("newp", &["-c"]), "-c expects an argument");
+    assert_eq!(err("choose-session", &["-F"]), "-F expects an argument");
+}
+
+#[test]
 fn the_table_has_no_duplicate_command_names() {
     let mut names: Vec<&str> = Vec::new();
     for (name, alias, _) in ARGS_TEMPLATES {

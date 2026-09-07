@@ -2906,3 +2906,7 @@ mod test_issue623_record_reader_gate;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue629_ssh_vt_wheel.rs"]
 mod test_issue629_ssh_vt_wheel;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_respawn_pane_refusal_survives.rs"]
+mod test_respawn_pane_refusal_survives;

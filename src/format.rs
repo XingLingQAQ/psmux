@@ -1898,6 +1898,10 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "client_flags" => "focused".into(),
         "client_key_table" => if app.client_prefix_active || matches!(app.mode, Mode::Prefix { .. }) {
             "prefix".into()
+        } else if let Some(t) = app.current_key_table.as_ref() {
+            // `switch-client -T <table>` latched a custom table (issue #640);
+            // tmux reports `c->keytable->name` here.
+            t.clone()
         } else {
             match app.mode {
                 Mode::CopyMode => "copy-mode-vi".into(),

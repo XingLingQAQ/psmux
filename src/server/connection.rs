@@ -3097,7 +3097,20 @@ match cmd {
         let has_big_t = args.windows(2).any(|w| w[0] == "-T");
         if has_big_t {
             let table = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].to_string()).unwrap_or_default();
-            let _ = tx.send(CtrlReq::SwitchClientTable(table));
+            if persistent {
+                // The attached client latches its own table and only tells the
+                // server so `#{client_key_table}` agrees; nothing to reply to.
+                let _ = tx.send(CtrlReq::SwitchClientTable(table, None));
+            } else {
+                // tmux errors with "table %s doesn't exist" for a table that
+                // has no bindings, so a one-shot caller must see it (#640).
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::SwitchClientTable(table, Some(rtx)));
+                let resp = rrx.recv_timeout(Duration::from_millis(2000))
+                    .unwrap_or_else(|_| "OK".to_string());
+                let _ = write!(write_stream, "{}\n", resp);
+                let _ = write_stream.flush();
+            }
         } else if args.contains(&"-n") || args.contains(&"-p") || args.contains(&"-l") {
             // #566: these three were fire-and-forget, so a failed or misdirected
             // switch was indistinguishable from a successful one at the CLI (rc 0,

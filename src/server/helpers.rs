@@ -25,6 +25,32 @@ pub(crate) fn collect_pane_paths_server(
     }
 }
 
+/// Resolve a `switch-client -T <table>` request against the live key tables.
+///
+/// Issue #640. tmux's `cmd_switch_client_exec` calls
+/// `key_bindings_get_table(tablename, 0)` — create = 0 — and errors with
+/// "table %s doesn't exist" when the table has no bindings, so a typo in the
+/// table name is reported rather than latching a table that swallows the next
+/// key forever.
+///
+/// `Ok(None)` means "back to the default table": `root` is what
+/// `server_client_set_key_table(c, NULL)` resolves to, and it is stored as
+/// `None` so `#{client_key_table}` keeps reporting `root`/`copy-mode-vi` from
+/// the pane's own mode. `root` and `prefix` are always live in tmux, so they
+/// are accepted even when the user deleted every binding in them.
+pub(crate) fn resolve_switch_client_table(
+    app: &AppState,
+    table: &str,
+) -> Result<Option<String>, String> {
+    if table == "root" {
+        return Ok(None);
+    }
+    if table == "prefix" || app.key_tables.contains_key(table) {
+        return Ok(Some(table.to_string()));
+    }
+    Err(format!("table {} doesn't exist", table))
+}
+
 /// Serialize key_tables into a compact JSON array for syncing to the client.
 /// Format: [{"t":"prefix","k":"x","c":"split-window -v","r":false}, ...]
 pub(crate) fn serialize_bindings_json(app: &AppState) -> String {

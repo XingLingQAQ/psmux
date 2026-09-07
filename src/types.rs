@@ -1164,6 +1164,9 @@ impl AppState {
         if self.client_registry.remove(&cid).is_some() {
             self.attached_clients = self.attached_clients.saturating_sub(1);
             self.client_prefix_active = false;
+            // A detaching client takes its `switch-client -T` latch with it
+            // (issue #640): the next client starts in the default table.
+            self.current_key_table = None;
             if self.latest_client_id == Some(cid) {
                 self.latest_client_id = self.client_registry.keys().max().copied();
             }
@@ -2323,7 +2326,11 @@ pub enum CtrlReq {
     ServerInfo(mpsc::Sender<String>),
     SendPrefix,
     PrevLayout,
-    SwitchClientTable(String),
+    /// `switch-client -T <table>`. The optional reply channel carries tmux's
+    /// "table %s doesn't exist" so a one-shot CLI caller can exit non-zero
+    /// (issue #640); the attached client sends its own latch updates over the
+    /// persistent connection and passes `None`.
+    SwitchClientTable(String, Option<mpsc::Sender<String>>),
     ListCommands(mpsc::Sender<String>),
     ResizeWindow(
         crate::resize_window::ResizeWindowRequest,

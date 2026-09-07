@@ -2465,7 +2465,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SendKey(k) => { app.status_message = None; crate::input::stamp_interactive_key(&mut app, &k); send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); state_dirty = true; meta_dirty = true; hook_event = Some("after-resize-pane"); }
-                CtrlReq::PrefixBegin => { app.client_prefix_active = true; state_dirty = true; }
+                // tmux: the prefix forces a switch to the prefix table, which
+                // drops any `switch-client -T` latch (issue #640).
+                CtrlReq::PrefixBegin => { app.client_prefix_active = true; app.current_key_table = None; state_dirty = true; }
                 CtrlReq::PrefixEnd => { app.client_prefix_active = false; state_dirty = true; }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); hook_event = Some("pane-mode-changed"); }
                 CtrlReq::CopyEnterPageUp => {
@@ -5154,6 +5156,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if !targets.is_empty() {
                         app.latest_client_id = None;
                         app.client_prefix_active = false;
+                        app.current_key_table = None;
                         if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                             resize_all_panes(&mut app);
                         }
@@ -5414,8 +5417,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::SwitchClientTable(table) => {
-                    app.current_key_table = Some(table);
+                CtrlReq::SwitchClientTable(table, resp_tx) => {
+                    // tmux `cmd_switch_client_exec`: `key_bindings_get_table(name, 0)`
+                    // does NOT create the table, so naming one that has no
+                    // bindings is an error, not a silent latch (issue #640).
+                    // "root" and "prefix" always exist in tmux, and "root" is
+                    // the default table the client falls back to.
+                    match crate::server::helpers::resolve_switch_client_table(&app, &table) {
+                        Ok(resolved) => {
+                            app.current_key_table = resolved;
+                            if let Some(rt) = resp_tx { let _ = rt.send("OK".to_string()); }
+                        }
+                        Err(msg) => {
+                            app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                            if let Some(rt) = resp_tx { let _ = rt.send(format!("ERROR {}", msg)); }
+                        }
+                    }
                     state_dirty = true;
                 }
                 CtrlReq::ListCommands(resp) => {

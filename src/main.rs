@@ -4181,6 +4181,17 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
+                        // `-T <table>` switches the client's KEY TABLE, and
+                        // tmux returns from `cmd_switch_client_exec` as soon as
+                        // it sees it. Dropping it here turned the whole command
+                        // into a bare `switch-client` that silently did nothing
+                        // (issue #640).
+                        "-T" => {
+                            if let Some(t) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" -T {}", crate::util::quote_arg_if_needed(t)));
+                                i += 1;
+                            }
+                        }
                         _ => {}
                     }
                     i += 1;

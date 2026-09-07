@@ -559,7 +559,7 @@ pub fn render_runs_line(
             let mut truncated = String::new();
             let mut used = 0usize;
             for ch in text.chars() {
-                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                let cw = vt100::char_width(ch).unwrap_or(1);
                 if used + cw > avail { break; }
                 used += cw;
                 truncated.push(ch);

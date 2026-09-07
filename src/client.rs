@@ -1061,7 +1061,7 @@ pub(crate) fn render_float_overlays(
                 if fl.focused && indicators.uses_arrows() && area.width >= 3 && area.height >= 3 {
                     let buffer = f.buffer_mut();
                     let title_width =
-                        unicode_width::UnicodeWidthStr::width(fl.title.as_str());
+                        vt100::str_width(fl.title.as_str());
                     let midpoint_x = area.x + area.width / 2;
                     let midpoint_y = area.y + area.height / 2;
                     let mut arrows = vec![
@@ -1524,7 +1524,7 @@ pub fn render_layout_json(
                         } else {
                             &cell.text
                         };
-                        let char_width = unicode_width::UnicodeWidthStr::width(text) as u16;
+                        let char_width = vt100::str_width(text) as u16;
                         if char_width >= 2 && c + char_width > max_c {
                             spans.push(Span::styled(" ", style));
                             c += 1;
@@ -1594,7 +1594,7 @@ pub fn render_layout_json(
                             let mut truncated = String::new();
                             let mut used = 0usize;
                             for ch in text.chars() {
-                                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                                let cw = vt100::char_width(ch).unwrap_or(1);
                                 if used + cw > avail { break; }
                                 used += cw;
                                 truncated.push(ch);
@@ -1718,7 +1718,7 @@ pub fn render_layout_json(
                     .replace("#{pane_title}", pane_title_str)
                     .replace("#{pane_index}", &id.to_string())
                     .replace("#P", &id.to_string());
-                let label_width = unicode_width::UnicodeWidthStr::width(pane_label.as_str()) as u16;
+                let label_width = vt100::str_width(pane_label.as_str()) as u16;
                 if label_width > 0 && area.width >= label_width {
                     let label_y = if border_status == "bottom" { area.y + area.height.saturating_sub(1) } else { area.y };
                     let label_area = Rect::new(area.x, label_y, label_width.min(area.width), 1);
@@ -2187,6 +2187,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut status_bold: bool = false;
     let mut custom_status_left: Option<String> = None;
     let mut custom_status_right: Option<String> = None;
+    // Last `codepoint-widths` array applied to this process's width table, so
+    // a render frame that did not change the option costs nothing.
+    let mut last_codepoint_widths: Vec<String> = Vec::new();
     let mut win_status_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_current_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_sep: String = " ".to_string();
@@ -5970,6 +5973,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // The writer lives in this client process, so the server-side option
         // value must be pushed here for the rewrite toggle to take effect.
         crate::platform::set_bold_is_bright(state.bold_is_bright);
+        // Sync codepoint-widths into this process's width table, for the same
+        // reason as bold-is-bright above: the status line, tab bar, pane
+        // labels and float titles are measured and drawn HERE, so the client
+        // has to resolve character widths exactly as the server's emulator
+        // does or the two disagree and cells strand. Rebuilding the table is
+        // O(entries), so only do it when the value actually changed rather
+        // than on every render frame.
+        let codepoint_widths = state
+            .client_render_options
+            .codepoint_widths
+            .as_deref()
+            .unwrap_or(&[]);
+        if codepoint_widths != last_codepoint_widths.as_slice() {
+            vt100::set_codepoint_widths(codepoint_widths);
+            last_codepoint_widths = codepoint_widths.to_vec();
+        }
         // Update status-left / status-right from server (already format-expanded)
         if let Some(sl) = state.status_left {
             // Pass full string — visual truncation is handled by ratatui
@@ -6773,7 +6792,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 Style::default().fg(sb_fg).bg(sb_bg)
             };
             // ── Build three separate span groups: left, tabs, right ──
-            use unicode_width::UnicodeWidthStr;
             // If status_format[0] is set, use it for line 0 instead of the default 3-part layout
             let use_status_format_0 = status_format.len() > 0 && !status_format[0].is_empty();
             // Left portion: custom status_left or default [session] prefix
@@ -6811,7 +6829,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 if i > 0 {
                     // Parse inline styles in separator (e.g. "#[fg=#44475a]|")
                     let sep_spans = crate::style::parse_inline_styles(&win_status_sep, sb_base);
-                    let sep_w: u16 = sep_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref()) as u16).sum();
+                    let sep_w: u16 = sep_spans.iter().map(|s| vt100::str_width(s.content.as_ref()) as u16).sum();
                     tab_spans_all.extend(sep_spans);
                     tab_cursor += sep_w;
                 }
@@ -6863,7 +6881,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 let parsed = crate::style::parse_inline_styles(&tab_text, fallback_style);
                 let tab_start = tab_cursor;
-                let tab_w: u16 = parsed.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref()) as u16).sum();
+                let tab_w: u16 = parsed.iter().map(|s| vt100::str_width(s.content.as_ref()) as u16).sum();
                 tab_cursor += tab_w;
                 tab_rel_positions.push((w.idx, tab_start, tab_cursor));
                 tab_spans_all.extend(parsed);
@@ -6887,9 +6905,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             crate::style::truncate_spans_to_width(&mut right_spans, state.status_right_length);
 
             // Measure widths using Unicode display width
-            let left_w: usize = left_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-            let tabs_w: usize = tab_spans_all.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-            let right_w: usize = right_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let left_w: usize = left_spans.iter().map(|s| vt100::str_width(s.content.as_ref())).sum();
+            let tabs_w: usize = tab_spans_all.iter().map(|s| vt100::str_width(s.content.as_ref())).sum();
+            let right_w: usize = right_spans.iter().map(|s| vt100::str_width(s.content.as_ref())).sum();
             let total_width = status_chunk.width as usize;
 
             // Assemble final spans based on status-justify

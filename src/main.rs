@@ -40,6 +40,7 @@ mod cross_session;
 mod cross_session_server;
 mod paths;
 mod timer_res;
+mod pty_trace;
 mod wsl_path;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};

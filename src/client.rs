@@ -1923,6 +1923,7 @@ fn establish_connection_with_timeout(
                 }
             }
             let line = std::mem::take(&mut buf);
+            crate::pty_trace::mark_plain("c", line.len());
             buf = String::with_capacity(64 * 1024);
             if frame_tx.send(line).is_err() { return; }
         }
@@ -2671,10 +2672,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
         }
-        // Expire stale key_send_instant after 30ms — ConPTY echo should
-        // have arrived by then; stop force-dumping to save CPU.
+        // Expire the fast-poll window on time, and ONLY on time. One constant
+        // governs how long it stays open; see key_echo_window_expired.
         if let Some(ks) = key_send_instant {
-            if ks.elapsed().as_millis() > 30 { key_send_instant = None; }
+            if key_echo_window_expired(ks.elapsed().as_millis()) { key_send_instant = None; }
         }
         // Safety valve: if dump_in_flight is stuck for >500ms (e.g. server
         // did not respond), release it so the client doesn't spin at 1ms.
@@ -2723,6 +2724,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         if client_log_enabled() {
                             client_log("frame", &format!("received {} bytes", line.len()));
                         }
+                        crate::pty_trace::mark_plain("d", line.len());
                         dump_buf = line; got_frame = true; dump_in_flight = false;
                     }
                 }
@@ -2765,43 +2767,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         #[cfg(not(windows))]
         let paste_pend_active = false;
 
-        let poll_ms = if paste_pend_active { 1 }
-            else if got_frame { 0 }
-            else if key_send_instant.map_or(false, |t| t.elapsed().as_millis() < 60) {
-                // A key is out and its echo has not come back yet. The server
-                // PUSHES that frame, so the only thing standing between the
-                // frame landing on the socket and it reaching the screen is
-                // how long this loop sleeps before looking.
-                //
-                // This has to sit ABOVE the dump_in_flight arm. Sending a key
-                // sets force_dump, which immediately puts a dump-state on the
-                // wire, so dump_in_flight is true for exactly the window where
-                // the echo is expected — and that arm then slept 5ms per
-                // iteration while the pushed frame carrying the echo sat
-                // unread on the socket. The window is short (it closes the
-                // moment a new frame renders, and hard-stops at 60ms) and only
-                // open while actually typing.
-                1
-            }
-            else if dump_in_flight { 5 }
-            else if force_dump { 0 }
-            else if typing_active {
-                // Rate-limit to ~100fps (10ms) when typing.  The snapshot-
-                // based serialisation in dump_layout_json_fast now holds
-                // the parser mutex for only ~1ms (cell snapshot), so
-                // polling at 10ms no longer starves the ConPTY reader
-                // thread.  10ms is notably shorter than ConPTY's ~16ms
-                // render interval, avoiding systematic alignment delays.
-                let remaining = 10u64.saturating_sub(since_dump);
-                remaining
-            }
-            else {
-                // Server pushes frames proactively via auto-push —
-                // no need for fast idle polling.  16ms (~60fps) ensures
-                // pushed frames render within one vsync while using
-                // negligible CPU (vs 50ms poll + dump-state roundtrip).
-                16
-            };
+        let poll_ms = input_poll_ms(
+            paste_pend_active,
+            got_frame,
+            key_send_instant.map(|t| t.elapsed().as_millis()),
+            dump_in_flight,
+            force_dump,
+            typing_active,
+            since_dump,
+        );
 
         cmd_batch.clear();
 
@@ -7471,10 +7445,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // DON'T clear last_key_send_time — keep fast-dumping for 100ms
         // after last keystroke so we catch the ConPTY echo promptly.
         // The timer expires naturally in the poll_ms calculation above.
-        // Clear key_send_instant once echo arrives (frame differs).
-        if got_frame && dump_buf != prev_dump_buf {
-            key_send_instant = None;
-        }
+        // key_send_instant is NOT cleared here. A frame arriving is not proof
+        // that the echo arrived, and on the shell people actually type into it
+        // usually is not: PSReadLine answers one keystroke with TWO writes,
+        // a bare cursor-hide first and the character itself ~15ms later
+        // (tests/conpty_echolat.cs shows the split at the pseudoconsole, with
+        // the character in the first chunk 0 times out of 40). The cursor-hide
+        // renders as a changed frame, so clearing on it shut the fast-poll
+        // window right before the character landed, and the frame carrying it
+        // then sat unread on the socket for a 5ms or 10ms console poll. That
+        // was ~5ms of the median and most of the spread between runs.
+        // The time-based expiry above closes the window instead.
         force_dump = false;
     }
 
@@ -7655,6 +7636,74 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_zoom_bleed.rs"]
 mod test_zoom_bleed;
+
+/// How long the client keeps polling console input at 1ms after sending a key,
+/// waiting for that key's echo to come back and be drawn.
+///
+/// It has to outlast the slowest echo psmux is expected to render, or the
+/// window shuts while the character is still in flight and the frame carrying
+/// it waits on a coarser poll instead. A pwsh pane needs about 15ms just to get
+/// the echoed character out of its ConPTY before psmux sees a byte of it: that
+/// is PSReadLine, measured against a raw pseudoconsole with no psmux in the
+/// picture by tests/conpty_echolat.cs. psmux then has to render and deliver it.
+pub(crate) const KEY_ECHO_WINDOW_MS: u128 = 60;
+
+/// Whether the fast-poll window opened by a keystroke has expired.
+///
+/// Time is the ONLY thing that closes it. A frame arriving is not evidence
+/// that the echo arrived, and at a pwsh prompt it usually is not: PSReadLine
+/// answers one keystroke with TWO writes, a bare cursor-hide immediately and
+/// the character itself about 15ms later (conpty_echolat puts the character in
+/// the first chunk 0 times out of 40). The cursor-hide renders as a perfectly
+/// good changed frame, so closing the window on it shut the fast poll right
+/// before the character landed.
+pub(crate) fn key_echo_window_expired(elapsed_ms: u128) -> bool {
+    elapsed_ms > KEY_ECHO_WINDOW_MS
+}
+
+/// The console-input poll interval, in milliseconds, for one iteration of the
+/// client loop.
+///
+/// Pure so the ORDERING can be tested. The `key_echo_pending_ms` arm must sit
+/// above `dump_in_flight`: sending a key sets `force_dump`, which puts a
+/// dump-state on the wire immediately and therefore makes `dump_in_flight` true
+/// for exactly the window in which the echo is expected. With the arms the
+/// other way round the loop sleeps 5ms per iteration while the frame carrying
+/// the echo sits unread on the socket.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn input_poll_ms(
+    paste_pend_active: bool,
+    got_frame: bool,
+    key_echo_pending_ms: Option<u128>,
+    dump_in_flight: bool,
+    force_dump: bool,
+    typing_active: bool,
+    since_dump: u64,
+) -> u64 {
+    if paste_pend_active {
+        1
+    } else if got_frame {
+        0
+    } else if key_echo_pending_ms.is_some_and(|e| !key_echo_window_expired(e)) {
+        1
+    } else if dump_in_flight {
+        5
+    } else if force_dump {
+        0
+    } else if typing_active {
+        // Rate-limit to ~100fps when typing. 10ms is notably shorter than
+        // ConPTY's ~16ms render interval, avoiding systematic alignment delays.
+        10u64.saturating_sub(since_dump)
+    } else {
+        // The server pushes frames proactively, so 16ms (~60fps) still renders
+        // a pushed frame within one vsync, at negligible CPU.
+        16
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests-rs/test_keystroke_echo_window.rs"]
+mod test_keystroke_echo_window;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_zoom_cursor_rect.rs"]

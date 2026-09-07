@@ -303,6 +303,11 @@ class KeyLat
             fx = short.Parse(p[0]); fy = short.Parse(p[1]);
         }
         var sw = Stopwatch.StartNew();
+        // Absolute QueryPerformanceCounter base, so a trial's inject/appear
+        // instants can be lined up against timestamps taken in ANOTHER process
+        // (src/pty_trace.rs logs raw QPC ticks). QPC is system wide.
+        long qpcBase = Stopwatch.GetTimestamp();
+        Log.Add("QPCBASE " + qpcBase + " freq " + Stopwatch.Frequency);
         var samples = new List<double>();
         var raw = new List<string>();
         int total = n + warmup;
@@ -335,6 +340,8 @@ class KeyLat
             {
                 samples.Add(appear - t0);
                 raw.Add((appear - t0).ToString("F3", CultureInfo.InvariantCulture));
+                Log.Add(string.Format(CultureInfo.InvariantCulture,
+                    "TRIALT {0} char={1} t0_ms={2:F3} appear_ms={3:F3}", t - warmup, c, t0, appear));
             }
 
             if (!noErase)

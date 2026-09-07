@@ -576,6 +576,15 @@ if line.trim() == "PERSISTENT" {
                 if ws_bg.flush().is_err() { return; }
             }
             // 1. Drain pending command responses.
+            //
+            // This wait runs before the frame slot is checked below, so in
+            // principle it delays a pushed frame by up to its duration. It was
+            // A/B'd at 1ms against 5ms with n=60 on a quiet machine and moved
+            // the keystroke median by 0.11ms (18.44 -> 18.33) — nothing, because
+            // while a client is typing the echo frame reaches it as a
+            // dump-state RESPONSE through the arm above rather than through the
+            // slot. 5ms stays: 1ms would cost five times the wakeups per
+            // attached client to buy noise.
             match resp_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(rrx) => {
                     // Use a timeout matching the TCP write timeout (5 s) so the
@@ -609,6 +618,7 @@ if line.trim() == "PERSISTENT" {
             if let Some(text) = frame {
                 if write!(ws_bg, "{}\n", text).is_err() { return; }
                 if ws_bg.flush().is_err() { return; }
+                crate::pty_trace::mark_plain("t", text.len());
             }
         }
     });

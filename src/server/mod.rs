@@ -2456,6 +2456,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Push combined_buf (not cached_dump_state) so one-shot
                     // fields like bell and clipboard reach all clients.
                     // The cached copy omits them for NC dedup safety.
+                    crate::pty_trace::mark_plain("s", combined_buf.len());
                     crate::types::push_frame(&combined_buf);
                     let _ = resp.send(combined_buf.clone());
                     dump_state_seen_full.insert(dump_client_id);
@@ -6634,6 +6635,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
             cached_data_version = combined_data_version(&app);
             state_dirty = false;
+            crate::pty_trace::mark_plain("f", combined_buf.len());
             crate::types::push_frame(&combined_buf);
         }
         // ── Status-interval timer: fire hooks periodically ──

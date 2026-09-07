@@ -104,6 +104,17 @@ psmux and vt100-psmux cannot disagree about a character's width internally.
 * `tests/test_issue639_wide_char_clear.ps1`, 4 checks including an explicit
   known-good CJK round-trip gate. 4/4 pass.
 
+## The one variable I could NOT control
+
+Resizing the OUTER terminal (dragging the ssh client window, i.e. SIGWINCH to
+the psmux client) while CJK is on screen. `tests/conptycap.cs` creates a
+pseudo console at a fixed size and never calls `ResizePseudoConsole`, so the
+client's ratatui buffer never had to be resized under a live wide glyph. A
+`Buffer::resize` followed by a diff against the resized previous buffer is a
+classic place for stale cells to survive. Everything else on the coordinator's
+list was exercised. Covering this properly means teaching conptycap to resize
+mid-run; worth doing if the reporter says a resize is involved.
+
 ## Diagnostic to ask sdaheng for
 
 1. Which terminal is at the LOCAL end of the ssh session, and its exact version

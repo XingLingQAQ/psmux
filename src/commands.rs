@@ -975,7 +975,17 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
 fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() { return Ok(()); }
-    
+
+    // Issue #635: this is the route menus, hooks, confirm dialogs, the command
+    // prompt and key bindings take. A value-taking flag with no value must not
+    // fall through to the DEFAULT target here either — `kill-window -t` bound
+    // to a key used to kill the current window silently.
+    if let Err(flag_error) = crate::cli::validate_command_line_flags(&parts) {
+        app.status_message = Some((flag_error, std::time::Instant::now(), None));
+        return Ok(());
+    }
+
+
     match parts[0] {
         "new-window" | "neww" => {
             if let Some(port) = app.control_port {

@@ -2103,7 +2103,16 @@ pub enum CtrlReq {
         target_pane: Option<usize>,
         horizontal: bool,
     },
-    RespawnPane(Option<String>, bool, Option<String>, bool),  // optional workdir (-c), kill flag (-k), command (-- shell-command), empty (-E)
+    /// respawn-pane. Fields: optional workdir (-c), kill flag (-k), command
+    /// (`--`/positional shell-command), empty (-E), and the per-request reply.
+    ///
+    /// The reply channel exists because every way this can fail is ROUTINE and
+    /// user-caused (`pane ... still active` without -k, a bad `-c` directory, a
+    /// command that will not spawn). Those used to travel out of the server
+    /// event loop on a `?` and terminate the whole server — every window and
+    /// pane destroyed — while the client still exited 0 with empty output.
+    /// tmux answers `respawn pane failed: <cause>` at exit 1 and keeps running.
+    RespawnPane(Option<String>, bool, Option<String>, bool, mpsc::Sender<Result<(), String>>),
     /// set-option -p (issue #580): pane-scoped option. Fields: raw -t pane
     /// target ("" = active pane), option name, value ("" = unset via -u/-U),
     /// reply ("" on success, "ERROR: ..." otherwise). Unwired pane options
@@ -2344,7 +2353,12 @@ pub enum CtrlReq {
         window_id: Option<usize>,
         size: Option<(u16, u16)>,
     },
-    RespawnWindow(Option<String>, Option<String>),  // optional workdir (-c), optional shell-command operand
+    /// respawn-window. Fields: optional workdir (-c), optional shell-command
+    /// operand, per-request reply. Shares `respawn_active_pane` with
+    /// `RespawnPane` and therefore shared its server-killing `?`; the spawn
+    /// failures (bad `-c`, unspawnable command) are routine and belong to the
+    /// requesting client. tmux: `respawn window failed: <cause>`, exit 1.
+    RespawnWindow(Option<String>, Option<String>, mpsc::Sender<Result<(), String>>),
     FocusIn,
     FocusOut,
     CommandPrompt(String),

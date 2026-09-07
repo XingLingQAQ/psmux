@@ -2352,7 +2352,18 @@ match cmd {
             // `-t` is already stripped by `without_outer_target`; `-c` is the
             // only other flag here that takes a value.
             .or_else(|| respawn_positional_command(&args));
-        let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty));
+        // Read the reply: every respawn failure is a routine command error
+        // ("pane ... still active" without -k, a bad -c, an unspawnable
+        // command). Fire-and-forget here meant the CLI exited 0 with empty
+        // output for a refusal that had just taken the whole server down.
+        let (resp_s, resp_r) = mpsc::channel();
+        let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty, resp_s));
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
+            }
+        }
     }
     // ── Cross-session pane forwarding commands ──────────────────────
     "pane-forward-extract" => {
@@ -3967,7 +3978,14 @@ match cmd {
             .filter(|s| !s.is_empty())
             .or_else(|| respawn_positional_command(&args));
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
-        let _ = tx.send(CtrlReq::RespawnWindow(workdir, command));
+        let (resp_s, resp_r) = mpsc::channel();
+        let _ = tx.send(CtrlReq::RespawnWindow(workdir, command, resp_s));
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
+            }
+        }
     }
     "lock-server" | "lock-session" | "lock" | "locks" => {
         // Lock is a no-op on Windows (no terminal locking concept)
@@ -4941,8 +4959,14 @@ fn dispatch_control_command(
                 .map(|i| args[i + 1..].join(" "))
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty));
-            let _ = resp_tx.send(String::new());
+            // Control mode: a refused respawn must come back as %error, not as
+            // a successful %end (the refusal used to kill the server outright).
+            let (resp_s, resp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty, resp_s));
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
             true
         }
         "wait-for" | "wait" => {

@@ -3450,7 +3450,16 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // The server answers "ERROR: respawn pane failed: <cause>" when
+                // it refuses (tmux cmd-respawn-pane.c: cmdq_error + exit 1).
+                // Fire-and-forget here reported rc 0 with no output for a
+                // refusal, which is exactly how the server-killing bug stayed
+                // invisible to callers.
+                let resp = send_control_with_response(cmd)?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // last-window - Select last used window
@@ -4782,7 +4791,13 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // Same contract as respawn-pane: "ERROR: respawn window
+                // failed: <cause>" -> stderr + exit 1 (tmux parity).
+                let resp = send_control_with_response(cmd)?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // link-window - Link a window

@@ -18,28 +18,46 @@
 //! a raw echo child: 32.3ms median before this and the two render-path fixes
 //! that landed with it, 4.6ms after, against a bare conhost baseline of 0.7ms.
 //!
-//! Honest accounting of what THIS file is worth on its own: with those two
-//! other fixes already in place, an A/B of the same build via
-//! `PSMUX_NO_TIMER_RES=1` measured 4.63ms held versus 4.59ms released (n=40 and
-//! n=30, machine under load), i.e. no measurable difference. The 15.6ms tick is
-//! real and `tests/timerres_probe.cs` still shows it directly (`Sleep(1)` is
-//! 15.570ms unraised, 1.856ms raised on this machine), but once the parser
-//! stopped coalescing echoes and the client stopped sleeping through its own
-//! echo frame, the keystroke path no longer WAITS on a sub-tick timer often
-//! enough for the period to show up in the number. Treat this as insurance for
-//! the remaining sub-tick waits rather than as a measured win, and re-A/B it on
-//! a quiet machine before relying on it: it costs power, so if it stays
-//! unmeasurable it should go.
+//! Honest accounting of what THIS file is worth on its own: UNRESOLVED, two
+//! measurements disagree, so it stays in.
 //!
-//! At an idle pwsh prompt the figure stays around 25ms regardless of this
-//! period, while the same transport carries a raw echo child in 4.6ms. So the
-//! extra cost arrives with pwsh rather than with psmux's transport; a stage
-//! trace attributes it to the ConPTY read, on the theory that conhost's
-//! pseudoconsole splits PSReadLine's echo into two chunks with the character in
-//! the second. That attribution has NOT been independently confirmed here and
-//! the arithmetic does not fully close (4.6ms plus a ~14ms split does not reach
-//! 25ms), so the pwsh path is still open for investigation. Do not quote it as
-//! settled.
+//! The mechanism is not in doubt. `tests/timerres_probe.cs` shows the tick
+//! directly (`Sleep(1)` is 15.570ms unraised, 1.856ms raised here), and the
+//! feature demonstrably engages end to end: with a client attached the system
+//! resolution reads 1.0000ms, and with `PSMUX_NO_TIMER_RES=1` it reads
+//! 15.6250ms. A detached server correctly holds nothing.
+//!
+//! What is disputed is whether holding it still BUYS latency now that the
+//! parser stopped coalescing echo batches and the client stopped closing its
+//! echo poll window on the wrong frame. Two A/Bs of the same build through
+//! `PSMUX_NO_TIMER_RES`, both n>=50:
+//!   held vs released, echo child median: 3.53 vs 3.75, p90 4.56 vs 4.56
+//!     (measured on the merged tree, no effect)
+//!   held vs released, echo child median: 3.56 vs 17.55, p90 4.85 vs 32.56
+//!     (measured on the branch that introduced the echo window fix, large
+//!      effect, NOT reproducible on the merged tree)
+//!
+//! Until that is settled, keep it: the cost is a 1ms period held only while a
+//! terminal is actually attached, the opt-out is one env var, and the downside
+//! of being wrong in the other direction is a 15.6ms tick landing back on every
+//! sub-tick wait in the interactive path. Do not cite either row as settled,
+//! and re-A/B on a genuinely idle box before changing anything here.
+//!
+//! At an idle pwsh prompt the floor is about 15.5ms no matter what this file
+//! does, and that floor is NOT psmux. Measured with `tests/conpty_echolat.cs`,
+//! a standalone pseudoconsole host with no psmux in it at all, one keystroke:
+//! pwsh puts the echoed character on the ConPTY output pipe in 16.02ms median,
+//! and the SAME pwsh with `Remove-Module PSReadLine` does it in 0.17ms; cmd.exe
+//! is 0.15ms. Turning prediction off does not help (15.86ms), so it is
+//! PSReadLine's render path itself, and the value is quantised to the same
+//! 15.6ms tick because pwsh never raises its own timer resolution. Every trial
+//! showed the character in a SECOND chunk arriving ~15ms after a first
+//! cursor-hide chunk, 0 of 40 in the first.
+//!
+//! That is why the usual "bare console at ~1ms" baseline is not a fair floor
+//! for a multiplexer: it reads the conhost screen buffer, where PSReadLine
+//! takes the console API fast path, not the pipe. Windows Terminal reads the
+//! same pipe psmux does and cannot beat that floor either.
 //!
 //! Requesting 1ms costs power, so it is held only while it buys something: for
 //! the whole life of a client process (a client only exists while a terminal is

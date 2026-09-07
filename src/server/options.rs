@@ -7,6 +7,44 @@ use crate::server::option_catalog::WINDOW_OPTION_NAMES;
 /// refuses anything outside that range on every route (#606).
 pub(crate) const REPEAT_TIME_MAX_MS: i64 = 2_000_000;
 
+/// Split a `codepoint-widths` option value into its array entries.
+///
+/// tmux declares the option `OPTIONS_TABLE_IS_ARRAY` with `.separator = ","`,
+/// so a value written as one string is split on commas into array items
+/// (`options_array_assign` in options.c). Empty items are dropped, matching
+/// tmux's own skip of an empty element.
+pub(crate) fn split_codepoint_widths(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Push the stored `codepoint-widths` array into the process-global width
+/// table that every width decision reads.
+///
+/// This is tmux's `utf8_update_width_cache()`, which `options.c` calls from
+/// the option-changed hook (`if (strcmp(name, "codepoint-widths") == 0)`) so a
+/// live `set -s codepoint-widths ...` affects the very next character drawn
+/// rather than waiting for a server restart.
+pub(crate) fn sync_codepoint_widths(app: &AppState) {
+    vt100::set_codepoint_widths(&app.codepoint_widths);
+}
+
+/// Replace the whole `codepoint-widths` array and rebuild the width table.
+pub(crate) fn set_codepoint_widths(app: &mut AppState, value: &str) {
+    app.codepoint_widths = split_codepoint_widths(value);
+    sync_codepoint_widths(app);
+}
+
+/// Append entries to the `codepoint-widths` array (`set -sa`) and rebuild.
+pub(crate) fn append_codepoint_widths(app: &mut AppState, value: &str) {
+    app.codepoint_widths.extend(split_codepoint_widths(value));
+    sync_codepoint_widths(app);
+}
+
 /// Parse a main-pane-width / main-pane-height value.
 ///
 /// psmux stores both as a percentage (see AppState::main_pane_width), and tmux
@@ -160,6 +198,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "set-clipboard" => app.set_clipboard.clone(),
         "main-pane-width" => app.main_pane_width.to_string(),
         "main-pane-height" => app.main_pane_height.to_string(),
+        "codepoint-widths" => app.codepoint_widths.join(","),
         "command-alias" => {
             app.command_aliases.iter()
                 .map(|(k, v)| format!("{}={}", k, v))
@@ -417,6 +456,7 @@ pub(crate) fn apply_set_option(
                 app.pane_base_index = idx;
             }
         }
+        "codepoint-widths" => { set_codepoint_widths(app, value); }
         "mouse" => { app.mouse_enabled = value == "on" || value == "true" || value == "1" || value == "yes"; }
         "bold-is-bright" => {
             app.bold_is_bright = matches!(value, "on" | "true" | "1" | "yes");

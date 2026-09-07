@@ -243,6 +243,13 @@ pub(crate) fn expand_status_formats(
                 app,
             )),
             pane_border_indicators: Some(pane_border_indicators),
+            // Only travels when the user actually set the option, so the
+            // default configuration adds nothing to every render frame.
+            codepoint_widths: if app.codepoint_widths.is_empty() {
+                None
+            } else {
+                Some(app.codepoint_widths.clone())
+            },
         },
         status_format_json: {
             let mut sf = String::from("[");

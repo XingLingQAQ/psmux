@@ -1,5 +1,4 @@
 use crate::term::BufWrite as _;
-use unicode_width::UnicodeWidthChar as _;
 
 /// Parse an OSC 7 URI into a filesystem path.
 /// Accepts `file://hostname/path`, `file:///path`, or a bare `/path`.
@@ -1182,13 +1181,12 @@ impl Screen {
     /// over the whole cell is checked too, so any other sequence that
     /// `unicode-width` considers double width is promoted as well.
     fn wants_wide_promotion(cell: &crate::Cell, c: char) -> bool {
-        use unicode_width::UnicodeWidthStr as _;
         // A cell that is already wide must not be promoted again: tmux only
         // promotes when the stored width is 1, so `📛 + VS16` stays 2 columns
         // rather than growing to 4.
         cell.has_contents()
             && !cell.is_wide()
-            && (c == VS16 || cell.contents().width() > 1)
+            && (c == VS16 || crate::width::str_width(cell.contents()) > 1)
     }
 
     /// Widen the narrow cell at (`row`, `col`) into a two column cell, taking
@@ -1247,7 +1245,7 @@ impl Screen {
         let size = self.grid().size();
         let attrs = self.attrs;
 
-        let width = c.width();
+        let width = crate::width::char_width(c);
         if width.is_none() && (u32::from(c)) < 256 {
             // don't even try to draw control characters
             return;

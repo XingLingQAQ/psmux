@@ -1,4 +1,3 @@
-use unicode_width::UnicodeWidthChar as _;
 
 // 22 content bytes keep the cell compact; the struct is 44 bytes once the
 // Attrs OSC 8 hyperlink id (u32), the SGR 58 underline colour, the extended
@@ -52,7 +51,11 @@ impl Cell {
         // strings in this context should always be an arbitrary character
         // followed by zero or more zero-width characters, so we should only
         // have to look at the first character
-        self.set_wide(c.width().unwrap_or(1) > 1);
+        // Routed through the shared width function so a `codepoint-widths`
+        // override decides the wide flag too. If this used unicode-width
+        // directly while `Screen::text` honoured the override, the flag and
+        // the column advance would disagree and strand a cell (#639).
+        self.set_wide(crate::width::char_width(c).unwrap_or(1) > 1);
         self.attrs = a;
     }
 

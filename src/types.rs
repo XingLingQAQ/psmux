@@ -963,6 +963,12 @@ pub struct AppState {
     pub copy_command: String,
     /// command-alias: map of alias name to expansion
     pub command_aliases: std::collections::HashMap<String, String>,
+    /// codepoint-widths: server-scope ARRAY of Unicode width overrides, one
+    /// entry per element in tmux order (later entries win). Stored as the raw
+    /// entry strings so `show-options` can echo them back verbatim; the parsed
+    /// lookup table lives in the vt100 crate, which is where every width
+    /// decision is made.
+    pub codepoint_widths: Vec<String>,
     /// Config parse warnings (unknown command/option, malformed value, missing
     /// args) collected during a config load or source-file, surfaced to the
     /// user instead of being silently ignored (issue #370 follow-up).
@@ -1733,6 +1739,7 @@ impl AppState {
             allow_passthrough: "off".to_string(),
             copy_command: String::new(),
             command_aliases: std::collections::HashMap::new(),
+            codepoint_widths: Vec::new(),
             config_warnings: Vec::new(),
             config_warn_line: None,
             set_clipboard: "on".to_string(),

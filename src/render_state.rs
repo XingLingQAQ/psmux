@@ -24,4 +24,16 @@ pub(crate) struct ClientRenderOptions {
     pub window_active_style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_border_indicators: Option<PaneBorderIndicators>,
+    /// `codepoint-widths` entries, carried so the CLIENT process resolves
+    /// character widths the same way the server's emulator does.
+    ///
+    /// The client renders the status line, tab bar, pane labels and float
+    /// titles itself, and measures them with its own width calls. If only the
+    /// server honoured the override the two would disagree about how wide a
+    /// glyph is, which is the same class of stranded-cell bug the option
+    /// exists to fix. `None` (the common case, since the option is empty by
+    /// default) is skipped on the wire entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "cpw")]
+    pub codepoint_widths: Option<Vec<String>>,
 }

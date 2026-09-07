@@ -1953,6 +1953,14 @@ fn run_main() -> io::Result<()> {
                 let mut port_seen = false;
                 let mut ready = false;
                 let mut poll_step_ms: u64 = READY_POLL_FIRST_MS;
+                // The backoff below starts at 1ms, and without the 1ms timer
+                // period every one of those sub-tick sleeps rounds up to
+                // Windows' default 15.6ms per-process tick, which would make
+                // the early probes that catch a warm claim fire no sooner than
+                // the flat 20ms interval they replaced. Held only across this
+                // wait: a CLI invocation that is not waiting on anything has no
+                // use for a high resolution timer. See src/timer_res.rs.
+                crate::timer_res::set_high(true);
                 loop {
                     if std::path::Path::new(&port_path).exists() {
                         port_seen = true;
@@ -1998,6 +2006,7 @@ fn run_main() -> io::Result<()> {
                     std::thread::sleep(Duration::from_millis(poll_step_ms));
                     poll_step_ms = next_ready_poll_step_ms(poll_step_ms);
                 }
+                crate::timer_res::set_high(false);
                 if !ready {
                     eprintln!("psmux: failed to create session '{}'", name);
                     // Issue #370: surface the real reason instead of leaving it

@@ -17,6 +17,8 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 
 **The flags column** uses getopt style notation. A bare letter is a boolean, a letter followed by `:` takes a value. `-t:` therefore means `-t <target>`.
 
+**A value taking flag must be given its value.** `psmux kill-window -t` with nothing after the `-t` is an error on every layer: `-t expects an argument` at exit 1, and the command does not run. This is tmux's rule (`arguments.c`, `args_parse_flags`) and it matters most for the commands whose no target default is destructive: before psmux enforced it, a bare `-t` made `kill-window` kill the current window and `kill-session` destroy the current session, both silently at exit 0 (issue #635). Note the shape tmux uses for the value itself: a required value swallows whatever token follows, so `kill-window -t -a` means the target is literally `-a`, and `resize-pane -x -5` passes `-5` as the size. Flag parsing ends at the first non flag argument and at `--`, so a `-t` after either is data, not a flag.
+
 **`-t` is global at the CLI.** psmux scans the whole command line for `-t <target>` before the command name is even dispatched, so `psmux -t work:1 kill-pane` and `psmux kill-pane -t work:1` both work even for commands whose own parser ignores `-t`.
 
 **Combined short flags** are expanded for `new-session` (`-As main` is `-A -s main`), for `set-option` and `show-options` (`-ga`, `-gu`, `-gq`), for `set-hook` (`-ga`, `-ug`) and for the config file forms of `if-shell` (`-bF`, `-Fb`). Elsewhere flags must be given separately.

@@ -14,9 +14,32 @@
 //! keystroke to screen latency added to every character typed, measured on a
 //! machine whose GLOBAL resolution was already 1ms.
 //!
-//! Measured with tests/test_keystroke_latency_bench.ps1, single keystroke at an
-//! idle pwsh prompt: 32.4ms median before, 1.5ms median after, against a bare
-//! conhost baseline of 1.07ms.
+//! Measured with tests/test_keystroke_latency_bench.ps1, single keystroke into
+//! a raw echo child: 32.3ms median before this and the two render-path fixes
+//! that landed with it, 4.6ms after, against a bare conhost baseline of 0.7ms.
+//!
+//! Honest accounting of what THIS file is worth on its own: with those two
+//! other fixes already in place, an A/B of the same build via
+//! `PSMUX_NO_TIMER_RES=1` measured 4.63ms held versus 4.59ms released (n=40 and
+//! n=30, machine under load), i.e. no measurable difference. The 15.6ms tick is
+//! real and `tests/timerres_probe.cs` still shows it directly (`Sleep(1)` is
+//! 15.570ms unraised, 1.856ms raised on this machine), but once the parser
+//! stopped coalescing echoes and the client stopped sleeping through its own
+//! echo frame, the keystroke path no longer WAITS on a sub-tick timer often
+//! enough for the period to show up in the number. Treat this as insurance for
+//! the remaining sub-tick waits rather than as a measured win, and re-A/B it on
+//! a quiet machine before relying on it: it costs power, so if it stays
+//! unmeasurable it should go.
+//!
+//! At an idle pwsh prompt the figure stays around 25ms regardless of this
+//! period, while the same transport carries a raw echo child in 4.6ms. So the
+//! extra cost arrives with pwsh rather than with psmux's transport; a stage
+//! trace attributes it to the ConPTY read, on the theory that conhost's
+//! pseudoconsole splits PSReadLine's echo into two chunks with the character in
+//! the second. That attribution has NOT been independently confirmed here and
+//! the arithmetic does not fully close (4.6ms plus a ~14ms split does not reach
+//! 25ms), so the pwsh path is still open for investigation. Do not quote it as
+//! settled.
 //!
 //! Requesting 1ms costs power, so it is held only while it buys something: for
 //! the whole life of a client process (a client only exists while a terminal is

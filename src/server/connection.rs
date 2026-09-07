@@ -2526,7 +2526,22 @@ match cmd {
         if i < args.len() && i + 1 < args.len() {
             let key = args[i].to_string();
             let command = requote_command_tail(&args[i + 1..]);
-            let _ = tx.send(CtrlReq::BindKey(table, key, command, repeatable));
+            // Issue #635: tmux parses the bound command list at BIND time
+            // (cmd-bind-key.c), so a dangling value-taking flag refuses the
+            // binding rather than arming a key that silently acts on the
+            // default target when it is pressed.
+            let flag_error = crate::config::split_chained_commands_pub(&command)
+                .iter()
+                .find_map(|sub| {
+                    let tokens = crate::commands::parse_command_line(sub);
+                    crate::cli::validate_command_line_flags(&tokens).err()
+                });
+            if let Some(flag_error) = flag_error {
+                let _ = writeln!(write_stream, "ERROR: {}", flag_error);
+                let _ = write_stream.flush();
+            } else {
+                let _ = tx.send(CtrlReq::BindKey(table, key, command, repeatable));
+            }
         }
     }
     "unbind-key" | "unbind" => {

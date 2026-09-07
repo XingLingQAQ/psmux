@@ -1395,6 +1395,10 @@ mod tests {
 mod tests_issue196_flag_equals;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue635_dangling_flag_value.rs"]
+mod tests_issue635_dangling_flag_value;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue497_selectwindow_id.rs"]
 mod tests_issue497_selectwindow_id;
 

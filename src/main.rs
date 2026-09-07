@@ -602,6 +602,44 @@ fn bind_key_name_arg(cmd_args: &[&String]) -> Option<String> {
     None
 }
 
+/// Index of the bound COMMAND in a `bind-key` argv: everything after the key.
+/// Same flag scan as [`bind_key_name_arg`], one token further on.
+fn bind_key_command_start(cmd_args: &[&String]) -> Option<usize> {
+    let mut i = 1; // cmd_args[0] is the subcommand
+    while i < cmd_args.len() {
+        let a = cmd_args[i].as_str();
+        match a {
+            "-T" | "-N" | "-t" => { i += 2; continue; }
+            _ if a.starts_with('-') && a.chars().count() > 1 => { i += 1; continue; }
+            _ => return Some(i + 1),
+        }
+    }
+    None
+}
+
+/// Issue #635: tmux parses a binding's command list at BIND time
+/// (cmd-bind-key.c -> cmd_parse_from_arguments), so `bind-key X kill-window -t`
+/// is refused rather than arming a key that silently kills the current window
+/// when it is pressed. The server refuses it too, but the CLI arm sends
+/// bind-key fire and forget, so that reply never reaches the user: check here
+/// as well, exactly like the unknown-key guard beside this one.
+fn reject_dangling_bound_command(cmd_args: &[&String]) {
+    let Some(start) = bind_key_command_start(cmd_args) else { return };
+    if start >= cmd_args.len() { return; }
+    let bound: String = cmd_args[start..]
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<&str>>()
+        .join(" ");
+    for sub in crate::config::split_chained_commands_pub(&bound) {
+        let tokens = crate::commands::parse_command_line(&sub);
+        if let Err(e) = crate::cli::validate_command_line_flags(&tokens) {
+            eprintln!("ERROR: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 /// tmux refuses a key name it cannot parse: cmd-bind-key.c and cmd-unbind-key.c
 /// both call `cmdq_error(item, "unknown key: %s", ...)` and exit non-zero.
 /// psmux used to forward anything at all to the server, which dropped it in
@@ -3784,6 +3822,7 @@ fn run_main() -> io::Result<()> {
             // bind-key - Bind a key to a command
             "bind-key" | "bind" => {
                 reject_unknown_key_name(&cmd_args, "bind-key");
+                reject_dangling_bound_command(&cmd_args);
                 let cmd_str: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
                 match send_control(format!("{}\n", cmd_str)) {
                     Ok(()) => {},

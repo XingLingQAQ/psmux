@@ -703,7 +703,21 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     } else {
         l
     };
-    
+
+    // Issue #635: tmux fails the whole config LINE when a value-taking flag
+    // has no value ("-t expects an argument" from arguments.c) and never runs
+    // the command. Report it the way every other config diagnostic is
+    // reported and skip the directive rather than letting it act on the
+    // default target.
+    {
+        let tokens = crate::commands::parse_command_line(l);
+        if let Err(flag_error) = crate::cli::validate_command_line_flags(&tokens) {
+            warn_config(app, flag_error);
+            return;
+        }
+    }
+
+
     if l.starts_with("set-option ") || l.starts_with("set ") {
         parse_set_option(app, l, false);
     }
@@ -1655,7 +1669,20 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
     
     // Split on `\;` or `;` to support command chaining (like tmux `bind x split-window \; select-pane -D`)
     let sub_commands: Vec<String> = split_chained_commands(&command);
-    
+
+    // Issue #635: tmux parses the bound command list at BIND time
+    // (cmd-bind-key.c -> cmd_parse_from_arguments), so a dangling
+    // value-taking flag refuses the binding instead of arming a key that
+    // silently acts on the default target when pressed.
+    for sub in &sub_commands {
+        let tokens = crate::commands::parse_command_line(sub);
+        if let Err(flag_error) = crate::cli::validate_command_line_flags(&tokens) {
+            warn_config(app, flag_error);
+            return;
+        }
+    }
+
+
     if let Some(key) = parse_key_name(key_str) {
         let key = normalize_key_for_binding(key);
         let action = if sub_commands.len() > 1 {

@@ -881,9 +881,17 @@ if control_echo || control_noecho {
         // and turn the swap into a no-op).
         let ctrl_capture_by_id = matches!(cmd_name, "capture-pane" | "capturep") && ctrl_pane_is_id && ctrl_target_pane.is_some();
         let skip_pane_focus = matches!(cmd_name, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || ctrl_capture_by_id;
-        let mut focus_err = ctrl_set_args.as_ref().and_then(|parsed_set| {
-            parsed_set.validate(ctrl_set_window_option).err()
-        });
+        // Issue #635: a dangling value-taking flag is reported through the
+        // same %error path as an unresolvable -t, and skips dispatch (and the
+        // temp focus below) entirely, so control clients see tmux's message
+        // and nothing is mutated.
+        let mut focus_err = crate::cli::validate_flag_arguments(cmd_name, &cmd_args)
+            .err()
+            .or_else(|| {
+                ctrl_set_args.as_ref().and_then(|parsed_set| {
+                    parsed_set.validate(ctrl_set_window_option).err()
+                })
+            });
         if focus_err.is_none() {
             if is_focus_cmd {
                 if let Some(wid) = ctrl_target_win {
@@ -1090,6 +1098,17 @@ loop {
     } else {
         (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect())
     };
+
+// Issue #635: a value-taking flag with nothing after it never runs. Checked
+// here, before any target resolution or temp focus, so the failure path has
+// no side effect at all (the window/session must still exist afterwards).
+if let Err(flag_error) = crate::cli::validate_flag_arguments(cmd, &args) {
+    let _ = writeln!(write_stream, "ERROR: {}", flag_error);
+    let _ = write_stream.flush();
+    if !persistent { break; }
+    line.clear();
+    continue;
+}
 
 // Parse -t argument from command line (takes precedence over global TARGET)
 let mut target_win: Option<usize> = global_target_win;

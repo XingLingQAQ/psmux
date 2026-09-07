@@ -7,7 +7,7 @@ param([string]$Exe)
 $ErrorActionPreference = "Continue"
 $worktree = "C:\Users\godwin\Documents\workspace\psmux\.claude\worktrees\agent-a6b74dd9d56cbb991"
 
-foreach ($ns in @("i639ns", "i639bn", "i639sp", "i639rz", "i639fz", "i639dbg", "i639")) {
+foreach ($ns in @("i639ns", "i639bn", "i639sp", "i639rz", "i639fz", "i639rs", "i639dbg", "i639")) {
     & $Exe -L $ns kill-server 2>&1 | Out-Null
     Write-Output "kill-server -L $ns"
 }

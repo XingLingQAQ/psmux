@@ -184,6 +184,7 @@ Details worth knowing:
 | `update-environment` | Str | *(tmux defaults)* | Space-separated list of env vars to refresh on client attach |
 | `warm` | Bool | `on` | Pre-spawn shells for instant window/pane creation (see [warm-sessions.md](warm-sessions.md)) |
 | `copy-command` | Str | | Shell command for clipboard pipe |
+| `codepoint-widths` | Str | | Comma separated overrides for how many columns Unicode codepoints occupy (see [Codepoint widths](#codepoint-widths)) |
 | `set-clipboard` | Str | `on` | Clipboard interaction (`on`/`off`/`external`) |
 | `main-pane-width` | Int | `0` | Main pane width in main-vertical layout |
 | `main-pane-height` | Int | `0` | Main pane height in main-horizontal layout |
@@ -1186,3 +1187,59 @@ set -g allow-predictions on
 ```
 
 Without `allow-predictions on`, psmux resets PSReadLine's prediction settings during initialization, which disables ListView mode.
+
+## Codepoint widths
+
+Some characters have no single correct display width. Unicode marks a large
+group, including box drawing characters, many symbols, and the characters
+`tig` draws its commit graph with, as **East Asian Ambiguous**: one column in a
+Western context, two in a CJK one.
+
+psmux resolves ambiguous characters to **one** column, which is what tmux does.
+If your terminal draws them as two, the two of you disagree about where every
+following cell on the line begins, and characters can be left painted on screen
+after the text around them is erased.
+
+`codepoint-widths` lets you settle the disagreement. It is a server option, so
+it is written with `set -s`, and it takes a comma separated list of overrides:
+
+```tmux
+# One codepoint, written in hex
+set -s codepoint-widths "U+2502=2"
+
+# A range, inclusive at both ends (note the U+ on BOTH sides)
+set -s codepoint-widths "U+2500-U+257F=2"
+
+# A literal character works too
+set -s codepoint-widths "|=2"
+
+# Several entries at once
+set -s codepoint-widths "U+2500-U+257F=2,U+25CF=2"
+```
+
+The width must be `0`, `1` or `2`. An entry that is malformed, out of range, or
+names a codepoint that does not exist is ignored, and the remaining entries
+still apply.
+
+Because it is an array option, `-a` appends rather than replaces:
+
+```tmux
+set -s codepoint-widths "U+2500-U+257F=2"
+set -sa codepoint-widths "U+25CF=2"     # both entries now apply
+set -su codepoint-widths                # back to the default (no overrides)
+```
+
+A change takes effect immediately, for text drawn after it. Text already on
+screen keeps the width it was drawn with, so redraw the pane or restart the
+program to see an override applied to content that is already there.
+
+Read the current value back with:
+
+```powershell
+psmux show-options -s codepoint-widths
+```
+
+If you are unsure whether your terminal treats a character as one column or
+two, print a row of them and see where it wraps: in an 80 column window, 80 of
+them filling exactly one line means one column each, and wrapping after 40
+means two.

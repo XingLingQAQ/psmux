@@ -441,6 +441,8 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("main-pane-height",           "0 (60% heuristic)"),
     // Copy / Clipboard
     ("copy-command",               "\"\""),
+    // Unicode
+    ("codepoint-widths",           "\"\""),
     ("set-clipboard",              "on"),
     ("set-titles-string",          "\"\""),
     // psmux extensions

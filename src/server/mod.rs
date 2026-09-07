@@ -1498,6 +1498,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
         let echo_active = echo_pending_until.map_or(false, |t| t.elapsed().as_millis() < 50);
         let idle_secs = last_client_activity.elapsed().as_secs();
+        // Hold the 1ms timer period only while someone is watching. Every
+        // timeout below, and the pane parser's coalescing tick, otherwise
+        // rounds up to Windows' default 15.6ms per-process tick: the 1ms and
+        // 5ms cases silently become 15.6ms, which is where 31ms of the old
+        // keystroke to screen latency came from. Released as soon as the last
+        // client detaches so a background server does not keep the box on a
+        // high resolution timer. See src/timer_res.rs.
+        crate::timer_res::set_high(crate::types::has_frame_receivers());
         let timeout_ms: u64 = if echo_active || data_ready {
             1      // Active echo/data: 1ms for maximum responsiveness
         } else if idle_secs < 2 {

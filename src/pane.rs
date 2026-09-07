@@ -2530,6 +2530,10 @@ pub fn spawn_reader_thread(
     // and well below the 50ms keystroke-echo threshold.
     const COALESCE_TICK_MS: u64 = 1;
     const COALESCE_MAX_MS: u128 = 8;
+    /// Batches this small are echoes, not frames: parse them straight away
+    /// instead of paying a coalescing tick. Measured with
+    /// tests/probe_run.ps1: a pwsh echo arrives as a 62 byte chunk.
+    const ECHO_CHUNK_MAX: usize = 1024;
 
     let staging: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((Mutex::new(Vec::with_capacity(131072)), Condvar::new()));
     let reader_done: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
@@ -2704,18 +2708,26 @@ pub fn spawn_reader_thread(
                 let (lock, _) = &*staging;
                 lock.lock().map(|b| b.len()).unwrap_or(0)
             };
-            loop {
-                if coalesce_start.elapsed().as_millis() >= COALESCE_MAX_MS { break; }
-                thread::sleep(Duration::from_millis(COALESCE_TICK_MS));
-                let cur_len = {
-                    let (lock, _) = &*staging;
-                    lock.lock().map(|b| b.len()).unwrap_or(0)
-                };
-                if cur_len == last_len {
-                    // No new bytes arrived in the last tick — frame boundary.
-                    break;
+            // A keystroke echo is tens of bytes and arrives as one chunk, so
+            // there is no multi-chunk frame to bridge and nothing to tear.
+            // Waiting a tick anyway cost a tick of keystroke-to-screen latency
+            // on every character typed, which is the one place on the path
+            // where it is most visible. Anything larger is a redraw that can
+            // legitimately span chunks, and still gets the full adaptive wait.
+            if last_len > ECHO_CHUNK_MAX {
+                loop {
+                    if coalesce_start.elapsed().as_millis() >= COALESCE_MAX_MS { break; }
+                    thread::sleep(Duration::from_millis(COALESCE_TICK_MS));
+                    let cur_len = {
+                        let (lock, _) = &*staging;
+                        lock.lock().map(|b| b.len()).unwrap_or(0)
+                    };
+                    if cur_len == last_len {
+                        // No new bytes arrived in the last tick — frame boundary.
+                        break;
+                    }
+                    last_len = cur_len;
                 }
-                last_len = cur_len;
             }
 
             // Take the entire staged batch.

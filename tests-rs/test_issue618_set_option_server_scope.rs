@@ -212,10 +212,17 @@ fn is_server_option_agrees_with_the_list() {
 fn every_server_option_resolves_to_a_value_lookup() {
     // The listing is built by asking the app for each name in turn, so a name
     // the value lookup does not know would print a blank line forever.
-    // copy-command is legitimately empty by default, so it is exempt.
+    //
+    // Options whose CATALOG default is itself the empty string are exempt,
+    // because for those a blank line is the correct output rather than a
+    // missing lookup arm. That is derived from the catalog rather than listed
+    // by hand (it used to name copy-command alone) so that adding another
+    // legitimately-empty option -- codepoint-widths, whose tmux default is
+    // `.default_str = ""` -- does not look like a regression, while a name
+    // with a real default and no lookup arm is still caught.
     let app = mock_app();
     for name in server_option_names() {
-        if name == "copy-command" {
+        if crate::server::option_catalog::default_for(name) == Some("") {
             continue;
         }
         assert!(

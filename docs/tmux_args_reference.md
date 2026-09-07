@@ -330,6 +330,9 @@ A psmux extension that creates a pane floating above the tiled layout.
 - Value: `-c` (start directory), `-t` (target pane)
 - `-- <command>` is honored and replaces the pane command.
 - Not accepted: `-e`
+- Without `-k`, a pane whose process is still running is refused, like tmux:
+  `respawn pane failed: pane <session>:<window>.<pane> still active` on stderr
+  at exit 1. The session and the pane are left exactly as they were.
 
 **capture-pane** (`capturep`)
 - Boolean: `-p` (print to stdout), `-e` (include escape sequences), `-J` (join wrapped lines)

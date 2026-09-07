@@ -207,6 +207,24 @@ fn k_on_a_live_pane_and_a_bare_respawn_of_a_dead_pane_both_pass_the_guard() {
 //    the audit below is the classification of every one that exists.
 // ─────────────────────────────────────────────────────────────────────────
 
+/// True if the line applies `?` to a call or a value. Matches `foo()?;`,
+/// `foo()? {`, `x?.y`, `foo()?,` alike — the shape is "a `?` right after an
+/// identifier, `)` or `]`, and not the start of a word". A `?` sitting inside a
+/// string or a `Option<...>` never has that left neighbour.
+fn has_try_operator(line: &str) -> bool {
+    let b = line.as_bytes();
+    b.iter().enumerate().skip(1).any(|(i, &c)| {
+        c == b'?'
+            && {
+                let prev = b[i - 1];
+                prev.is_ascii_alphanumeric() || prev == b'_' || prev == b')' || prev == b']'
+            }
+            && b.get(i + 1)
+                .map(|&n| !(n.is_ascii_alphanumeric() || n == b'_'))
+                .unwrap_or(true)
+    })
+}
+
 /// Source of the server event loop, from `fn run_server` to end of file.
 fn run_server_body() -> &'static str {
     let src = include_str!("../src/server/mod.rs");
@@ -306,12 +324,12 @@ fn every_question_mark_in_the_event_loop_is_a_classified_one() {
         .map(|l| l.trim())
         // A `?` applied to a call or a value, not `?` inside a string/comment.
         .filter(|l| !l.starts_with("//"))
-        .filter(|l| l.contains("?;") || l.contains("?,") || l.contains("?."))
+        .filter(|l| has_try_operator(l))
         .collect();
     // Self-check: if the scan ever stops finding the `?`s it is supposed to
     // classify, it would pass vacuously and guard nothing.
     assert!(
-        question_marks.len() > 50,
+        question_marks.len() > 60,
         "the sweep found only {} `?` lines in run_server — it is no longer \
          reading the event loop and this test has stopped guarding anything",
         question_marks.len()

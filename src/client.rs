@@ -67,6 +67,68 @@ pub fn switch_client_table_arg(cmd: &str) -> Option<String> {
     None
 }
 
+/// What an attached client should do with one dispatched binding, as far as
+/// the key table and session navigation are concerned.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BindingDispatch {
+    /// A bare `switch-client -n` / `-p` / `-l`: session navigation, which the
+    /// client performs itself. `next` is true for `-n`.
+    SessionNav { next: bool },
+    /// Commands to hand to the server, in order, plus the key table this
+    /// binding leaves latched on the client (`None` when it latches nothing).
+    Commands { cmds: Vec<String>, latch: Option<String> },
+}
+
+/// Split a binding into the command list tmux would dispatch and report the key
+/// table it leaves latched (issue #640).
+///
+/// tmux clears the client's key table BEFORE running the binding:
+/// `server_client_set_key_table(c, NULL)` at server-client.c:1572 immediately
+/// precedes `key_bindings_dispatch(bd, item, c, event, &fs)` at :1577. So a
+/// `switch-client -T` anywhere in the binding's command list re-arms the table
+/// instead of being undone once the binding finishes, and that ordering is the
+/// whole of the sticky/repeat table idiom:
+///
+/// ```text
+/// bind-key z switch-client -T MOVE
+/// bind-key -T MOVE h select-pane -L \; switch-client -T MOVE
+/// ```
+///
+/// The last `-T` in the list wins, because `cmd_switch_client_exec` just
+/// assigns `tc->keytable` every time it runs. Matching on the whole binding
+/// string instead of on its elements used to keep only the head of a chain,
+/// so `switch-client -T MOVE \; select-pane -L` silently dropped the movement.
+pub fn dispatch_binding_commands(binding: &str) -> BindingDispatch {
+    let subs = crate::config::split_chained_commands_pub(binding);
+    if subs.len() == 1 {
+        let only = subs[0].trim();
+        let is_switch = matches!(
+            crate::commands::parse_command_line(only).first().map(|s| s.as_str()),
+            Some("switch-client") | Some("switchc")
+        );
+        if is_switch && switch_client_table_arg(only).is_none() {
+            return BindingDispatch::SessionNav { next: only.contains("-n") };
+        }
+    }
+    let mut cmds = Vec::with_capacity(subs.len());
+    let mut latch: Option<String> = None;
+    for sub in &subs {
+        let sub = sub.trim();
+        if sub.is_empty() {
+            continue;
+        }
+        if let Some(tbl) = switch_client_table_arg(sub) {
+            // Re-emit canonically so the server sees the same table name the
+            // client latched, quoting included.
+            cmds.push(format!("switch-client -T {}", crate::util::quote_arg_if_needed(&tbl)));
+            latch = Some(tbl);
+        } else {
+            cmds.push(sub.to_string());
+        }
+    }
+    BindingDispatch::Commands { cmds, latch }
+}
+
 /// Extract the actual command from a confirm-before argument string.
 /// Handles: `confirm-before -p 'prompt text' kill-pane`
 /// Returns the command to execute after confirmation (e.g. "kill-pane").
@@ -3459,6 +3521,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // so a binding that latches a new table below wins.
                             let latched_table = if prefix_armed { None } else { key_table_latch.take() };
                             let active_table: &str = latched_table.as_deref().unwrap_or("prefix");
+                            // tmux `server_client_handle_key` puts the client
+                            // back on the default table BEFORE it dispatches
+                            // the binding (server-client.c:1572
+                            // `server_client_set_key_table(c, NULL)`, then
+                            // :1577 `key_bindings_dispatch(...)`). That
+                            // ordering is what lets a `switch-client -T`
+                            // inside the binding survive, which is how a
+                            // sticky table is built. Emitting the reset here,
+                            // ahead of every command the binding queues,
+                            // gives the server the same ordering as the
+                            // client's own latch, which `take()` above has
+                            // already cleared.
+                            if latched_table.is_some() {
+                                cmd_batch.push("switch-client -T root\n".into());
+                            }
 
                             // Check synced bindings from server (includes defaults from PREFIX_DEFAULTS)
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
@@ -3557,23 +3634,29 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     do_choose_buffer = true;
                                 } else if cmd == "choose-session" {
                                     do_choose_session = true;
-                                } else if cmd.starts_with("switch-client") || cmd.starts_with("switchc") {
-                                    // `switch-client -T <table>` is not session
-                                    // navigation: it latches the named key
-                                    // table so the NEXT key is looked up there
-                                    // (issue #640). The server is told too so
-                                    // `#{client_key_table}` reports it.
-                                    if let Some(tbl) = switch_client_table_arg(cmd) {
-                                        cmd_batch.push(format!("switch-client -T {}\n", crate::util::quote_arg_if_needed(&tbl)));
-                                        key_table_latch = Some(tbl);
-                                    } else {
-                                        do_session_nav = Some(cmd.contains("-n"));
-                                    }
                                 } else {
-                                    // Generic: split on \; for command chaining (issue #192)
-                                    let sub_cmds = crate::config::split_chained_commands_pub(&entry.c);
-                                    for sub in &sub_cmds {
-                                        cmd_batch.push(format!("{}\n", sub));
+                                    // Generic: the binding is a command list,
+                                    // split on \; for chaining (issue #192).
+                                    // `switch-client -n`/`-p`/`-l` is the one
+                                    // form the client performs itself; a
+                                    // `switch-client -T` anywhere in the list
+                                    // latches a key table for the next key, and
+                                    // because the reset to the default table
+                                    // was already emitted above, that latch
+                                    // survives and the table becomes sticky
+                                    // (issue #640).
+                                    match dispatch_binding_commands(&entry.c) {
+                                        BindingDispatch::SessionNav { next } => {
+                                            do_session_nav = Some(next);
+                                        }
+                                        BindingDispatch::Commands { cmds, latch } => {
+                                            for sub in &cmds {
+                                                cmd_batch.push(format!("{}\n", sub));
+                                            }
+                                            if latch.is_some() {
+                                                key_table_latch = latch;
+                                            }
+                                        }
                                     }
                                 }
                             } else if synced_bindings.is_empty() && latched_table.is_none() {
@@ -3972,14 +4055,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // The key came from a `switch-client -T` table,
                                 // not from the prefix table: the prefix is not
                                 // armed, so there is nothing to disarm and no
-                                // repeat window to open. tmux drops the client
-                                // back to the default table, which `take()`
-                                // above already did; tell the server unless the
-                                // binding latched another table.
+                                // repeat window to open. The drop back to the
+                                // default table already happened above, before
+                                // the binding ran, so a `switch-client -T` in
+                                // the binding has re-armed the latch by now and
+                                // must not be undone here.
                                 prefix_repeating = false;
-                                if key_table_latch.is_none() {
-                                    cmd_batch.push("switch-client -T root\n".into());
-                                }
                             } else if is_repeatable_default || is_user_repeat {
                                 prefix_armed_at = Instant::now();
                                 prefix_repeating = true;
@@ -7860,3 +7941,7 @@ mod test_pane_border_indicators;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue640_switch_client_table.rs"]
 mod test_issue640_switch_client_table;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue640_sticky_key_table.rs"]
+mod test_issue640_sticky_key_table;

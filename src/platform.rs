@@ -1667,6 +1667,14 @@ pub mod mouse_inject {
         let fg_is_shell = crate::platform::process_info::foreground_is_shell(child_pid)
             .unwrap_or(true);
 
+        // Issue #638: keep the IDENTITY of the process that classification was
+        // based on, not just its verdict.  Once we are attached below we can
+        // check whether the console-wide broadcast is even able to reach it;
+        // see `process_info::broadcast_can_reach_foreground`.  Resolved here,
+        // off the same fresh snapshot and before the console dance, so the
+        // verdict and the identity describe the same moment.
+        let fg_leaf_pid = crate::platform::process_info::foreground_leaf_pid(child_pid);
+
         // Issue #491: a VT bridge (wsl.exe, ssh.exe) reads raw bytes from its
         // console and forwards 0x03 into the guest as SIGINT itself, so the
         // console-wide CTRL_C_EVENT broadcast below is redundant for it — and
@@ -1883,6 +1891,46 @@ pub mod mouse_inject {
                         CloseHandle(h);
                     }
                 }
+                FreeConsole();
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            // Issue #638: the broadcast must be able to REACH the process that
+            // justified it.  A non-shell application that hosts its own
+            // terminal (Neovim `:terminal`, or anything that calls
+            // CreatePseudoConsole for a child) leaves that child a PPID
+            // descendant of the pane, so the leaf walk above classifies it and
+            // `fg_is_shell` comes back true, while the child actually lives on
+            // the host's PRIVATE pseudoconsole and is absent from the list we
+            // just enumerated.  Broadcasting then signals everyone who IS on
+            // this console, the hosting application included, and never touches
+            // the shell we were aiming at.  Measured: `nvim --clean` with
+            // `:terminal` at an idle prompt, console = {psmux, nvim, nvim,
+            // pwsh} with the inner shell nowhere in it, and nvim dies with
+            // `Caught deadly signal 'SIGINT'`.
+            //
+            // Do instead what tmux does: write the raw 0x03 byte to the pane
+            // (the call site does this) and let the hosting application forward
+            // it down its own channel.  tmux on Unix cannot signal the process
+            // hosting a pty either; it writes the byte and the line discipline
+            // signals the foreground group of that pty alone.
+            //
+            // The console mode is deliberately left alone here, unlike the
+            // bridge skips above.  An application that hosts a terminal runs
+            // the pane console raw (measured mode 0x0208, PROCESSED_INPUT
+            // clear), which is exactly the state in which the byte arrives as
+            // an input record; and it is the console's `plain native app`, so
+            // the bridge paths would keep PROCESSED_INPUT for it anyway.
+            if n > 0 && !crate::platform::process_info::broadcast_can_reach_foreground(
+                child_pid,
+                fg_leaf_pid,
+                &console_pids[..(n as usize).min(console_pids.len())],
+            ) {
+                log(&format!(
+                    "foreground leaf pid={:?} is not on the pane console (root={}): a non-shell app hosts its own terminal, deliver raw 0x03 only, skip CTRL_C_EVENT broadcast",
+                    fg_leaf_pid, child_pid
+                ));
                 FreeConsole();
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
@@ -3957,6 +4005,56 @@ pub mod process_info {
         })
     }
 
+    /// Issue #638: can a `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` broadcast
+    /// on the pane console actually REACH the process the Ctrl+C router
+    /// classified as the pane's foreground?
+    ///
+    /// The router resolves the foreground by walking the pane's PPID tree down
+    /// to its deepest leaf, but the broadcast is scoped to console MEMBERSHIP,
+    /// and those two sets are not the same thing.  A non-shell application that
+    /// hosts its own terminal (Neovim's `:terminal`, and any program that calls
+    /// `CreatePseudoConsole` for a child) puts that child on a PRIVATE
+    /// pseudoconsole.  The child is still a PPID descendant of the pane, so the
+    /// leaf walk finds it and classifies it, yet it is not on the pane console,
+    /// so the broadcast cannot be delivered to it.  What the broadcast reaches
+    /// instead is every process that IS on the pane console, which includes the
+    /// hosting application itself; its default handler terminates it (measured:
+    /// `nvim --clean` + `:terminal` at an idle prompt dies with
+    /// `Caught deadly signal 'SIGINT'`, 3 of 3 runs, with both `cmd.exe` and
+    /// `pwsh` as `&shell`).
+    ///
+    /// So the rule is structural and names no application: signal only when the
+    /// process that justified the signal is on the console that receives it.
+    /// When it is not, the caller writes the raw 0x03 byte to the pane instead
+    /// and lets the hosting application forward it down its own channel, which
+    /// is all tmux ever does on Unix (it writes 0x03 to the pty and the line
+    /// discipline signals the foreground process group of THAT pty only; it
+    /// cannot signal the application hosting the pty).
+    ///
+    /// The load-bearing broadcast cases are preserved because in every one of
+    /// them the classified process is a console member:
+    ///   * bare shell prompt line-cancel (#338): the leaf walk falls back to
+    ///     the pane root, which is on the pane console by construction, so
+    ///     `foreground_leaf` is `None` there and this returns true.
+    ///   * `ping` under the pane shell (#346): ping.exe is a plain console app
+    ///     and is a member of the pane console.
+    ///   * the WSL boot window (#579): the pane shell is childless, so again
+    ///     `foreground_leaf` is `None` and the broadcast stays allowed.
+    ///
+    /// `None` (snapshot failure, or a root with no children) therefore means
+    /// "allow", matching `foreground_is_shell`'s `unwrap_or(true)` default of
+    /// preserving the established interrupt behaviour.
+    pub fn broadcast_can_reach_foreground(
+        root_pid: u32,
+        foreground_leaf: Option<u32>,
+        console_pids: &[u32],
+    ) -> bool {
+        match foreground_leaf {
+            None => true,
+            Some(leaf) => leaf == root_pid || console_pids.contains(&leaf),
+        }
+    }
+
     /// Diagnostic used by the Ctrl+C router's debug log: classify one console
     /// member the same way `console_broadcast_hits_bridge` does.
     pub fn classify_console_member(pid: u32) -> String {
@@ -4022,6 +4120,10 @@ pub mod process_info {
     #[cfg(test)]
     #[path = "../../../tests-rs/test_ctrlc_bridge_recency.rs"]
     mod tests_ctrlc_bridge_recency;
+
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_issue638_nvim_terminal_ctrlc.rs"]
+    mod tests_issue638_nvim_terminal_ctrlc;
 }
 
 #[cfg(not(windows))]

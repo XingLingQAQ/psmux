@@ -102,12 +102,29 @@ pub fn dispatch_binding_commands(binding: &str) -> BindingDispatch {
     let subs = crate::config::split_chained_commands_pub(binding);
     if subs.len() == 1 {
         let only = subs[0].trim();
+        let argv = crate::commands::parse_command_line(only);
         let is_switch = matches!(
-            crate::commands::parse_command_line(only).first().map(|s| s.as_str()),
+            argv.first().map(|s| s.as_str()),
             Some("switch-client") | Some("switchc")
         );
         if is_switch && switch_client_table_arg(only).is_none() {
-            return BindingDispatch::SessionNav { next: only.contains("-n") };
+            // Only `-n` / `-p` / `-l` are session navigation the client performs
+            // itself. `switch-client -t <target>` names an explicit destination
+            // and must reach the server, which resolves the session, validates
+            // any window/pane component and signals the re-attach (#483, #555).
+            // Deciding this by `contains("-n")` over the whole string also
+            // misread any target that merely contained those two characters, so
+            // the flags are matched as parsed tokens.
+            let has_target = argv.iter().any(|a| a == "-t");
+            let nav = argv
+                .iter()
+                .find(|a| matches!(a.as_str(), "-n" | "-p" | "-l"))
+                .map(|a| a == "-n");
+            if !has_target {
+                if let Some(next) = nav {
+                    return BindingDispatch::SessionNav { next };
+                }
+            }
         }
     }
     let mut cmds = Vec::with_capacity(subs.len());
@@ -4007,6 +4024,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                             if let Some(dir_next) = do_session_nav {
                                 let dir = crate::paths::psmux_dir();
+                                // A `-L` socket is a separate server, so the
+                                // cycle must never leave this client's own
+                                // namespace (the rule ed52715 applied to the
+                                // choosers). Every namespace shares one
+                                // registry directory here, so the enumeration
+                                // has to filter explicitly: without this,
+                                // cycling off the last session of `nsA`
+                                // wrapped into `nsB`'s first session.
+                                let nav_ns = crate::session::session_namespace(&current_session)
+                                    .map(|s| s.to_string());
                                 let mut names: Vec<String> = Vec::new();
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
                                     for e in entries.flatten() {
@@ -4014,6 +4041,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             if let Some((base, ext)) = fname.rsplit_once('.') {
                                                 if ext == "port" {
                                                     if crate::session::is_warm_session(base) { continue; }
+                                                    if !crate::session::session_visible_from(base, nav_ns.as_deref()) { continue; }
                                                     if let Ok(ps) = std::fs::read_to_string(e.path()) {
                                                         if let Ok(p) = ps.trim().parse::<u16>() {
                                                             let a = format!("127.0.0.1:{}", p);
@@ -7945,3 +7973,7 @@ mod test_issue640_switch_client_table;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue640_sticky_key_table.rs"]
 mod test_issue640_sticky_key_table;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_switch_client_target_routing.rs"]
+mod test_switch_client_target_routing;

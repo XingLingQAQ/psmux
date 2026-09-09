@@ -5320,14 +5320,32 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // validate the target exists so the CLI can exit non-zero.
                     let now = std::time::Instant::now();
                     let current = app.port_file_base();
-                    let all_sessions = crate::session::list_session_names();
+                    // Resolve inside this server's own `-L` namespace. The
+                    // unscoped listing skips every namespaced base, so on a
+                    // `-L` socket it came back empty and any `-t <session>`
+                    // failed with "can't find session" even though the target
+                    // was right there in `list-sessions`. Registry bases carry
+                    // the `<ns>__` prefix while the user types the bare name,
+                    // so the request is qualified before it is matched.
+                    let nav_ns = crate::session::session_namespace(&current).map(|s| s.to_string());
+                    let all_sessions = crate::session::list_session_names_ns(nav_ns.as_deref());
+                    let qualify = |name: &str| match nav_ns.as_deref() {
+                        Some(ns) => format!("{}__{}", ns, name),
+                        None => name.to_string(),
+                    };
                     let pt = crate::cli::parse_target(&raw);
                     let sess_req = pt.session.clone().filter(|s| !s.is_empty());
 
                     // Resolve destination session: explicit prefix, else current.
                     let target_session = match &sess_req {
-                        Some(s) if all_sessions.contains(s) => Some(s.clone()),
-                        Some(s) => all_sessions.iter().find(|x| x.starts_with(s)).cloned(),
+                        Some(s) => {
+                            let q = qualify(s);
+                            if all_sessions.contains(&q) {
+                                Some(q)
+                            } else {
+                                all_sessions.iter().find(|x| x.starts_with(&q)).cloned()
+                            }
+                        }
                         None => Some(current.clone()),
                     };
 
@@ -5354,7 +5372,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 // time. resolve_session also replaces the
                                 // hand-rolled port-file/key reads.
                                 match crate::cross_session::resolve_session(&dest) {
-                                    Err(_) => Err(format!("can't find session: {}", dest)),
+                                    // Report the name the user typed, not the
+                                    // `<ns>__` registry base it resolved to.
+                                    Err(_) => Err(format!(
+                                        "can't find session: {}",
+                                        sess_req.clone().unwrap_or_else(|| dest.clone())
+                                    )),
                                     Ok((port, key)) => {
                                         match crate::cross_session::validate_switch_target(port, &key, &pt) {
                                             Err(e) => Err(e),

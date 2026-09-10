@@ -298,9 +298,19 @@ fn generate_list_windows(app: &AppState) -> String {
 /// Generate list-panes output from AppState.
 fn generate_list_panes(app: &AppState) -> String {
     let win = &app.windows[app.active_idx];
-    fn collect(node: &Node, panes: &mut Vec<(usize, u16, u16)>) {
+    fn collect(node: &Node, panes: &mut Vec<(usize, u16, u16, usize, usize)>) {
         match node {
-            Node::Leaf(p) => { panes.push((p.id, p.last_cols, p.last_rows)); }
+            Node::Leaf(p) => {
+                // Retained rows and the bytes they actually cost, like tmux.
+                // Both were faked before (the limit, and a literal 0), which
+                // hid the scrollback growth behind issue #641.
+                let (hist_rows, hist_bytes) = p
+                    .term
+                    .lock()
+                    .map(|t| (t.screen().scrollback_filled(), t.screen().history_bytes()))
+                    .unwrap_or((0, 0));
+                panes.push((p.id, p.last_cols, p.last_rows, hist_rows, hist_bytes));
+            }
             Node::Split { children, .. } => { for c in children { collect(c, panes); } }
         }
     }
@@ -308,11 +318,11 @@ fn generate_list_panes(app: &AppState) -> String {
     collect(&win.root, &mut panes);
     let active_id = get_active_pane_id(&win.root, &win.active_path);
     let mut output = String::new();
-    for (pos, (id, cols, rows)) in panes.iter().enumerate() {
+    for (pos, (id, cols, rows, hist_rows, hist_bytes)) in panes.iter().enumerate() {
         let idx = pos + app.pane_base_index;
         let marker = if active_id == Some(*id) { " (active)" } else { "" };
-        output.push_str(&format!("{}: [{}x{}] [history {}/{}, 0 bytes] %{}{}\n",
-            idx, cols, rows, app.history_limit, app.history_limit, id, marker));
+        output.push_str(&format!("{}: [{}x{}] [history {}/{}, {} bytes] %{}{}\n",
+            idx, cols, rows, hist_rows, app.history_limit, hist_bytes, id, marker));
     }
     output
 }

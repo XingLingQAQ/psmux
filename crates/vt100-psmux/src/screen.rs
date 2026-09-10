@@ -265,6 +265,16 @@ impl Screen {
         self.grid.scrollback_filled()
     }
 
+    /// Returns roughly how many bytes the main grid's scrollback holds: the
+    /// cells the history rows actually store, plus per-row bookkeeping.  Since
+    /// a row is compacted to its used width when it becomes history (issue
+    /// #641), this tracks the text retained rather than the pane's width.
+    /// Reported as tmux's `#{history_bytes}`.
+    #[must_use]
+    pub fn history_bytes(&self) -> usize {
+        self.grid.history_bytes()
+    }
+
     /// Updates the maximum scrollback buffer size for the main grid.  Rows
     /// in excess of the new limit are trimmed from the oldest end.  The
     /// alternate grid is intentionally left at zero scrollback (apps like

@@ -3319,20 +3319,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     helpers::propagate_osc_titles(&mut app);
                     let mut output = String::new();
                     let win = &app.windows[app.active_idx];
-                    fn collect_panes(node: &Node, panes: &mut Vec<(usize, u16, u16, vt100::MouseProtocolMode, vt100::MouseProtocolEncoding, bool)>) {
+                    fn collect_panes(node: &Node, panes: &mut Vec<(usize, u16, u16, vt100::MouseProtocolMode, vt100::MouseProtocolEncoding, bool, usize, usize)>) {
                         match node {
                             Node::Leaf(p) => {
-                                let (mode, enc, alt) = match p.term.lock() {
+                                let (mode, enc, alt, hist_rows, hist_bytes) = match p.term.lock() {
                                     Ok(term) => {
                                         let screen = term.screen();
-                                        (screen.mouse_protocol_mode(), screen.mouse_protocol_encoding(), screen.alternate_screen())
+                                        (screen.mouse_protocol_mode(), screen.mouse_protocol_encoding(), screen.alternate_screen(), screen.scrollback_filled(), screen.history_bytes())
                                     }
                                     Err(_) => {
                                         // Mutex poisoned — reader thread panicked.  Use safe defaults.
-                                        (vt100::MouseProtocolMode::None, vt100::MouseProtocolEncoding::Default, false)
+                                        (vt100::MouseProtocolMode::None, vt100::MouseProtocolEncoding::Default, false, 0, 0)
                                     }
                                 };
-                                panes.push((p.id, p.last_cols, p.last_rows, mode, enc, alt));
+                                panes.push((p.id, p.last_cols, p.last_rows, mode, enc, alt, hist_rows, hist_bytes));
                             }
                             Node::Split { children, .. } => {
                                 for c in children { collect_panes(c, panes); }
@@ -3342,10 +3342,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let mut panes = Vec::new();
                     collect_panes(&win.root, &mut panes);
                     let active_pane_id = crate::tree::get_active_pane_id(&win.root, &win.active_path);
-                    for (pos, (id, cols, rows, _mode, _enc, _alt)) in panes.iter().enumerate() {
+                    for (pos, (id, cols, rows, _mode, _enc, _alt, hist_rows, hist_bytes)) in panes.iter().enumerate() {
                         let idx = pos + app.pane_base_index;
                         let active_marker = if active_pane_id == Some(*id) { " (active)" } else { "" };
-                        output.push_str(&format!("{}: [{}x{}] [history {}/{}, 0 bytes] %{}{}\n", idx, cols, rows, app.history_limit, app.history_limit, id, active_marker));
+                        // The rows retained and the bytes they cost, like tmux.
+                        // Both used to be faked (the limit, and a literal 0),
+                        // which hid the scrollback growth behind issue #641.
+                        output.push_str(&format!("{}: [{}x{}] [history {}/{}, {} bytes] %{}{}\n", idx, cols, rows, hist_rows, app.history_limit, hist_bytes, id, active_marker));
                     }
                     let _ = resp.send(output);
                 }

@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.70"
 name = "vt100-psmux"
-version = "0.16.12"
+version = "0.16.13"
 authors = ["Jesse Luehrs <doy@tozt.net>"]
 build = false
 include = [
@@ -72,6 +72,10 @@ path = "tests/osc7_windows_path.rs"
 [[test]]
 name = "issue589_undercurl"
 path = "tests/issue589_undercurl.rs"
+
+[[test]]
+name = "issue641_scrollback_compaction"
+path = "tests/issue641_scrollback_compaction.rs"
 
 [dependencies.itoa]
 version = "1.0.18"

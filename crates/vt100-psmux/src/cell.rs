@@ -32,6 +32,14 @@ impl PartialEq<Self> for Cell {
     }
 }
 
+/// The one blank cell every row shares for the columns it does not store.
+/// `Row` keeps only the columns up to the last one that differs from this, so
+/// reads past that point hand out a reference to this instead of to a cell that
+/// would have to be allocated first.  It is tmux's `grid_default_cell`, which
+/// `grid_get_cell` copies out for any column at or past the line's `cellsize`
+/// (tmux grid.c:650).
+static BLANK: std::sync::OnceLock<Cell> = std::sync::OnceLock::new();
+
 impl Cell {
     pub(crate) fn new() -> Self {
         Self {
@@ -39,6 +47,13 @@ impl Cell {
             len: 0,
             attrs: crate::attrs::Attrs::default(),
         }
+    }
+
+    /// A shared reference to the default blank cell.  Compares equal to
+    /// `Cell::new()` and renders as nothing, so it is indistinguishable from a
+    /// stored untouched cell on every read path.
+    pub(crate) fn blank() -> &'static Self {
+        BLANK.get_or_init(Self::new)
     }
 
     fn len(&self) -> usize {

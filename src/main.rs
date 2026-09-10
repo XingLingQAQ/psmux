@@ -18,6 +18,7 @@ mod config;
 mod commands;
 mod pane;
 mod warm_pane_sync;
+mod warm_trace;
 mod popup;
 mod pane_border;
 mod clipboard;

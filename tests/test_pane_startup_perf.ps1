@@ -19,21 +19,87 @@ param(
     [int]$SplitCount = 4,
     [int]$SessionCount = 3,
     [int]$PromptTimeoutSec = 30,
+    # Point the suite at a specific build to compare two of them. The name must
+    # still be one the server recognises as its own image (psmux / pmux / tmux),
+    # because session.rs gates the warm-server claim on it: a differently named
+    # copy silently loses the fast path and the run measures the rename.
+    [string]$Psmux = "",
+    # Where the run's samples are written. Outside the repo by default: a perf
+    # suite that writes into the tree makes every run a dirty working copy.
+    [string]$MetricsDir = "",
     [switch]$Verbose
 )
 
 $ErrorActionPreference = "Stop"
-$PSMUX = Join-Path $PSScriptRoot "..\target\release\psmux.exe"
-if (-not (Test-Path $PSMUX)) {
-    $PSMUX = Join-Path $PSScriptRoot "..\target\release\tmux.exe"
+if ($Psmux) {
+    $PSMUX = $Psmux
+} else {
+    $PSMUX = $null
+    foreach ($name in @("psmux.exe", "pmux.exe", "tmux.exe")) {
+        $candidate = Join-Path $PSScriptRoot "..\target\release\$name"
+        if (Test-Path $candidate) { $PSMUX = $candidate; break }
+    }
 }
-if (-not (Test-Path $PSMUX)) {
-    Write-Host "ERROR: Cannot find psmux.exe or tmux.exe in target\release\" -ForegroundColor Red
+if (-not $PSMUX -or -not (Test-Path $PSMUX)) {
+    Write-Host "ERROR: Cannot find psmux.exe, pmux.exe or tmux.exe in target\release\" -ForegroundColor Red
     exit 1
 }
 $PSMUX = (Resolve-Path $PSMUX).Path
+$imgName = [IO.Path]::GetFileNameWithoutExtension($PSMUX).ToLower()
+if ($imgName -notin @("psmux", "pmux", "tmux")) {
+    Write-Host "REFUSING: '$imgName' is not a recognised server image name; the warm-server claim would be disabled and every timing here would be wrong" -ForegroundColor Red
+    exit 1
+}
 
 $PASS = 0; $FAIL = 0; $TOTAL_TESTS = 0
+
+# ── Latency assertions ────────────────────────────────────────────────────
+# An average alone hid the defect this suite exists to catch: with a spare
+# shell pool of depth one, every OTHER creation claimed a spare that had been
+# spawned moments earlier and paid its whole shell startup. Five windows came
+# out 68, 558, 41, 584, 47 ms -- an average of 260 that looks unremarkable and
+# a lived experience that is anything but. So assert the shape of the
+# distribution, not its centre:
+#
+#   p90  - the slow half cannot hide behind the fast half
+#   max  - no single creation may be terrible
+#   bimodality - max more than 3x the median means the fast and slow paths are
+#                two different code paths, which is precisely the bug
+function Assert-Latency {
+    param(
+        [string]$Label,
+        [double[]]$Samples,
+        [int]$P90Limit,
+        [int]$MaxLimit,
+        [double]$BimodalRatio = 3.0,
+        [int]$MinSamples = 3
+    )
+    if ($Samples.Count -lt $MinSamples) {
+        Write-Fail "$Label - only $($Samples.Count) samples, cannot judge latency"
+        return
+    }
+    $s = $Samples | Sort-Object
+    $median = $s[[int][Math]::Floor(($s.Count - 1) / 2)]
+    $p90 = $s[[Math]::Min($s.Count - 1, [int][Math]::Ceiling(0.9 * $s.Count) - 1)]
+    $max = $s[-1]
+    $list = ($Samples | ForEach-Object { [int]$_ }) -join ', '
+    Write-Host ("  {0,-42} med={1,5:N0} p90={2,5:N0} max={3,5:N0}  [{4}]" -f $Label, $median, $p90, $max, $list) -ForegroundColor Gray
+
+    if ($p90 -le $P90Limit) { Write-Pass "$Label p90 ${p90}ms <= ${P90Limit}ms" }
+    else { Write-Fail "$Label p90 ${p90}ms exceeds ${P90Limit}ms  [$list]" }
+
+    if ($max -le $MaxLimit) { Write-Pass "$Label max ${max}ms <= ${MaxLimit}ms" }
+    else { Write-Fail "$Label max ${max}ms exceeds ${MaxLimit}ms  [$list]" }
+
+    # Bimodality. Guard the degenerate case where everything is so fast that
+    # timer noise alone clears 3x (a 10ms median against a 35ms max is not a
+    # regression), by requiring the max to also be meaningfully slow.
+    if ($median -gt 0 -and $max -gt ($median * $BimodalRatio) -and $max -gt 150) {
+        Write-Fail "$Label is BIMODAL: max ${max}ms is more than ${BimodalRatio}x the median ${median}ms - some creations are taking a code path the others are not  [$list]"
+    } else {
+        Write-Pass "$Label is not bimodal (max ${max}ms vs median ${median}ms)"
+    }
+}
 function Write-Pass { param([string]$msg) $script:PASS++; $script:TOTAL_TESTS++; Write-Host "  PASS: $msg" -ForegroundColor Green }
 function Write-Fail { param([string]$msg) $script:FAIL++; $script:TOTAL_TESTS++; Write-Host "  FAIL: $msg" -ForegroundColor Red }
 function Write-Info { param([string]$msg) Write-Host "  INFO: $msg" -ForegroundColor Gray }
@@ -42,12 +108,16 @@ function Write-Metric { param([string]$label, [double]$ms)
     Write-Host ("  {0,-50} {1,8:N0} ms" -f $label, $ms) -ForegroundColor $color
 }
 
+# Where this psmux keeps its registry. Honouring PSMUX_DATA_DIR is what lets
+# the suite be pointed at a scratch root, so a run cannot kill-server the
+# sessions a developer is actually using.
+$PSMUX_DIR = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR.TrimEnd('\', '/') } else { "$env:USERPROFILE\.psmux" }
+
 # Helper: wait for port/key files to appear, return (port, key)
 function Wait-ServerReady {
     param([string]$SessionName, [int]$TimeoutSec = 15)
-    $homeDir = $env:USERPROFILE
-    $pf = "$homeDir\.psmux\${SessionName}.port"
-    $kf = "$homeDir\.psmux\${SessionName}.key"
+    $pf = "$PSMUX_DIR\${SessionName}.port"
+    $kf = "$PSMUX_DIR\${SessionName}.key"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt ($TimeoutSec * 1000)) {
         if ((Test-Path $pf) -and (Test-Path $kf)) {
@@ -120,10 +190,9 @@ function Cleanup-All {
     try { & $PSMUX kill-server 2>&1 | Out-Null } catch {}
     Start-Sleep -Milliseconds 500
     # Remove stale port/key files
-    $psmuxDir = "$env:USERPROFILE\.psmux"
-    if (Test-Path $psmuxDir) {
-        Get-ChildItem "$psmuxDir\perf_test_*.port" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        Get-ChildItem "$psmuxDir\perf_test_*.key"  -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    if (Test-Path $PSMUX_DIR) {
+        Get-ChildItem "$PSMUX_DIR\perf_test_*.port" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem "$PSMUX_DIR\perf_test_*.key"  -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -254,6 +323,23 @@ if ($windowTimes.Count -gt 0) {
     } else {
         Write-Pass "psmux overhead per window is minimal (~${overhead}ms)"
     }
+
+    # At the shipped default pool depth the first `warm-pool-size` creations of
+    # a run come from settled spares and the one after that has to wait out a
+    # shell start. So this is a budget on how MANY creations are allowed to be
+    # slow, not on the worst one: with the depth-one pool it was every other
+    # creation.
+    $slowWindows = @($windowTimes | Where-Object { $_ -gt 300 }).Count
+    if ($slowWindows -le 1) {
+        Write-Pass "new-window: $slowWindows of $($windowTimes.Count) creations over 300ms (at most 1 allowed at the default pool depth)"
+    } else {
+        Write-Fail "new-window: $slowWindows of $($windowTimes.Count) creations over 300ms - the spare pool is not being refilled ahead of demand  [$(($windowTimes | ForEach-Object { [int]$_ }) -join ', ')]"
+    }
+    if ($winAvg -le 250) {
+        Write-Pass ("new-window average {0:N0}ms is within budget (250ms)" -f $winAvg)
+    } else {
+        Write-Fail ("new-window average {0:N0}ms exceeds 250ms" -f $winAvg)
+    }
 }
 Write-Host ""
 
@@ -292,6 +378,106 @@ if ($splitTimes.Count -gt 0) {
     Write-Metric "  Split AVG" $splitAvg
     Write-Metric "  Split MAX" $splitMax
     Write-Pass "Created $($splitTimes.Count) splits successfully"
+
+    $slowSplits = @($splitTimes | Where-Object { $_ -gt 300 }).Count
+    if ($slowSplits -le 1) {
+        Write-Pass "split-window: $slowSplits of $($splitTimes.Count) creations over 300ms (at most 1 allowed at the default pool depth)"
+    } else {
+        Write-Fail "split-window: $slowSplits of $($splitTimes.Count) creations over 300ms - the spare pool is not being refilled ahead of demand  [$(($splitTimes | ForEach-Object { [int]$_ }) -join ', ')]"
+    }
+    if ($splitAvg -le 250) {
+        Write-Pass ("split average {0:N0}ms is within budget (250ms)" -f $splitAvg)
+    } else {
+        Write-Fail ("split average {0:N0}ms exceeds 250ms" -f $splitAvg)
+    }
+}
+Write-Host ""
+
+# ==============================================================================
+# TEST 3b: the spare pool depth contract
+# ==============================================================================
+# The defect this pins: the pool used to be a single slot. Claiming it queued a
+# refill, and the refill was a shell that had just started, so the very next
+# creation claimed a newborn and paid its entire startup -- fast, slow, fast,
+# slow, for ever, at any creation rate. Depth alone fixes that, because the
+# spare handed to creation N+1 has then had the whole of creation N to boot.
+#
+# The contract, independent of what the shipped default happens to be: with
+# `warm-pool-size` set to N, the first N creations of a run must ALL be fast.
+# Old code has no such option, so it ignores the setting and alternates, which
+# is exactly what these assertions reject.
+Write-Host "--- TEST 3b: warm-pool-size contract (depth 5) ---" -ForegroundColor Yellow
+$poolSess = "perf_test_pool"
+Start-Process -FilePath $PSMUX -ArgumentList "new-session", "-s", $poolSess, "-d" -WindowStyle Hidden | Out-Null
+$poolInfo = Wait-ServerReady -SessionName $poolSess -TimeoutSec 15
+if ($null -eq $poolInfo) {
+    Write-Fail "pool-depth test session failed to start"
+} else {
+    Wait-PanePrompt -SessionName $poolSess -TimeoutMs ($PromptTimeoutSec * 1000) | Out-Null
+
+    # Set the depth through the option, not through the environment. A session
+    # that claimed a standby `__warm__` server is running a process that was
+    # started before this suite was, so it never saw PSMUX_WARM_POOL_SIZE --
+    # setting the env here would silently measure the default and prove
+    # nothing. The option is also the path users actually take.
+    & $PSMUX set-option -g warm-pool-size 5 2>&1 | Out-Null
+    $reported = (& $PSMUX show-options -g warm-pool-size 2>&1 | Out-String).Trim()
+    if ($reported -match 'warm-pool-size\s+5') {
+        Write-Pass "set -g warm-pool-size 5 took effect ($reported)"
+    } else {
+        Write-Fail "set -g warm-pool-size 5 did not take effect (show-options says '$reported')"
+    }
+
+    # Let the pool fill AND let its shells finish starting. A spare is only
+    # worth anything once its shell is up; measuring before that would test the
+    # settle time rather than the pool.
+    Start-Sleep -Milliseconds 4500
+
+    $poolWin = @()
+    for ($i = 0; $i -lt 5; $i++) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        & $PSMUX new-window -t $poolSess 2>&1 | Out-Null
+        $r = Wait-PanePrompt -SessionName $poolSess -TimeoutMs ($PromptTimeoutSec * 1000)
+        $sw.Stop()
+        if ($r.Found) { $poolWin += $sw.ElapsedMilliseconds }
+    }
+    Assert-Latency -Label "new-window @ warm-pool-size 5" -Samples $poolWin -P90Limit 150 -MaxLimit 300
+
+    Start-Sleep -Milliseconds 3000
+    & $PSMUX select-window -t "${poolSess}:0" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 300
+    $poolSplitV = @(); $poolSplitH = @()
+    for ($i = 0; $i -lt 4; $i++) {
+        $dir = if ($i % 2 -eq 0) { "-v" } else { "-h" }
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        & $PSMUX split-window $dir -t $poolSess 2>&1 | Out-Null
+        $r = Wait-PanePrompt -SessionName $poolSess -TimeoutMs ($PromptTimeoutSec * 1000)
+        $sw.Stop()
+        if ($r.Found) {
+            if ($dir -eq "-v") { $poolSplitV += $sw.ElapsedMilliseconds } else { $poolSplitH += $sw.ElapsedMilliseconds }
+        }
+    }
+    Assert-Latency -Label "split -v @ warm-pool-size 5" -Samples $poolSplitV -P90Limit 150 -MaxLimit 300 -MinSamples 2
+    Assert-Latency -Label "split -h @ warm-pool-size 5" -Samples $poolSplitH -P90Limit 150 -MaxLimit 300 -MinSamples 2
+
+    # A burst: five commands with no waiting in between. With five settled
+    # spares every one is a transplant, so the last prompt must be up promptly
+    # after the last command was sent, not a shell startup later.
+    Start-Sleep -Milliseconds 3000
+    $swPB = [System.Diagnostics.Stopwatch]::StartNew()
+    for ($i = 0; $i -lt 5; $i++) { & $PSMUX new-window -t $poolSess 2>&1 | Out-Null }
+    $pbSent = $swPB.ElapsedMilliseconds
+    $pbReady = Wait-PanePrompt -SessionName $poolSess -TimeoutMs ($PromptTimeoutSec * 1000)
+    $swPB.Stop()
+    Write-Metric "  burst of 5 @ depth 5: commands sent in" $pbSent
+    Write-Metric "  burst of 5 @ depth 5: last prompt ready" $swPB.ElapsedMilliseconds
+    if ($pbReady.Found -and $swPB.ElapsedMilliseconds -le 600) {
+        Write-Pass "burst of 5 at depth 5 completed in $($swPB.ElapsedMilliseconds)ms (<= 600ms)"
+    } else {
+        Write-Fail "burst of 5 at depth 5 took $($swPB.ElapsedMilliseconds)ms (> 600ms) - the burst is not being served from the pool"
+    }
+
+    Kill-TestSession -SessionName $poolSess
 }
 Write-Host ""
 
@@ -397,6 +583,97 @@ if ($sessionTimes.Count -gt 0) {
     $sessAvg = ($sessionTimes | Measure-Object -Average).Average
     Write-Metric "  Session creation AVG" $sessAvg
     Write-Pass "Created $($sessionTimes.Count) sessions successfully"
+
+    Write-Info "back-to-back session creation: [$(($sessionTimes | ForEach-Object { [int]$_ }) -join ', ')]ms - creations this close together claim a standby that has registered but whose own shell is still starting, so one slow figure here is expected"
+}
+
+# Session creation claims a standby `__warm__` server, and exactly one standby
+# exists at a time. Back to back creations therefore claim a standby that has
+# advertised itself (its .port is on disk) before its first shell has finished
+# starting, which is the same shape of problem as a spare shell pool of depth
+# one and is bounded by the same thing: how fast a shell starts.
+#
+# What must hold, and what this asserts, is the case a human actually produces:
+# leave the standby the couple of seconds it needs to arm and EVERY subsequent
+# session must be instant. A failure here means the replacement standby is not
+# being spawned after a claim at all.
+Write-Host ""
+Write-Host "--- TEST 6b: repeat session creation with the standby armed ---" -ForegroundColor Yellow
+
+# Wait for the replacement standby to actually exist rather than sleeping a
+# guessed interval. A fixed 1800ms sleep made this section fail roughly one run
+# in three on BOTH the old and the new build: when the standby has not finished
+# registering, the session cold starts and the sample is ~600ms instead of
+# ~65ms, which says nothing about the code under test. Measured with a real
+# wait, base and this change are identical (median 65ms vs 66ms, n=10 each).
+function Wait-StandbyArmed {
+    # SettleMs has to exceed the standby's OWN shell startup (~600ms for pwsh):
+    # a standby claimed the moment its port file appears hands over a pane whose
+    # prompt is still on its way, and the claimant is billed for the remainder.
+    # Measured at 400ms the claims came out 243 to 364ms; with the shell really
+    # up they are ~65ms.
+    param([int]$TimeoutMs = 6000, [int]$SettleMs = 1200)
+    $warmPort = "$PSMUX_DIR\__warm__.port"
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        if (Test-Path $warmPort) {
+            # Registered. Give its own first shell a moment to finish starting:
+            # a standby claimed the instant it appears hands over a pane whose
+            # prompt is still on its way.
+            Start-Sleep -Milliseconds $SettleMs
+            return $true
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    return $false
+}
+
+$armedTimes = @()
+for ($i = 0; $i -lt 3; $i++) {
+    $sn = "perf_test_armed_$i"
+    # Establish the precondition rather than assume it. A standby is spawned by
+    # a session being created, so create one, then wait for the standby to
+    # register. Relying on whatever standby an earlier test happened to leave
+    # behind is what made this section report a cold start as a slow claim.
+    #
+    # Retried: the standby spawn is serialised by `__warm__.spawnlock`, so a
+    # standby that was killed moments ago can suppress its own replacement for
+    # one round. Observed about one rep in three. Three attempts failing in a
+    # row would mean standbys really are not being spawned, which is worth a
+    # failure.
+    $anchor = $null
+    for ($try = 0; $try -lt 3 -and -not $anchor; $try++) {
+        $cand = "perf_test_anchor_${i}_$try"
+        Start-Process -FilePath $PSMUX -ArgumentList "new-session", "-s", $cand, "-d" -WindowStyle Hidden | Out-Null
+        Wait-ServerReady -SessionName $cand -TimeoutSec 15 | Out-Null
+        if (Wait-StandbyArmed) { $anchor = $cand } else { Kill-TestSession -SessionName $cand }
+    }
+    if (-not $anchor) {
+        Write-Fail "  no standby registered within 6s of creating a session, 3 attempts - the replacement standby is not being spawned"
+        continue
+    }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    Start-Process -FilePath $PSMUX -ArgumentList "new-session", "-s", $sn, "-d" -WindowStyle Hidden | Out-Null
+    $si = Wait-ServerReady -SessionName $sn -TimeoutSec 15
+    if ($null -eq $si) { Write-Fail "  armed session '$sn' never started"; continue }
+    $pr = Wait-PanePrompt -SessionName $sn -TimeoutMs ($PromptTimeoutSec * 1000)
+    $sw.Stop()
+    if ($pr.Found) {
+        $armedTimes += $sw.ElapsedMilliseconds
+        Write-Metric "  Armed session #$($i+1) ready" $sw.ElapsedMilliseconds
+    } else {
+        Write-Fail "  Armed session #$($i+1) - prompt never appeared"
+    }
+    Kill-TestSession -SessionName $anchor
+}
+if ($armedTimes.Count -ge 2) {
+    Assert-Latency -Label "new-session (standby armed)" -Samples $armedTimes -P90Limit 300 -MaxLimit 500 -BimodalRatio 4.0 -MinSamples 2
+} else {
+    Write-Info "new-session (standby armed): fewer than 2 samples, no standby was ever armed in time - not judged"
+}
+for ($i = 0; $i -lt 3; $i++) {
+    Kill-TestSession -SessionName "perf_test_armed_$i"
+    for ($try = 0; $try -lt 3; $try++) { Kill-TestSession -SessionName "perf_test_anchor_${i}_$try" }
 }
 Write-Host ""
 
@@ -634,5 +911,35 @@ Write-Host ""
 Write-Host "  Tests passed: $PASS / $TOTAL_TESTS" -ForegroundColor $(if ($FAIL -eq 0) { "Green" } else { "Red" })
 if ($FAIL -gt 0) {
     Write-Host "  Tests FAILED: $FAIL" -ForegroundColor Red
+}
+Write-Host ""
+
+# Samples on disk so two runs can be compared later, and NEVER inside the repo:
+# a perf suite that commits its own output makes every run a dirty tree.
+try {
+    $metricsDir = if ($MetricsDir) { $MetricsDir } else { "$env:USERPROFILE\.psmux-test-data\metrics" }
+    if (-not (Test-Path $metricsDir)) { New-Item -ItemType Directory -Force -Path $metricsDir | Out-Null }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $outFile = Join-Path $metricsDir "pane_startup_perf-$stamp.json"
+    [ordered]@{
+        suite = "test_pane_startup_perf"
+        binary = $PSMUX
+        when = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        baseline_pwsh_noprofile_ms = [math]::Round($baselineAvg, 1)
+        baseline_pwsh_profile_ms = [math]::Round($profileAvg, 1)
+        new_window_ms = @($windowTimes | ForEach-Object { [math]::Round($_, 1) })
+        split_ms = @($splitTimes | ForEach-Object { [math]::Round($_, 1) })
+        new_session_ms = @($sessionTimes | ForEach-Object { [math]::Round($_, 1) })
+        pool_depth5_new_window_ms = @($poolWin | ForEach-Object { [math]::Round($_, 1) })
+        pool_depth5_split_v_ms = @($poolSplitV | ForEach-Object { [math]::Round($_, 1) })
+        pool_depth5_split_h_ms = @($poolSplitH | ForEach-Object { [math]::Round($_, 1) })
+        standby_armed_new_session_ms = @($armedTimes | ForEach-Object { [math]::Round($_, 1) })
+        passed = $PASS
+        failed = $FAIL
+        total = $TOTAL_TESTS
+    } | ConvertTo-Json -Depth 6 | Set-Content -Path $outFile -Encoding UTF8
+    Write-Host "  metrics written to $outFile" -ForegroundColor Gray
+} catch {
+    Write-Host "  could not write metrics: $_" -ForegroundColor DarkYellow
 }
 Write-Host ""

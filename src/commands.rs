@@ -2562,9 +2562,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             let old_shell = app.default_shell.clone();
             crate::config::parse_config_line(app, cmd);
             if app.default_shell != old_shell {
-                if let Some(mut wp) = app.warm_pane.take() {
-                    wp.child.kill().ok();
-                }
+                app.warm_pane.kill_all();
             }
             // Also forward unknown commands to server (catch-all for tmux compat)
             if let Some(port) = app.control_port {

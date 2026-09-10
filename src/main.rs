@@ -41,6 +41,7 @@ mod cross_session_server;
 mod paths;
 mod timer_res;
 mod pty_trace;
+mod startup_trace;
 mod wsl_path;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
@@ -702,6 +703,7 @@ fn build_send_paste_control(cmd_args: &[&str]) -> io::Result<String> {
 }
 
 fn main() {
+    crate::startup_trace::mark("cli.entry");
     if let Err(e) = run_main() {
         // Print a user-friendly error message instead of Rust's Debug format
         // which shows "Error: Custom { kind: Other, error: \"...\" }"  (fixes #47)
@@ -1592,6 +1594,7 @@ fn run_main() -> io::Result<()> {
                 return run_server(name, server_socket_name, initial_cmd, raw_cmd, srv_start_dir, srv_window_name, srv_init_size, srv_group_target, srv_env_vars);
             }
             "new-session" | "new" => {
+                crate::startup_trace::mark("cli.dispatch");
                 // Nesting guard is applied AFTER flag parsing below, once we know
                 // whether -d (detached) was requested. A detached session never
                 // grabs the current terminal, so nesting it is harmless and must
@@ -1973,7 +1976,8 @@ fn run_main() -> io::Result<()> {
                 // Spawn server with a hidden console window via CreateProcessW.
                 // This gives ConPTY a real console while keeping the window invisible.
                 #[cfg(windows)]
-                { server_pid = Some(crate::platform::spawn_server_hidden(&exe, &server_args)?); }
+                { server_pid = Some(crate::platform::spawn_server_hidden(&exe, &server_args)?);
+                  crate::startup_trace::mark("cli.server.spawn"); }
                 #[cfg(not(windows))]
                 {
                     let mut cmd = std::process::Command::new(&exe);
@@ -2090,6 +2094,7 @@ fn run_main() -> io::Result<()> {
                     poll_step_ms = next_ready_poll_step_ms(poll_step_ms);
                 }
                 crate::timer_res::set_high(false);
+                crate::startup_trace::mark(if ready { "cli.ready" } else { "cli.ready.failed" });
                 if !ready {
                     eprintln!("psmux: failed to create session '{}'", name);
                     // Issue #370: surface the real reason instead of leaving it

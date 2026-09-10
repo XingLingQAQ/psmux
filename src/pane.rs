@@ -600,9 +600,11 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
     let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    crate::startup_trace::mark("srv.pty.open");
     let pair = pty_system
         .openpty(size)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
+    crate::startup_trace::mark("srv.pty.ready");
 
     // When no explicit command is given, use the configured default-shell
     // (from `set -g default-shell` / `default-command`).
@@ -630,10 +632,14 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     // new-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
     // overrides the session environment, matching tmux.
     for (k, v) in extra_env { shell_cmd.env(k, v); }
+    if crate::startup_trace::on() {
+        crate::startup_trace::mark_detail("srv.child.argv", &format!("{:?}", shell_cmd.get_argv()));
+    }
     let child = pair
         .slave
         .spawn_command(shell_cmd)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
+    crate::startup_trace::mark("srv.child.spawned");
     // On Windows ConPTY the slave handle MUST be closed after spawning so the
     // child owns the sole reference to the console input pipe.  Leaving it open
     // causes "The handle is invalid" IOExceptions inside the child process.
@@ -1782,13 +1788,19 @@ fn split_spawn_tokens(cmd: &str) -> Vec<String> {
 ///   - a quoted first token, or the longest token-prefix, is an existing
 ///     executable path (handles unquoted space paths with arguments).
 ///
-/// Only commands whose program contains a path separator qualify — that is
-/// the case both reporters hit (`C:/Program Files/Git/bin/bash.exe`,
-/// `C:/cygwin64/bin/zsh.exe --login`).  Bare program names (`timeout`,
-/// `ping`, `cmd.exe`) intentionally KEEP the historical shell wrapper:
-/// console utilities like timeout.exe exit immediately when spawned without
-/// the shell re-establishing console stdin ("input redirection is not
-/// supported"), and the wrapper preserves their expected environment.
+/// A BARE program name also qualifies, but only with arguments after it and
+/// only when PATH resolves it to an image CreateProcessW can run by itself
+/// (see `bare_program_image`).  That is tmux's own rule: a multi-argument
+/// shell-command is `execvp`'d, a single one goes to the shell.  It matters
+/// far more on Windows than on Unix, because the shell psmux would otherwise
+/// interpose is pwsh, not sh: `new-session pwsh -NoLogo -NoProfile -File x`
+/// used to spawn `pwsh -NoLogo -Command "pwsh ..."`, and that outer pwsh cost
+/// a measured 238ms of pure launch latency while also sourcing the user's
+/// profile, which the inner `-NoProfile` had asked to skip.  The historical
+/// carve-out that kept bare names on the shell route, namely console utilities
+/// like timeout.exe supposedly needing the shell to re-establish console stdin,
+/// does not reproduce: `timeout /t 3`, `ping -n 2 127.0.0.1` and `nvim <file>`
+/// all run correctly when spawned straight into the pane's ConPTY.
 #[cfg(windows)]
 fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
     let trimmed = cmd.trim();
@@ -1796,8 +1808,7 @@ fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
     // pwsh call-operator form produced by the env-prefix path (#399) keeps
     // its established shell route.
     if trimmed.starts_with('&') { return None; }
-    // Direct spawn is only for explicit paths.
-    if !(trimmed.contains('/') || trimmed.contains('\\')) { return None; }
+    let has_separator = trimmed.contains('/') || trimmed.contains('\\');
     let exists_as_program = |p: &str| -> Option<String> {
         if !(p.contains('/') || p.contains('\\')) { return None; }
         let path = std::path::Path::new(p);
@@ -1816,8 +1827,10 @@ fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
     // exactly as users write it in bind-key/new-window (quotes already
     // consumed by the command parser).  Checked BEFORE the metacharacter
     // bail so `C:\Program Files (x86)\...` paths are still resolved.
-    if let Some(prog) = exists_as_program(trimmed) {
-        return Some((normalize(prog), Vec::new()));
+    if has_separator {
+        if let Some(prog) = exists_as_program(trimmed) {
+            return Some((normalize(prog), Vec::new()));
+        }
     }
     // Any shell metacharacter means the string needs a real shell.
     if trimmed.chars().any(|c| matches!(c, '&' | '|' | '<' | '>' | ';' | '`' | '$' | '(' | ')' | '%' | '\n' | '\r')) {
@@ -1827,13 +1840,57 @@ fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
     if tokens.is_empty() { return None; }
     // Longest token-prefix that is an existing file: handles unquoted space
     // paths followed by arguments (`C:/Program Files/.../bash.exe --login`).
-    for k in (1..=tokens.len()).rev() {
-        let candidate = tokens[..k].join(" ");
-        if let Some(prog) = exists_as_program(&candidate) {
-            return Some((normalize(prog), tokens[k..].to_vec()));
+    if has_separator {
+        for k in (1..=tokens.len()).rev() {
+            let candidate = tokens[..k].join(" ");
+            if let Some(prog) = exists_as_program(&candidate) {
+                return Some((normalize(prog), tokens[k..].to_vec()));
+            }
+        }
+    }
+    // Bare program name WITH arguments (`pwsh -NoLogo -File x.ps1`, `nvim f`,
+    // `git status`). The "with arguments" half is tmux's rule, not a hedge:
+    // tmux execvp's a multi-argument shell-command and shells a single one
+    // (spawn.c), so a lone `ls`/`cat`/`top` keeps the shell that has always
+    // resolved it as a PowerShell alias.
+    if tokens.len() > 1 {
+        if let Some(prog) = bare_program_image(&tokens[0]) {
+            return Some((prog, tokens[1..].to_vec()));
         }
     }
     None
+}
+
+/// PATH-resolve a bare program name to an image `CreateProcessW` can run on
+/// its own, or `None` when the name belongs to a shell.
+///
+/// Only `.exe`/`.com` qualify. `npm` resolves to an extensionless Node script
+/// and `<x>.cmd`/`.bat`/`.ps1` need their interpreter; handing any of those to
+/// CreateProcessW fails the whole pane spawn with "%1 is not a valid Win32
+/// application" (measured: `new-session -- npm --version` dies with os error
+/// 193). A name that resolves to nothing at all is a shell builtin, function
+/// or alias (`ls`, `Get-ChildItem`, `Start-Process`) and equally needs the
+/// shell. Either way the caller keeps the shell route these commands have
+/// always used.
+#[cfg(windows)]
+fn bare_program_image(token: &str) -> Option<String> {
+    if token.contains('/') || token.contains('\\') { return None; }
+    let resolved = cached_which(token);
+    // cached_which echoes its input back when PATH has nothing for it.
+    if resolved == token { return None; }
+    let lower = resolved.to_ascii_lowercase();
+    if !(lower.ends_with(".exe") || lower.ends_with(".com")) { return None; }
+    // A Store-packaged (MSIX) image cannot be activated from an SSH-spawned
+    // process at all (see `cached_shell`, which degrades to classic
+    // powershell.exe for exactly this reason). Leave those on the shell route
+    // so that degrade still happens instead of failing the spawn outright.
+    if lower.contains("\\windowsapps\\")
+        && (std::env::var_os("SSH_CONNECTION").is_some()
+            || std::env::var_os("SSH_CLIENT").is_some())
+    {
+        return None;
+    }
+    Some(resolved)
 }
 
 pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: bool) -> CommandBuilder {

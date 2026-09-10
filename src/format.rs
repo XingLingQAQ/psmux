@@ -1348,7 +1348,29 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                     // Fallback: the deepest foreground descendant (what tmux
                     // reports — `cat` running under a shell, not the shell),
                     // then the pane's own process, then a generic label.
-                    crate::platform::process_info::get_deepest_foreground_process_name(pid)
+                    //
+                    // The process-table snapshot behind that walk has two
+                    // freshness policies, and FORMAT_ASYNC already says which
+                    // one this expansion wants: it is set exactly on the
+                    // per-frame render path (status bar, window tabs, window
+                    // title) and clear for every one-shot expansion that
+                    // becomes a command reply. A frame may be one refresh
+                    // behind — the next frame corrects it, and keeping the
+                    // 9-11ms system walk off the server event loop is what the
+                    // keystroke-latency fix bought. A command reply may NOT:
+                    // `display-message -p '#{pane_current_command}'` is asked
+                    // once, and a stale table is the whole answer, which is how
+                    // this format came to report `pwsh` two seconds after a
+                    // command started and the command two seconds after it
+                    // exited. tmux reads the tty's foreground process group at
+                    // query time and is never stale, so the query route walks
+                    // inline when the snapshot has expired.
+                    let deepest = if FORMAT_ASYNC.with(|c| c.get()) {
+                        crate::platform::process_info::get_deepest_foreground_process_name(pid)
+                    } else {
+                        crate::platform::process_info::get_deepest_foreground_process_name_fresh(pid)
+                    };
+                    deepest
                         .or_else(|| crate::platform::process_info::get_process_name(pid))
                         .unwrap_or_else(|| "shell".into())
                 } else if !p.title.is_empty() {

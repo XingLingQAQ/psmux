@@ -34,6 +34,31 @@ pub(crate) fn sync_codepoint_widths(app: &AppState) {
 }
 
 /// Replace the whole `codepoint-widths` array and rebuild the width table.
+/// `warm-pool-size N`: how many spare shells to keep pre spawned.
+///
+/// The number that matters is not "is there a spare" but "has the spare
+/// finished starting". One spare guarantees the first creation is instant and
+/// guarantees nothing about the second, because the second gets the refill the
+/// first triggered, which is a shell that started moments ago. Depth is the
+/// only cure. Clamped to [`WARM_POOL_SIZE_MAX`] because every spare is a real
+/// process; `0` disables the pool, matching `set -g warm off` / `PSMUX_NO_WARM`.
+/// A value that is not a number leaves the pool untouched, as with every other
+/// numeric option here.
+pub(crate) fn set_warm_pool_size(app: &mut AppState, value: &str) {
+    let Ok(n) = value.trim().parse::<usize>() else { return };
+    let n = n.min(crate::types::WARM_POOL_SIZE_MAX);
+    app.warm_pane.target = n;
+    if n == 0 {
+        app.warm_pane.kill_all();
+    }
+    // Shrinking below the current depth: drop the surplus now rather than
+    // waiting for creations to drain it, so the memory the user just asked to
+    // give back is actually given back. Newest first, keeping the spares whose
+    // shells are furthest through starting.
+    app.warm_pane.trim_to(n);
+    crate::warm_trace!("pool: target set to {} (depth={})", n, app.warm_pane.len());
+}
+
 pub(crate) fn set_codepoint_widths(app: &mut AppState, value: &str) {
     app.codepoint_widths = split_codepoint_widths(value);
     sync_codepoint_widths(app);
@@ -206,6 +231,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
                 .join(",")
         }
         "warm" => if app.warm_enabled { "on".into() } else { "off".into() },
+        "warm-pool-size" => app.warm_pane.target.to_string(),
         "alternate-screen" => if app.allow_alternate_screen { "on".into() } else { "off".into() },
         "claude-code-fix-tty" => if app.claude_code_fix_tty { "on".into() } else { "off".into() },
         "claude-code-force-interactive" => if app.claude_code_force_interactive { "on".into() } else { "off".into() },
@@ -676,13 +702,15 @@ pub(crate) fn apply_set_option(
                 app.command_aliases.insert(alias, expansion);
             }
         }
+        "warm-pool-size" => {
+            set_warm_pool_size(app, value);
+        }
         "warm" => {
             app.warm_enabled = matches!(value, "on" | "true" | "1" | "yes");
             // When warm is disabled, kill any existing warm pane AND warm server
             if !app.warm_enabled {
-                if let Some(mut wp) = app.warm_pane.take() {
-                    wp.child.kill().ok();
-                }
+                app.warm_pane.target = 0;
+                app.warm_pane.kill_all();
                 // Kill the background warm server process
                 let warm_base = if let Some(ref sn) = app.socket_name {
                     format!("{}____warm__", sn)
@@ -705,6 +733,10 @@ pub(crate) fn apply_set_option(
                 let _ = std::fs::remove_file(&warm_port_path);
                 let warm_key_path = crate::paths::key_file(&warm_base);
                 let _ = std::fs::remove_file(&warm_key_path);
+            } else if app.warm_pane.target == 0 {
+                // Turning warm back on restores the configured depth, not the
+                // zero that turning it off left behind.
+                app.warm_pane.target = crate::types::default_warm_pool_size().max(1);
             }
         }
         "claude-code-fix-tty" => {

@@ -129,9 +129,7 @@ fn cleanup(app: &mut AppState) {
     for win in app.windows.iter_mut() {
         crate::tree::kill_all_children(&mut win.root);
     }
-    if let Some(mut wp) = app.warm_pane.take() {
-        wp.child.kill().ok();
-    }
+    app.warm_pane.kill_all();
 }
 
 /// Control / precondition: a live spare consumed WITHOUT `-c` is transplanted
@@ -142,9 +140,13 @@ fn cleanup(app: &mut AppState) {
 fn create_window_live_spare_without_start_dir_does_not_rehome() {
     let pty = native_pty_system();
     let mut app = test_app();
-    let wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
+    let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
+    // Settled by hand: these cases are about the transplant, not about the
+    // readiness gate. A spare spawned microseconds ago is by design not yet
+    // claimable, because its shell has not finished starting.
+    wp.ready = true;
     let warm_id = wp.pane_id;
-    app.warm_pane = Some(wp);
+    app.warm_pane.push(wp);
 
     create_window(&*pty, &mut app, None, None, false).expect("create_window");
 
@@ -166,9 +168,13 @@ fn create_window_live_spare_with_start_dir_transplants_and_rehomes() {
     let mut app = test_app();
     let dir = std::env::temp_dir();
     let dir = dir.to_str().expect("temp dir path");
-    let wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
+    let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
+    // Settled by hand: these cases are about the transplant, not about the
+    // readiness gate. A spare spawned microseconds ago is by design not yet
+    // claimable, because its shell has not finished starting.
+    wp.ready = true;
     let warm_id = wp.pane_id;
-    app.warm_pane = Some(wp);
+    app.warm_pane.push(wp);
 
     create_window(&*pty, &mut app, None, Some(dir), false).expect("create_window");
 
@@ -200,11 +206,11 @@ fn create_window_dead_spare_with_start_dir_cold_spawns() {
     let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
     let warm_id = wp.pane_id;
     kill_warm_child(&mut wp);
-    app.warm_pane = Some(wp);
+    app.warm_pane.push(wp);
 
     create_window(&*pty, &mut app, None, Some(dir), false).expect("create_window");
 
-    assert!(app.warm_pane.is_none(), "the dead spare must be discarded, not restored");
+    assert!(app.warm_pane.is_empty(), "the dead spare must be discarded, not restored");
     let pane = active_pane_of(&mut app.windows[0]);
     assert_ne!(
         pane.id, warm_id,
@@ -229,7 +235,7 @@ fn split_dead_spare_with_start_dir_cold_spawns() {
     let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
     let warm_id = wp.pane_id;
     kill_warm_child(&mut wp);
-    app.warm_pane = Some(wp);
+    app.warm_pane.push(wp);
 
     split_active_with_command(&mut app, LayoutKind::Vertical, None, Some(&*pty), Some(dir))
         .expect("split");

@@ -1162,9 +1162,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // just stages the early pane into `app.warm_pane` so the policy
     // module can act on it uniformly.
     if let Some(wp) = early_warm {
-        app.warm_pane = Some(wp);
+        app.warm_pane.push(wp);
         let sync = crate::warm_pane_sync::for_post_config(&app);
         crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+    }
+    // `set -g warm off` in the config zeroes the pool. Belt and braces: the
+    // option handler already does this, but a server that reached here with
+    // warm disabled must not have the loop refill behind its back.
+    if !app.warm_enabled {
+        app.warm_pane.target = 0;
     }
 
     // Update shared aliases now that config has been loaded
@@ -1221,7 +1227,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         let _ = std::fs::remove_file(&keypath);
         crate::session::remove_session_id_file(&app.port_file_base());
         // Kill warm pane if one was pre-spawned
-        if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+        app.warm_pane.kill_all();
         return Err(e);
     }
     // Resize panes now that the initial window exists and config is loaded.
@@ -1234,14 +1240,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     if let Some(n) = window_name {
         app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; });
     }
-    // Replenish: spawn a warm pane for the NEXT new-window / split.
-    // Always replenish when no warm pane is available.
-    if app.warm_pane.is_none() {
-        match spawn_warm_pane(&*pty_system, &mut app) {
-            Ok(wp) => { app.warm_pane = Some(wp); }
-            Err(e) => { eprintln!("psmux: warm pane pre-spawn failed: {e}"); }
-        }
-    }
+    // The pool is filled by the background spawner from the server loop
+    // below; nothing is spawned on this path any more, so `new-session`
+    // returns without waiting on a spare shell it does not itself need.
     // Fire client-attached and session-created hooks once at startup so plugins
     // populate initial data (e.g. CPU/battery) even for detached sessions
     // (tppanel previews). Skip the warm server: firing here would double-fire
@@ -1319,19 +1320,76 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // command (e.g. CapturePane) in the next batch still works correctly.
     let mut temp_focus_restore: Option<(usize, usize)> = None;
 
+    // ── Background spare shell spawner ──────────────────────────────────────
+    //
+    // Spawning a spare is a CreateProcess plus a ConPTY allocation: tens of
+    // milliseconds when the machine is quiet, far more when it is not. Doing it
+    // on the server loop stalls every other client, which is why it used to be
+    // deferred until 20ms had passed with no client activity. That deferral is
+    // exactly what made a burst of creations slow: during a burst there IS no
+    // quiet gap, so the pool stayed empty until the burst was over.
+    //
+    // The spawn now happens on its own thread and the finished spare is posted
+    // back here, so the loop can ask for a refill the instant a spare is
+    // claimed without paying anything for it. One thread per pending spawn,
+    // bounded by the pool target (at most WARM_POOL_SIZE_MAX), so this cannot
+    // become a thread bomb.
+    // `None` means the spawn failed: the reservation must still be released or
+    // the pool would believe a spare is forever on its way and never refill.
+    let (warm_done_tx, warm_done_rx) = std::sync::mpsc::channel::<Option<crate::types::WarmPane>>();
+    app.warm_refill_tx = Some(warm_done_tx);
+    let mut last_warm_trim = Instant::now();
     loop {
-        // Tier 3 — keep warm-pane spawning OFF the command path. A warm pane is a
-        // fresh shell + ConPTY; spawning one can block the single event loop for
-        // 100ms–seconds under load. Doing it inline after every new-window/split
-        // stalled *other* clients' commands, surfacing as the intermittent
-        // `os error 10060` timeouts. Instead replenish only during a quiet gap
-        // (no command processed in the last 20ms), so window-create bursts
-        // transplant the ready pane instantly and the blocking spawn lands in idle
-        // time. If no warm pane is ready when a new-window arrives, create_window
-        // still spawns one synchronously — correctness is unchanged.
-        if app.warm_pane.is_none() && last_client_activity.elapsed() >= Duration::from_millis(20) {
-            if let Ok(wp) = spawn_warm_pane(&*pty_system, &mut app) {
-                app.warm_pane = Some(wp);
+        // Land any spares the background spawner finished since the last tick.
+        while let Ok(slot) = warm_done_rx.try_recv() {
+            app.warm_pane.inflight = app.warm_pane.inflight.saturating_sub(1);
+            match slot {
+                Some(wp) => {
+                    app.warm_pane.push(wp);
+                    crate::warm_trace!("pool: spare landed, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
+                }
+                None => {
+                    crate::warm_trace!("pool: refill failed, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
+                }
+            }
+        }
+        // Promote spares whose shell has finished starting. This is what makes
+        // the pool's depth mean something: a spare lands ~25ms after it is
+        // asked for but is not worth transplanting for another ~400ms, and
+        // handing out the difference is indistinguishable from a cold spawn.
+        {
+            let now = Instant::now();
+            let flipped = app.warm_pane.refresh_all(now);
+            if flipped > 0 && crate::warm_trace::enabled() {
+                for wp in app.warm_pane.iter_mut() {
+                    if wp.ready && !wp.trace_settled {
+                        wp.trace_settled = true;
+                        crate::warm_trace::log(&format!(
+                            "pool: spare pane={} READY {:.1}ms after spawn",
+                            wp.pane_id,
+                            wp.spawned_at.elapsed().as_micros() as f64 / 1000.0
+                        ));
+                    }
+                }
+            }
+        }
+        // Refill immediately on any deficit, including one created by a claim
+        // that happened microseconds ago, and widen the batch while the pool is
+        // surging. Claims schedule their own refill too (see
+        // `pane::schedule_warm_refill`); this tick covers deficits that come
+        // from elsewhere, such as a reaped corpse or a resize.
+        crate::pane::schedule_warm_refill(&mut app);
+        // Give back the spares a finished surge was holding. Checked a few
+        // times a second rather than every tick: it walks the pool and kills
+        // processes, and nothing here is urgent.
+        if last_warm_trim.elapsed() >= Duration::from_millis(500) {
+            last_warm_trim = Instant::now();
+            let trimmed = app.warm_pane.trim_surplus();
+            if trimmed > 0 {
+                crate::warm_trace!(
+                    "pool: surge over, trimmed {} surplus spare(s) back to target={}",
+                    trimmed, app.warm_pane.target
+                );
             }
         }
         if last_registry_check.elapsed() >= Duration::from_secs(5) {
@@ -1429,7 +1487,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // any window yet, but pwsh / PSReadLine blocks on the ESC[6n
                 // response during shell startup.  Without this, the warm
                 // pane's shell never finishes loading.
-                if let Some(ref mut wp) = app.warm_pane {
+                // Every spare in the pool needs this, not just the first: a
+                // spare whose ESC[6n goes unanswered never finishes starting
+                // its shell, which would defeat the entire point of holding
+                // more than one of them.
+                for wp in app.warm_pane.iter_mut() {
                     if wp.cpr_pending.swap(false, std::sync::atomic::Ordering::AcqRel) {
                         let (r, c) = wp.term.lock()
                             .map(|g| g.screen().cursor_position())
@@ -2146,9 +2208,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             crate::session::remove_session_id_file(&app.port_file_base());
                             crate::types::shutdown_persistent_streams();
                             tree::kill_all_children_batch(&mut app.windows);
-                            if let Some(mut wp) = app.warm_pane.take() {
-                                wp.child.kill().ok();
-                            }
+                            app.warm_pane.kill_all();
                             std::thread::sleep(std::time::Duration::from_millis(10));
                             std::process::exit(0);
                         }
@@ -3454,7 +3514,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Kill all child processes using a single process snapshot
                     tree::kill_all_children_batch(&mut app.windows);
                     // Kill warm pane's child (process::exit skips Drop)
-                    if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+                    app.warm_pane.kill_all();
                     // TerminateProcess is synchronous on Windows — processes
                     // are already dead.  Minimal delay for OS handle cleanup.
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -5069,9 +5129,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
-                        if let Some(mut wp) = app.warm_pane.take() {
-                            wp.child.kill().ok();
-                        }
+                        app.warm_pane.kill_all();
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         std::process::exit(0);
                     }
@@ -5153,9 +5211,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
-                        if let Some(mut wp) = app.warm_pane.take() {
-                            wp.child.kill().ok();
-                        }
+                        app.warm_pane.kill_all();
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         std::process::exit(0);
                     }
@@ -5203,9 +5259,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
-                        if let Some(mut wp) = app.warm_pane.take() {
-                            wp.child.kill().ok();
-                        }
+                        app.warm_pane.kill_all();
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         std::process::exit(0);
                     }
@@ -5625,7 +5679,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Kill all child processes using a single process snapshot
                     tree::kill_all_children_batch(&mut app.windows);
                     // Kill warm pane's child (process::exit skips Drop)
-                    if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+                    app.warm_pane.kill_all();
                     // TerminateProcess is synchronous on Windows — processes
                     // are already dead.  Minimal delay for OS handle cleanup.
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -6868,14 +6922,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // consume-time gate in create_window/split then falls back to a
             // cold spawn, but replacing the corpse here keeps the next
             // new-window on the instant warm path.
-            let warm_dead = app.warm_pane.as_mut()
-                .map(|wp| !crate::pane::warm_pane_is_live(wp))
-                .unwrap_or(false);
-            if warm_dead {
-                if let Some(mut dead) = app.warm_pane.take() { dead.child.kill().ok(); }
-                if let Ok(nw) = spawn_warm_pane(&*pty_system, &mut app) {
-                    app.warm_pane = Some(nw);
-                }
+            // Dropping the corpses is all that is needed: the deficit they
+            // leave behind is refilled by the background spawner on the very
+            // next loop tick, off the command path.
+            let reaped = app.warm_pane.reap_dead();
+            if reaped > 0 {
+                crate::warm_trace!("pool: reaped {} dead spare(s), depth now {}", reaped, app.warm_pane.len());
             }
             // #450 (opt-in `@heal-crashed-panes`): a shell can FailFast on its
             // very first ConPTY read right after a warm-pane transplant (pwsh
@@ -7010,7 +7062,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 std::thread::sleep(Duration::from_millis(50));
                 crate::types::shutdown_persistent_streams();
                 // Kill warm pane's child (process::exit skips Drop)
-                if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+                app.warm_pane.kill_all();
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 std::process::exit(0);
             }

@@ -114,9 +114,14 @@ pub fn for_env_change() -> WarmPaneSync {
 /// at the old dimensions.  Respawn at the new size so the next
 /// transplant lands pixel-perfect on the first frame with no reflow.
 pub fn for_resize(app: &AppState, new_rows: u16, new_cols: u16) -> WarmPaneSync {
-    match app.warm_pane.as_ref() {
-        Some(wp) if wp.rows == new_rows && wp.cols == new_cols => WarmPaneSync::Noop,
-        _ => WarmPaneSync::Respawn("client resized"),
+    // A pool is only "already the right size" when EVERY spare is, otherwise
+    // the odd one out would transplant at the stale grid and reflow on its
+    // first frame. An empty pool needs nothing killed but does need the
+    // refill to happen at the new size, which `respawn` arranges.
+    if !app.warm_pane.is_empty() && app.warm_pane.iter().all(|wp| wp.rows == new_rows && wp.cols == new_cols) {
+        WarmPaneSync::Noop
+    } else {
+        WarmPaneSync::Respawn("client resized")
     }
 }
 
@@ -198,22 +203,22 @@ fn apply_patch(app: &mut AppState, patch: WarmPanePatch) {
     // bounded and cheap.
     apply_patch_to_existing_panes(app, &patch);
 
-    let wp = match app.warm_pane.as_ref() {
-        Some(wp) => wp,
-        None => return,
-    };
-    match patch {
-        WarmPanePatch::HistoryLimit(n) => {
-            if let Ok(mut parser) = wp.term.lock() {
-                if parser.screen().scrollback_len() != n {
-                    parser.screen_mut().set_scrollback_len(n);
+    // Patch every spare, not just the head of the pool: any of them can be
+    // the one the next new-window claims.
+    for wp in app.warm_pane.iter() {
+        match patch {
+            WarmPanePatch::HistoryLimit(n) => {
+                if let Ok(mut parser) = wp.term.lock() {
+                    if parser.screen().scrollback_len() != n {
+                        parser.screen_mut().set_scrollback_len(n);
+                    }
                 }
             }
-        }
-        WarmPanePatch::AllowAlternateScreen(allowed) => {
-            if let Ok(mut parser) = wp.term.lock() {
-                if parser.screen().allow_alternate_screen() != allowed {
-                    parser.screen_mut().set_allow_alternate_screen(allowed);
+            WarmPanePatch::AllowAlternateScreen(allowed) => {
+                if let Ok(mut parser) = wp.term.lock() {
+                    if parser.screen().allow_alternate_screen() != allowed {
+                        parser.screen_mut().set_allow_alternate_screen(allowed);
+                    }
                 }
             }
         }
@@ -257,27 +262,20 @@ fn apply_patch_to_existing_panes(app: &mut AppState, patch: &WarmPanePatch) {
     }
 }
 
-fn respawn(app: &mut AppState, pty_system: &dyn portable_pty::PtySystem) {
-    // Always kill any existing warm pane first — there is no in-place
-    // way to swap shell binaries or environment blocks.
-    if let Some(mut old) = app.warm_pane.take() {
-        old.child.kill().ok();
-    }
-    // Honour warm_enabled: a config-disabled warm pane must not come
-    // back to life after a Respawn — the user opted out.
-    if !app.warm_enabled {
-        return;
-    }
-    match crate::pane::spawn_warm_pane(pty_system, app) {
-        Ok(wp) => {
-            app.warm_pane = Some(wp);
-        }
-        Err(_) => {
-            // Best-effort: if a respawn fails (e.g. transient PTY
-            // creation error) we leave warm_pane = None and the next
-            // consume path falls back to a synchronous cold spawn.
-        }
-    }
+fn respawn(app: &mut AppState, _pty_system: &dyn portable_pty::PtySystem) {
+    // Kill every spare — there is no in-place way to swap shell binaries or
+    // environment blocks, and a pool where only the head was refreshed would
+    // hand a stale shell to the second creation.
+    //
+    // Nothing is spawned here. The server loop notices the deficit on its next
+    // tick and hands the spawns to the background spawner, which is what keeps
+    // an expensive event (a client resize, a `set-option`) from stalling the
+    // loop for the length of a CreateProcess. `warm_enabled` and
+    // `warm-pool-size 0` are honoured there: a target of zero simply never
+    // produces a deficit, so an opted-out user's pool stays empty.
+    let killed = app.warm_pane.len();
+    app.warm_pane.kill_all();
+    crate::warm_trace!("pool: respawn requested, killed {} spare(s), target={}", killed, app.warm_pane.target);
 }
 
 /// Helper for warm-pane consume sites in `pane.rs`.  When a warm
@@ -304,3 +302,7 @@ pub fn reconcile_consumed_parser(parser: &mut vt100::Parser, app: &AppState) {
 #[cfg(test)]
 #[path = "../tests-rs/test_warm_pane_sync.rs"]
 mod test_warm_pane_sync;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_warm_pool_depth.rs"]
+mod test_warm_pool_depth;

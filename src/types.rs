@@ -387,6 +387,323 @@ pub struct WarmPane {
     pub rows: u16,
     pub cols: u16,
     pub output_ring: Arc<Mutex<VecDeque<u8>>>,
+    /// When this spare's shell was created. The pool hands out the OLDEST
+    /// spare first, because a spare's usefulness is entirely a function of how
+    /// much of its shell startup has already elapsed: transplanting a spare
+    /// that was spawned 5ms ago costs the caller the whole shell boot, exactly
+    /// as a cold spawn would.
+    pub spawned_at: std::time::Instant,
+    /// Has this spare's shell finished starting? A spare becomes a pool member
+    /// about 25ms after it is asked for (that is just `CreateProcess` plus a
+    /// ConPTY) but is not worth transplanting for another ~400ms, which is how
+    /// long pwsh takes to put a prompt on the screen. Handing out a spare in
+    /// between is indistinguishable from a cold spawn: the window opens and
+    /// sits blank for the rest of the shell's startup.
+    ///
+    /// Maintained by [`WarmPane::refresh_ready`]; only ready spares are ever
+    /// handed to a caller.
+    pub ready: bool,
+    /// Readiness bookkeeping: the last `data_version` seen and when it last
+    /// changed, which is how "the shell stopped writing" is detected.
+    pub last_dv: u64,
+    pub last_change: std::time::Instant,
+    /// Trace bookkeeping (`PSMUX_WARM_TRACE=1`): whether the "spare became
+    /// ready" line has already been emitted for this spare.
+    pub trace_settled: bool,
+}
+
+/// How long a spare's output has to stay unchanged before its shell counts as
+/// started.
+///
+/// Measured, not guessed: a pwsh spare writes its prompt and goes quiet about
+/// 155ms after spawn, and a claim of a spare 374ms old was instant while claims
+/// at 30ms and 40ms both cost ~380ms more. 250ms of quiet puts readiness at
+/// ~405ms after spawn, which is exactly where the instant claims begin.
+pub const WARM_READY_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Backstop: a spare this old counts as ready however little it has written.
+///
+/// Readiness is inferred from output, so a `default-shell` that prints nothing
+/// at all (or never stops printing) would otherwise never be handed out and
+/// every creation would cold spawn forever. Past this age the pool behaves as
+/// it did before readiness existed, which is the old, merely imperfect,
+/// behaviour rather than a new failure.
+pub const WARM_READY_MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+impl WarmPane {
+    /// Recompute [`WarmPane::ready`]. Cheap enough for every loop tick: one
+    /// relaxed atomic load per spare, and it returns immediately once ready.
+    pub fn refresh_ready(&mut self, now: std::time::Instant) -> bool {
+        if self.ready {
+            return true;
+        }
+        let dv = self.data_version.load(std::sync::atomic::Ordering::Relaxed);
+        if dv != self.last_dv {
+            self.last_dv = dv;
+            self.last_change = now;
+        }
+        let quiet = now.saturating_duration_since(self.last_change);
+        if (dv > 0 && quiet >= WARM_READY_QUIET)
+            || now.saturating_duration_since(self.spawned_at) >= WARM_READY_MAX_WAIT
+        {
+            self.ready = true;
+        }
+        self.ready
+    }
+}
+
+/// The pool of pre spawned spare shells that `new-window` and `split-window`
+/// transplant instead of paying a shell boot.
+///
+/// This used to be a bare `Option<WarmPane>`: a pool of depth one. Depth one
+/// is enough when creations are minutes apart and hopeless when they are not,
+/// because a spare is only worth anything once its shell has finished
+/// starting. Claim the single spare, refill, and the refill is a brand new
+/// shell; the very next creation claims that newborn and pays its whole boot.
+/// That is the alternating fast/slow pattern users see when they open several
+/// windows in a row.
+///
+/// Spares are handed out oldest first (`pop_front`) so a claim always gets the
+/// most nearly booted shell available.
+#[derive(Default)]
+pub struct WarmPool {
+    spares: VecDeque<WarmPane>,
+    /// How many spares to keep while nobody is creating anything. 0 disables
+    /// the pool entirely.
+    pub target: usize,
+    /// Spares whose spawn has been handed to the background spawner and has
+    /// not landed back in `spares` yet. Counted towards the target so a burst
+    /// does not queue one spawn per loop tick.
+    pub inflight: usize,
+    /// Until when the pool is allowed to hold more than `target`. Set by a
+    /// claim that found no ready spare, which is the only honest signal that
+    /// the idle depth is too shallow for what the user is doing right now.
+    surge_until: Option<std::time::Instant>,
+    /// When the last claim happened, ready or not. Drives surplus trimming.
+    last_claim: Option<std::time::Instant>,
+}
+
+/// Default depth of the spare shell pool (`warm-pool-size`).
+///
+/// Two, not one: with a single spare every other creation in a sequence claims
+/// a shell that was spawned moments earlier and pays its whole boot. Two costs
+/// one extra idle shell (about 45 MB of working set on Windows with pwsh) and
+/// removes the alternation. Users who create windows in long bursts can raise
+/// it; `set -g warm-pool-size 0` (or `PSMUX_NO_WARM=1`) turns the pool off.
+pub const WARM_POOL_SIZE_DEFAULT: usize = 2;
+
+/// Hard ceiling on `warm-pool-size`. Each spare is a real shell process plus a
+/// ConPTY, so an unbounded pool is an unbounded memory leak by configuration.
+pub const WARM_POOL_SIZE_MAX: usize = 8;
+
+/// Hard ceiling on the pool while it is surging, and the multiple of `target`
+/// a surge is allowed to reach.
+///
+/// A surge exists because depth alone cannot serve a run of creations: a spare
+/// takes ~400ms to become useful, so creations arriving every 20ms outrun any
+/// fixed depth, and the pool refills one shell per claim while the caller needs
+/// far more than one. Surging spawns the whole batch CONCURRENTLY instead, so a
+/// run of creations pays one shell startup between them all rather than one
+/// each. The multiple keeps a user who deliberately set `warm-pool-size 1` for
+/// memory reasons from being handed eight shells.
+pub const WARM_POOL_SURGE_MAX: usize = 8;
+pub const WARM_POOL_SURGE_FACTOR: usize = 4;
+
+/// How long a surge allowance outlives the claim that triggered it. Long enough
+/// to cover a human run of window opening, short enough that the memory comes
+/// back while they are still looking at the result.
+pub const WARM_SURGE_HOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How close together two claims have to be to count as a run.
+///
+/// A surge needs TWO signals, not one: a claim that found nothing ready, and
+/// another claim just before it. A lone miss is not a burst, and treating it as
+/// one has a measured cost: a cold `new-session` misses by definition (its only
+/// spare is newborn), and surging there fired eight shell spawns alongside the
+/// session's own starting shell and made startup ~100ms slower.
+pub const WARM_BURST_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Resolve the boot time pool depth: `PSMUX_NO_WARM` wins (0), then
+/// `PSMUX_WARM_POOL_SIZE` (clamped), then the compiled default. The config
+/// option `warm-pool-size` overrides this once the config has been parsed.
+pub fn default_warm_pool_size() -> usize {
+    if std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false) {
+        return 0;
+    }
+    std::env::var("PSMUX_WARM_POOL_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.min(WARM_POOL_SIZE_MAX))
+        .unwrap_or(WARM_POOL_SIZE_DEFAULT)
+}
+
+impl WarmPool {
+    pub fn new(target: usize) -> Self {
+        Self { spares: VecDeque::new(), target, inflight: 0, surge_until: None, last_claim: None }
+    }
+    /// Claim the oldest spare whatever its state. Used by the shrink and
+    /// teardown paths, which only want the process handle back.
+    pub fn take(&mut self) -> Option<WarmPane> {
+        self.spares.pop_front()
+    }
+    /// Hand a spare to a creation. Returns it and whether it was ready.
+    ///
+    /// Readiness decides WHICH spare is handed out, never whether a spare is
+    /// handed out at all. A warming spare still beats a cold spawn: it is
+    /// already some way into its shell startup and costs no `CreateProcess`.
+    /// Gating the claim on readiness outright made a cold `new-session` 330ms
+    /// slower, because its one and only spare is by definition newborn.
+    ///
+    /// What readiness buys is correct ACCOUNTING. An unready claim is reported
+    /// to [`WarmPool::note_claim`] as a miss, which opens a surge window, and
+    /// it is the surge that turns a run of creations from "one shell startup
+    /// each" into "one shell startup between them all".
+    pub fn claim(&mut self) -> (Option<WarmPane>, bool) {
+        if let Some(wp) = self.take_ready() {
+            return (Some(wp), true);
+        }
+        (self.take(), false)
+    }
+    /// Claim the oldest spare whose shell has finished starting, or `None` when
+    /// none has. Reaps corpses on the way through (#450).
+    pub fn take_ready(&mut self) -> Option<WarmPane> {
+        // #450: a spare's shell can die while it idles here. A corpse must
+        // never be handed out, and must not sit in the pool occupying a slot
+        // that would otherwise be refilled with a working shell.
+        self.reap_dead();
+        let now = std::time::Instant::now();
+        for wp in self.spares.iter_mut() {
+            wp.refresh_ready(now);
+        }
+        let idx = self.spares.iter().position(|w| w.ready)?;
+        self.spares.remove(idx)
+    }
+    /// How many spares have finished starting. Does not recompute readiness;
+    /// call after [`WarmPool::refresh_all`] or a [`WarmPool::claim`].
+    pub fn ready_len(&self) -> usize {
+        self.spares.iter().filter(|w| w.ready).count()
+    }
+    /// Recompute readiness for every spare. Returns how many just flipped to
+    /// ready, so the caller can trace the edge.
+    pub fn refresh_all(&mut self, now: std::time::Instant) -> usize {
+        let mut flipped = 0;
+        for wp in self.spares.iter_mut() {
+            if !wp.ready && wp.refresh_ready(now) {
+                flipped += 1;
+            }
+        }
+        flipped
+    }
+    /// Record that a creation wanted a spare. `satisfied` is false when no
+    /// ready spare was available.
+    ///
+    /// A surge opens only when a miss follows another claim within
+    /// [`WARM_BURST_WINDOW`]: one miss on its own is an isolated creation, not a
+    /// run, and over-reacting to it costs startup time for no benefit.
+    pub fn note_claim(&mut self, satisfied: bool) {
+        let now = std::time::Instant::now();
+        let following_another = self
+            .last_claim
+            .map(|t| now.saturating_duration_since(t) <= WARM_BURST_WINDOW)
+            .unwrap_or(false);
+        self.last_claim = Some(now);
+        if !satisfied && following_another {
+            self.surge_until = Some(now + WARM_SURGE_HOLD);
+        }
+    }
+    pub fn is_surging(&self) -> bool {
+        matches!(self.surge_until, Some(t) if std::time::Instant::now() < t)
+    }
+    /// Expire the surge window now. Tests need this because the real one lasts
+    /// [`WARM_SURGE_HOLD`], and a unit test must not sleep for five seconds.
+    #[cfg(test)]
+    pub fn end_surge_for_test(&mut self) {
+        self.surge_until = None;
+    }
+    /// How many spares the pool should be holding right now. `standby` caps a
+    /// `__warm__` helper at one: it creates no windows of its own, so spares
+    /// beyond the one its claimant will want first are pure idle memory, and a
+    /// standby never surges.
+    pub fn effective_target(&self, standby: bool) -> usize {
+        if self.target == 0 {
+            return 0;
+        }
+        if standby {
+            return self.target.min(1);
+        }
+        if self.is_surging() {
+            return self
+                .target
+                .saturating_mul(WARM_POOL_SURGE_FACTOR)
+                .min(WARM_POOL_SURGE_MAX)
+                .max(self.target);
+        }
+        self.target
+    }
+    /// Release spares held only because of a surge that has now expired.
+    pub fn trim_surplus(&mut self) -> usize {
+        if self.is_surging() {
+            return 0;
+        }
+        self.trim_to(self.target)
+    }
+    /// Kill spares beyond `keep`, NEWEST first: the oldest spares are the ones
+    /// whose startup is furthest along, so dropping them would throw away the
+    /// 400ms the pool just spent making them useful.
+    pub fn trim_to(&mut self, keep: usize) -> usize {
+        let mut killed = 0;
+        while self.spares.len() > keep {
+            if let Some(mut wp) = self.spares.pop_back() {
+                wp.child.kill().ok();
+                killed += 1;
+            } else {
+                break;
+            }
+        }
+        killed
+    }
+    /// Return a freshly spawned spare to the pool.
+    pub fn push(&mut self, wp: WarmPane) {
+        self.spares.push_back(wp);
+    }
+    pub fn len(&self) -> usize {
+        self.spares.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.spares.is_empty()
+    }
+    /// How many more spares should be spawned right now, counting the ones
+    /// already being spawned in the background.
+    pub fn deficit(&self) -> usize {
+        self.deficit_for(self.target)
+    }
+    /// `deficit` against a target other than the configured one. Callers pass
+    /// [`WarmPool::effective_target`], which is what applies the standby cap and
+    /// the surge allowance.
+    pub fn deficit_for(&self, target: usize) -> usize {
+        target.saturating_sub(self.spares.len() + self.inflight)
+    }
+    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, WarmPane> {
+        self.spares.iter()
+    }
+    pub fn iter_mut(&mut self) -> std::collections::vec_deque::IterMut<'_, WarmPane> {
+        self.spares.iter_mut()
+    }
+    /// Kill and drop every spare. Used by every "the pool is now stale or the
+    /// server is going away" site; leaving a spare behind here is how orphan
+    /// shells get created.
+    pub fn kill_all(&mut self) {
+        for mut wp in self.spares.drain(..) {
+            wp.child.kill().ok();
+        }
+    }
+    /// Drop spares whose shell died while idling (#450). Returns how many were
+    /// removed so the caller can decide whether to log.
+    pub fn reap_dead(&mut self) -> usize {
+        let before = self.spares.len();
+        self.spares.retain_mut(|wp| matches!(wp.child.try_wait(), Ok(None)));
+        before - self.spares.len()
+    }
 }
 
 /// A pane extracted from this session for cross-session forwarding.
@@ -1021,8 +1338,15 @@ pub struct AppState {
     /// by `capture-pane -S` and copy-mode (psmux issue #88).  Mirrors
     /// tmux's `set -g alternate-screen on/off`.
     pub allow_alternate_screen: bool,
-    /// Pre-spawned warm pane: shell already loaded, ready for instant new-window.
-    pub warm_pane: Option<WarmPane>,
+    /// Pool of pre spawned spare shells, ready for an instant new-window or
+    /// split. Depth comes from the `warm-pool-size` option; see [`WarmPool`].
+    pub warm_pane: WarmPool,
+    /// Where a finished background spare is posted back to the server loop.
+    /// Held here rather than only in `run_server` so a claim can schedule its
+    /// own refill the moment it happens: the claim that misses goes on to cold
+    /// spawn, which blocks the loop for a whole shell startup, and a refill
+    /// scheduled after that is a refill scheduled far too late.
+    pub warm_refill_tx: Option<std::sync::mpsc::Sender<Option<WarmPane>>>,
     /// Plugin .ps1 scripts queued during config loading for post-startup execution.
     /// These need the server to be running (TCP listener) before they can apply.
     pub pending_plugin_scripts: Vec<String>,
@@ -1754,7 +2078,8 @@ impl AppState {
             status_message: None,
             warm_enabled: std::env::var("PSMUX_NO_WARM").map(|v| v != "1" && v != "true").unwrap_or(true),
             allow_alternate_screen: true,
-            warm_pane: None,
+            warm_pane: WarmPool::new(default_warm_pool_size()),
+            warm_refill_tx: None,
             pending_plugin_scripts: Vec::new(),
             control_clients: HashMap::new(),
             session_group: None,

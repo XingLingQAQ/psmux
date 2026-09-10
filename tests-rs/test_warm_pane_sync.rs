@@ -117,7 +117,8 @@ fn resize_to_same_size_is_noop() {
     cmd.arg("exit");
     let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
     let writer = pair.master.take_writer().expect("writer");
-    app.warm_pane = Some(crate::types::WarmPane {
+    let now = std::time::Instant::now();
+    app.warm_pane.push(crate::types::WarmPane {
         master: pair.master,
         writer,
         child,
@@ -134,6 +135,11 @@ fn resize_to_same_size_is_noop() {
         output_ring: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::new(),
         )),
+        spawned_at: now,
+        ready: true,
+        last_dv: 0,
+        last_change: now,
+        trace_settled: false,
     });
 
     assert!(matches!(for_resize(&app, 40, 120), WarmPaneSync::Noop));

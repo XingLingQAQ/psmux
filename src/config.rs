@@ -1400,10 +1400,14 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "warm" => {
             app.warm_enabled = matches!(value, "on" | "true" | "1" | "yes");
             if !app.warm_enabled {
-                if let Some(mut wp) = app.warm_pane.take() {
-                    wp.child.kill().ok();
-                }
+                app.warm_pane.target = 0;
+                app.warm_pane.kill_all();
+            } else if app.warm_pane.target == 0 {
+                app.warm_pane.target = crate::types::default_warm_pool_size().max(1);
             }
+        }
+        "warm-pool-size" => {
+            crate::server::options::set_warm_pool_size(app, value);
         }
         "codepoint-widths" => {
             crate::server::options::set_codepoint_widths(app, value);

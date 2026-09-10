@@ -536,8 +536,32 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     // (see `has_custom_config` in main.rs).
     // A warm pane's shell is already running, so `-e` vars can no longer be
     // injected into its environment — bypass the transplant when -e is used.
-    if command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
-        let mut wp = app.warm_pane.take().unwrap();
+    let warm_eligible = command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell);
+    // A ready spare if there is one, else the oldest warming spare, else
+    // nothing and a cold spawn below. See `WarmPool::claim`.
+    let (claimed, was_ready) = if warm_eligible { app.warm_pane.claim() } else { (None, false) };
+    if warm_eligible {
+        app.warm_pane.note_claim(was_ready);
+        if !was_ready {
+            crate::warm_trace!(
+                "claim(new-window): NO READY SPARE (depth={} got_warming={}) -- surging",
+                app.warm_pane.len(),
+                claimed.is_some()
+            );
+        }
+        // Start the replacement batch now. If this claim missed, the caller is
+        // about to wait out a shell startup either way, and the batch should be
+        // booting during that wait rather than after it.
+        schedule_warm_refill(app);
+    }
+    if let Some(mut wp) = claimed {
+        crate::warm_trace!(
+            "claim(new-window): pane={} spare_age={:.1}ms pool_left={} ready_left={}",
+            wp.pane_id,
+            wp.spawned_at.elapsed().as_micros() as f64 / 1000.0,
+            app.warm_pane.len(),
+            app.warm_pane.ready_len()
+        );
         // Resize to current terminal dimensions if they changed since pre-spawn
         let area = app.client_area;
         let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
@@ -695,35 +719,152 @@ pub fn warm_pane_is_live(wp: &mut crate::types::WarmPane) -> bool {
 /// (typically 500ms+), pwsh will have fully loaded its profile and the prompt
 /// is ready.
 pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState) -> io::Result<crate::types::WarmPane> {
+    let params = warm_spawn_params(app)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "warm panes disabled"))?;
+    spawn_warm_pane_from(pty_system, &params)
+}
+
+/// Bring the spare pool up to its effective target, spawning each missing
+/// spare on its own thread.
+///
+/// Called from the server loop every tick AND from each claim site. The claim
+/// site matters more than it looks: a claim that finds no ready spare falls
+/// through to a synchronous cold spawn that blocks the loop for a whole shell
+/// startup, so a refill left to "the next loop tick" would not begin until the
+/// slow creation the user is waiting for had already finished. Scheduling here
+/// means the replacement batch boots *while* that cold spawn is happening.
+///
+/// Nothing happens when the pool is off (`warm off`, `warm-pool-size 0`,
+/// `PSMUX_NO_WARM`): those produce a target of zero, hence no deficit. The
+/// thread count is bounded by [`crate::types::WARM_POOL_SURGE_MAX`].
+pub fn schedule_warm_refill(app: &mut AppState) {
     if !app.warm_enabled {
-        return Err(io::Error::new(io::ErrorKind::Other, "warm panes disabled"));
+        return;
+    }
+    let Some(tx) = app.warm_refill_tx.clone() else { return };
+    let standby = app.is_warm_server();
+    let target = app.warm_pane.effective_target(standby);
+    let deficit = app.warm_pane.deficit_for(target);
+    for _ in 0..deficit {
+        let Some(params) = warm_spawn_params(app) else { break };
+        let tx = tx.clone();
+        app.warm_pane.inflight += 1;
+        crate::warm_trace!(
+            "pool: refill scheduled pane={} (depth={} ready={} inflight={} target={} surging={})",
+            params.pane_id,
+            app.warm_pane.len(),
+            app.warm_pane.ready_len(),
+            app.warm_pane.inflight,
+            target,
+            app.warm_pane.is_surging()
+        );
+        let started = std::thread::Builder::new()
+            .name("psmux-warm-spawn".into())
+            .spawn(move || {
+                let pty = portable_pty::native_pty_system();
+                match spawn_warm_pane_from(&*pty, &params) {
+                    Ok(wp) => {
+                        let _ = tx.send(Some(wp));
+                    }
+                    Err(e) => {
+                        crate::warm_trace!("pool: refill FAILED pane={}: {e}", params.pane_id);
+                        // `None` still releases the reservation. Without it the
+                        // pool would believe a spare is forever on its way.
+                        let _ = tx.send(None);
+                    }
+                }
+            });
+        if started.is_err() {
+            app.warm_pane.inflight -= 1;
+            break;
+        }
+    }
+}
+
+/// Everything `spawn_warm_pane_from` needs, snapshotted off `AppState`.
+///
+/// The snapshot exists so the actual spawn can run on a background thread:
+/// `AppState` is owned by the server loop and cannot cross a thread boundary,
+/// but a plain value like this can. Taken on the loop thread (it allocates the
+/// pane id and resolves format variables against live state), consumed
+/// wherever is convenient.
+#[derive(Clone)]
+pub struct WarmSpawnParams {
+    pub rows: u16,
+    pub cols: u16,
+    pub expanded_shell: String,
+    pub env_shim: bool,
+    pub allow_predictions: bool,
+    pub pane_id: usize,
+    pub control_port: Option<u16>,
+    pub socket_name: Option<String>,
+    pub session_name: String,
+    pub claude_code_fix_tty: bool,
+    pub claude_code_force_interactive: bool,
+    pub host_colors: Option<crate::types::HostColors>,
+    pub environment: std::collections::HashMap<String, String>,
+    pub history_limit: usize,
+    pub allow_alternate_screen: bool,
+}
+
+/// Snapshot the spawn inputs and reserve a pane id. Returns `None` when the
+/// pool is disabled, which is the one thing the caller must not paper over.
+pub fn warm_spawn_params(app: &mut AppState) -> Option<WarmSpawnParams> {
+    if !app.warm_enabled {
+        return None;
     }
     let area = app.client_area;
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
     let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
+    // Expand format variables like #{pane_current_path} at spawn time (#111).
+    // Must happen here, on the loop thread, while `app` is in hand.
+    let expanded_shell = crate::format::expand_format(&app.default_shell, app);
+    let pane_id = app.next_pane_id;
+    app.next_pane_id += 1;
+    Some(WarmSpawnParams {
+        rows,
+        cols,
+        expanded_shell,
+        env_shim: app.env_shim,
+        allow_predictions: app.allow_predictions,
+        pane_id,
+        control_port: app.control_port,
+        socket_name: app.socket_name.clone(),
+        session_name: app.session_name.clone(),
+        claude_code_fix_tty: app.claude_code_fix_tty,
+        claude_code_force_interactive: app.claude_code_force_interactive,
+        host_colors: app.host_colors.clone(),
+        environment: app.environment.clone(),
+        history_limit: app.history_limit,
+        allow_alternate_screen: app.allow_alternate_screen,
+    })
+}
+
+/// Create one spare shell from a snapshot. Touches no shared state, so it is
+/// safe to call from the background spawner thread.
+pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSpawnParams) -> io::Result<crate::types::WarmPane> {
+    let t0 = std::time::Instant::now();
+    let (rows, cols) = (p.rows, p.cols);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = pty_system
         .openpty(size)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
-    // Expand format variables like #{pane_current_path} at spawn time (#111).
-    let expanded_shell = crate::format::expand_format(&app.default_shell, app);
-    let mut shell_cmd = if !expanded_shell.is_empty() {
-        build_default_shell(&expanded_shell, app.env_shim, app.allow_predictions)
+    let mut shell_cmd = if !p.expanded_shell.is_empty() {
+        build_default_shell(&p.expanded_shell, p.env_shim, p.allow_predictions)
     } else {
-        build_command(None, app.env_shim, app.allow_predictions)
+        build_command(None, p.env_shim, p.allow_predictions)
     };
-    let pane_id = app.next_pane_id;
-    app.next_pane_id += 1;
-    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
-    set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
-    apply_user_environment(&mut shell_cmd, &app.environment);
+    let pane_id = p.pane_id;
+    set_tmux_env(&mut shell_cmd, pane_id, p.control_port, p.socket_name.as_deref(), &p.session_name, p.claude_code_fix_tty, p.claude_code_force_interactive);
+    set_host_colors_env(&mut shell_cmd, p.host_colors.as_ref());
+    apply_user_environment(&mut shell_cmd, &p.environment);
     let child = pair.slave
         .spawn_command(shell_cmd)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     drop(pair.slave);
-    let scrollback = app.history_limit as u32;
+    let scrollback = p.history_limit as u32;
     let mut parser = vt100::Parser::new(rows, cols, scrollback as usize);
-    parser.screen_mut().set_allow_alternate_screen(app.allow_alternate_screen);
+    parser.screen_mut().set_allow_alternate_screen(p.allow_alternate_screen);
     let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(parser));
     let term_reader = term.clone();
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -745,7 +886,9 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
-    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring })
+    let now = std::time::Instant::now();
+    crate::warm_trace!("pool: spawned spare pane={} pid={:?} in {:.1}ms", pane_id, child_pid, t0.elapsed().as_micros() as f64 / 1000.0);
+    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring, spawned_at: now, ready: false, last_dv: 0, last_change: now, trace_settled: false })
 }
 
 pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {
@@ -912,8 +1055,29 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     // instead; a static custom default-shell is safe to transplant.
     // A warm pane's shell is already running, so `-e` vars can no longer be
     // injected into its environment — bypass the transplant when -e is used.
-    if command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
-        let mut wp = app.warm_pane.take().unwrap();
+    let warm_eligible = command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell);
+    // A ready spare if there is one, else the oldest warming spare, else
+    // nothing and a cold spawn below. See `WarmPool::claim`.
+    let (claimed, was_ready) = if warm_eligible { app.warm_pane.claim() } else { (None, false) };
+    if warm_eligible {
+        app.warm_pane.note_claim(was_ready);
+        if !was_ready {
+            crate::warm_trace!(
+                "claim(split): NO READY SPARE (depth={} got_warming={}) -- surging",
+                app.warm_pane.len(),
+                claimed.is_some()
+            );
+        }
+        schedule_warm_refill(app);
+    }
+    if let Some(mut wp) = claimed {
+        crate::warm_trace!(
+            "claim(split): pane={} spare_age={:.1}ms pool_left={} ready_left={}",
+            wp.pane_id,
+            wp.spawned_at.elapsed().as_micros() as f64 / 1000.0,
+            app.warm_pane.len(),
+            app.warm_pane.ready_len()
+        );
         let need_resize = rows != wp.rows || cols != wp.cols;
         // #450: never transplant a spare whose shell died in the pool —
         // see the matching gate in create_window.  Fall through to the

@@ -674,6 +674,156 @@ impl EscCoalesce {
     }
 }
 
+/// Waking the client's input wait when a frame lands, not when a timer expires.
+///
+/// The client loop has two things to wait for, console input and a frame off
+/// the socket, and `crossterm::event::poll` can only wait for the first. So the
+/// frame was the one it could not block on: a frame that arrived just after the
+/// wait began sat unread until the poll interval expired.
+///
+/// Measured with `pty_trace`, from the socket reader finishing a frame line
+/// (`c`) to the main loop taking it (`d`), 40 single keystrokes into a raw echo
+/// child:
+///
+///   before   median 0.737ms   p90 1.330ms   p99 5.015ms   max 5.494ms
+///   after    median 0.086ms   p90 0.136ms   p99 0.235ms   max 1.546ms
+///
+/// The tail is the interesting half: before, a frame that missed the wait paid
+/// whatever interval the loop had chosen, which is why the first key after a
+/// pause felt slower than keys typed during a burst.
+///
+/// The fix is a Windows auto-reset event that the socket reader thread signals,
+/// waited on together with `CONIN$` through `WaitForMultipleObjects`. Both
+/// handles are process-wide singletons, created once and never closed.
+///
+/// If either handle cannot be obtained the module reports "no wake available"
+/// and `read_timeout` falls back to plain `crossterm::event::poll`, which is
+/// exactly the old behaviour.
+#[cfg(windows)]
+pub mod frame_wake {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(attrs: *mut c_void, manual: i32, initial: i32, name: *const u16) -> *mut c_void;
+        fn SetEvent(h: *mut c_void) -> i32;
+        fn WaitForMultipleObjects(count: u32, handles: *const *mut c_void, all: i32, ms: u32) -> u32;
+        // Signature matches the declaration in `platform.rs` exactly. Two
+        // `extern` blocks in one crate that name the same symbol with different
+        // types is a `clashing_extern_declarations` warning, and the pointer
+        // mutability and `isize` return are the shape already in use.
+        fn CreateFileW(
+            file_name: *const u16,
+            desired_access: u32,
+            share_mode: u32,
+            security_attributes: *const c_void,
+            creation_disposition: u32,
+            flags_and_attributes: u32,
+            template_file: *const c_void,
+        ) -> isize;
+    }
+
+    const WAIT_OBJECT_0: u32 = 0;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    /// Auto-reset event, signalled once per frame that lands on the socket.
+    static WAKE: OnceLock<usize> = OnceLock::new();
+    /// A waitable handle to this process's console input buffer.
+    static CONIN: OnceLock<usize> = OnceLock::new();
+
+    fn wake_handle() -> Option<*mut c_void> {
+        let h = *WAKE.get_or_init(|| {
+            // manual = 0 (auto-reset): the wait itself clears it, so a frame
+            // that lands between two waits still wakes exactly one of them.
+            let h = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
+            h as usize
+        });
+        if h == 0 { None } else { Some(h as *mut c_void) }
+    }
+
+    fn conin_handle() -> Option<*mut c_void> {
+        let h = *CONIN.get_or_init(|| {
+            // CONIN$ always names the console input buffer, whatever stdin has
+            // been redirected to, and the returned handle is waitable: it is
+            // signalled while the buffer is non-empty, which is exactly the
+            // condition crossterm's own poll reports.
+            let name: Vec<u16> = "CONIN$\0".encode_utf16().collect();
+            const GENERIC_READ: u32 = 0x8000_0000;
+            const GENERIC_WRITE: u32 = 0x4000_0000;
+            const FILE_SHARE_READ: u32 = 0x1;
+            const FILE_SHARE_WRITE: u32 = 0x2;
+            const OPEN_EXISTING: u32 = 3;
+            let h = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if h == INVALID_HANDLE_VALUE { 0 } else { h as usize }
+        });
+        if h == 0 { None } else { Some(h as *mut c_void) }
+    }
+
+    /// What ended the wait.
+    pub enum Woke {
+        /// Console input is available; ask crossterm for it.
+        Console,
+        /// A frame landed; the caller should go round its loop and drain it.
+        Frame,
+        /// Nothing happened before the timeout.
+        Timeout,
+        /// No wake handles available on this process; caller must fall back.
+        Unavailable,
+    }
+
+    /// Signal that a frame is ready to be picked up. Called from the client's
+    /// socket reader thread. Cheap and lock free.
+    pub fn signal() {
+        if let Some(h) = wake_handle() {
+            unsafe { SetEvent(h) };
+        }
+    }
+
+    /// `PSMUX_NO_FRAME_WAKE=1` reverts to crossterm's console-only wait, which
+    /// is how this is A/B'd against the same binary.
+    fn disabled() -> bool {
+        static OFF: OnceLock<bool> = OnceLock::new();
+        *OFF.get_or_init(|| std::env::var_os("PSMUX_NO_FRAME_WAKE").is_some_and(|v| v != "0"))
+    }
+
+    /// Block until console input arrives, a frame lands, or `ms` elapses.
+    pub fn wait(ms: u32) -> Woke {
+        if disabled() {
+            return Woke::Unavailable;
+        }
+        let (conin, wake) = match (conin_handle(), wake_handle()) {
+            (Some(c), Some(w)) => (c, w),
+            _ => return Woke::Unavailable,
+        };
+        let handles = [conin, wake];
+        // all = 0: return as soon as EITHER is signalled.
+        let r = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, ms) };
+        match r {
+            x if x == WAIT_OBJECT_0 => Woke::Console,
+            x if x == WAIT_OBJECT_0 + 1 => Woke::Frame,
+            _ => Woke::Timeout,
+        }
+    }
+}
+
+/// No console on this platform, so nothing to wake: the client's poll ladder
+/// keeps its timer.
+#[cfg(not(windows))]
+pub mod frame_wake {
+    pub fn signal() {}
+}
+
 pub enum InputSource {
     /// Local terminal — delegates to `crossterm::event`.
     Crossterm {
@@ -747,7 +897,24 @@ impl InputSource {
                         None => left,
                     };
                     let started = Instant::now();
-                    if crossterm::event::poll(wait)? {
+                    // Wait on console input AND a pushed frame together, so a
+                    // frame that lands mid-wait is picked up on the event
+                    // rather than when this interval happens to expire.
+                    #[cfg(windows)]
+                    let ready = match frame_wake::wait(wait.as_millis().min(u32::MAX as u128) as u32) {
+                        frame_wake::Woke::Frame => return Ok(None),
+                        frame_wake::Woke::Console => Some(crossterm::event::poll(Duration::ZERO)?),
+                        frame_wake::Woke::Timeout => Some(false),
+                        // No wake handles: fall back to crossterm's own wait.
+                        frame_wake::Woke::Unavailable => None,
+                    };
+                    #[cfg(not(windows))]
+                    let ready: Option<bool> = None;
+                    let ready = match ready {
+                        Some(r) => r,
+                        None => crossterm::event::poll(wait)?,
+                    };
+                    if ready {
                         let ev = crossterm::event::read()?;
                         if let Some(out) = esc.feed(ev, Instant::now()) {
                             return Ok(Some(out));

@@ -942,6 +942,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // Keep a sender in AppState so loop-resident code can queue follow-up work
     // (see the field's doc comment — copy-mode key tables need this).
     app.control_tx = Some(tx.clone());
+    // And one for threads that hold no AppState: the pane parsers wake this
+    // loop through it the moment they publish new screen state.
+    crate::types::set_wake_sender(tx.clone());
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     app.control_port = Some(port);
@@ -1540,11 +1543,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
         if let Some(rx) = app.control_rx.as_ref() {
             if let Ok(req) = rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-                last_client_activity = Instant::now();
                 let mut pending = vec![req];
                 // Drain any additional queued messages without blocking
                 while let Ok(r) = rx.try_recv() {
                     pending.push(r);
+                }
+                // A PtyWake is the loop's own plumbing, not a client talking,
+                // so it must not restamp the activity clock: doing so would
+                // pin an unattended but chatty session at the 5ms cadence
+                // forever instead of letting it ramp down.
+                if pending.iter().any(|r| !matches!(r, CtrlReq::PtyWake)) {
+                    last_client_activity = Instant::now();
+                }
+                if pending.iter().any(|r| matches!(r, CtrlReq::PtyWake)) {
+                    crate::types::clear_wake_pending();
                 }
                 // Also check if fresh PTY output arrived while we were
                 // waiting – mark state dirty so DumpState produces a full
@@ -1578,6 +1590,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         | CtrlReq::SendPaste(_)
                         | CtrlReq::WindowDump(..)
                         | CtrlReq::WindowLayout(..)
+                        | CtrlReq::PtyWake
                     );
                     let is_temp_focus = matches!(&req, CtrlReq::FocusTargetTemp { .. });
                     let mut hook_event: Option<&str> = None;
@@ -2474,7 +2487,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     dump_state_seen_full.insert(dump_client_id);
                 }
                 CtrlReq::SendText(s) => { app.status_message = None; crate::input::stamp_interactive_text(&mut app); send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
-                CtrlReq::SendKey(k) => { app.status_message = None; crate::input::stamp_interactive_key(&mut app, &k); send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::PtyWake => { /* the wake itself is the whole point; the
+                    PTY_DATA_READY swap above already set state_dirty. */ }
+                CtrlReq::SendKey(k) => { crate::pty_trace::mark("g", 0, k.as_bytes()); app.status_message = None; crate::input::stamp_interactive_key(&mut app, &k); send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); state_dirty = true; meta_dirty = true; hook_event = Some("after-resize-pane"); }
                 // tmux: the prefix forces a switch to the prefix table, which

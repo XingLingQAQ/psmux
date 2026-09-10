@@ -2035,6 +2035,9 @@ fn establish_connection_with_timeout(
             crate::pty_trace::mark_plain("c", line.len());
             buf = String::with_capacity(64 * 1024);
             if frame_tx.send(line).is_err() { return; }
+            // Break the main loop out of its console wait NOW. Without this the
+            // frame sits in the channel until the poll interval expires.
+            crate::ssh_input::frame_wake::signal();
         }
     });
 
@@ -2815,12 +2818,31 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // without touching dump_buf (saves 50-100KB clone + parse).
                         dump_in_flight = false;
                         last_dump_time = Instant::now();
-                        // If we're waiting for a key echo, force an
-                        // immediate dump-state re-request (~1ms TCP RTT)
-                        // instead of waiting the full 10ms typing interval.
-                        if key_send_instant.is_some() {
-                            force_dump = true;
-                        }
+                        // Deliberately NOT re-requesting here.
+                        //
+                        // "NC" means the server has nothing new, and asking it
+                        // again immediately cannot change that: the echo is not
+                        // late because the client failed to ask, it is late
+                        // because the shell has not produced it yet. Re-asking
+                        // turned the echo window into a TCP busy poll running at
+                        // round-trip rate, burning CPU in both processes to
+                        // learn "still nothing" over and over.
+                        //
+                        // The echo does not need polling for. The server pushes
+                        // a frame to every attached client whenever pane state
+                        // changes (see the `(state_dirty || meta_dirty) &&
+                        // has_frame_receivers()` push in server/mod.rs), which
+                        // is the path the echo actually arrives on, and the
+                        // client's input wait is woken by that push landing.
+                        //
+                        // Measured over 40 single keystrokes into a raw echo
+                        // child, counting `pty_trace` marks. Before: 1872 lines
+                        // read off the socket, the echo arriving as 47 full
+                        // dump-state responses and only 3 server pushes. After:
+                        // 548 lines, 49 pushes and 1 dump-state response. Same
+                        // 40 characters on screen, a third of the traffic, and
+                        // the echo now travels on the push rather than on the
+                        // client's next poll.
                     } else if line.trim().starts_with("SWITCH ") {
                         // Server is telling us to switch to another session
                         let target_session = line.trim().strip_prefix("SWITCH ").unwrap_or("").to_string();
@@ -3031,6 +3053,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
         {
             let mut _pending_evt = input.read_timeout(Duration::from_millis(poll_ms))?;
+            if crate::pty_trace::on() && matches!(_pending_evt, Some(Event::Key(_))) {
+                crate::pty_trace::mark_plain("k", poll_ms as usize);
+            }
             while let Some(_cur_evt) = _pending_evt {
                 // Input debug: log every raw event BEFORE filtering
                 if input_log_enabled() {
@@ -5833,6 +5858,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
             let _ = writer.flush(); // push keys to server NOW
+            if crate::pty_trace::on() {
+                for cmd in &cmd_batch {
+                    crate::pty_trace::mark("x", 0, cmd.trim_end().as_bytes());
+                }
+            }
             // #604: a batch that is nothing but bare pointer motion is not a
             // keystroke.  It produces no echo to chase, and when no pane is
             // tracking motion it changes no server state at all, so neither the
@@ -5903,6 +5933,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
         };
         let _parse_us = _t_parse.elapsed().as_micros();
+        crate::pty_trace::mark_plain("q", frame_to_parse.len());
         if client_log_enabled() {
             client_log("parse", &format!("OK in {}us, {} windows", _parse_us, state.windows.len()));
         }
@@ -7636,6 +7667,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
 
         let _render_us = _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128);
+        crate::pty_trace::mark_plain("v", dump_buf.len());
         last_dump_time = Instant::now();
         // Latency log: measure full cycle from key-send to render-complete
         if let (Some(ref mut log), Some(ks)) = (&mut latency_log, key_send_instant) {

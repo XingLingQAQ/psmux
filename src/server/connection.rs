@@ -475,7 +475,7 @@ let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(2000)));
 
 // Check for PERSISTENT flag and optional TARGET line
 let mut persistent = false;
-let mut resp_tx_opt: Option<mpsc::Sender<mpsc::Receiver<String>>> = None;
+let mut resp_tx_opt: Option<mpsc::Sender<crate::types::WriterWake>> = None;
 let mut global_target_win: Option<usize> = None;
 let mut global_target_win_is_id = false;
 let mut global_target_win_name: Option<String> = None;
@@ -511,12 +511,12 @@ if line.trim() == "PERSISTENT" {
     // timeout, a full socket causes write() to block forever, silently
     // freezing frame delivery. 5 s matches the command-response timeout.
     let _ = ws_bg.set_write_timeout(Some(Duration::from_secs(5)));
-    let (resp_tx, resp_rx) = mpsc::channel::<mpsc::Receiver<String>>();
+    let (resp_tx, resp_rx) = mpsc::channel::<crate::types::WriterWake>();
 
     // Register a frame slot for server-pushed frames (event-driven rendering).
     // Slot holds at most one pending frame; push_frame() overwrites any
     // unconsumed frame because only the latest snapshot is worth rendering.
-    let frame_slot = crate::types::register_frame_channel(client_id);
+    let frame_slot = crate::types::register_frame_channel(client_id, resp_tx.clone());
 
     // Register a directive channel for queued directives (e.g. SWITCH).
     // Directives use a separate mpsc channel so they are never affected
@@ -586,7 +586,9 @@ if line.trim() == "PERSISTENT" {
             // slot. 5ms stays: 1ms would cost five times the wakeups per
             // attached client to buy noise.
             match resp_rx.recv_timeout(Duration::from_millis(5)) {
-                Ok(rrx) => {
+                // A pushed frame woke us; fall through to the slot check.
+                Ok(crate::types::WriterWake::Frame) => {}
+                Ok(crate::types::WriterWake::Resp(rrx)) => {
                     // Use a timeout matching the TCP write timeout (5 s) so the
                     // writer thread cannot block indefinitely if the command
                     // handler is slow or panics without sending a response.
@@ -600,7 +602,11 @@ if line.trim() == "PERSISTENT" {
                         }
                         Err(_) => return,
                     }
-                    while let Ok(rrx) = resp_rx.try_recv() {
+                    while let Ok(next) = resp_rx.try_recv() {
+                        let rrx = match next {
+                            crate::types::WriterWake::Frame => continue,
+                            crate::types::WriterWake::Resp(r) => r,
+                        };
                         match rrx.recv_timeout(Duration::from_secs(5)) {
                             Ok(text) => {
                                 if write!(ws_bg, "{}\n", text).is_err() { return; }
@@ -1440,7 +1446,7 @@ match cmd {
         if let Some(ref rtx_bg) = resp_tx_opt {
             // Persistent mode: hand off to writer thread (non-blocking).
             // This lets the read loop keep processing keys immediately.
-            let _ = rtx_bg.send(rrx);
+            let _ = rtx_bg.send(crate::types::WriterWake::Resp(rrx));
         } else {
             // One-shot mode: block and respond inline
             if let Ok(text) = rrx.recv() { 
@@ -1461,7 +1467,10 @@ match cmd {
         }
     }
     "send-key" => {
-        if let Some(payload) = args.get(0) { let _ = tx.send(CtrlReq::SendKey(payload.to_string())); }
+        if let Some(payload) = args.get(0) {
+            crate::pty_trace::mark("i", 0, payload.as_bytes());
+            let _ = tx.send(CtrlReq::SendKey(payload.to_string()));
+        }
     }
     "zoom-pane" | "resize-pane" | "resizep" if args.iter().any(|a| *a == "-Z") => { let _ = tx.send(CtrlReq::ZoomPane); }
     "zoom-pane" => { let _ = tx.send(CtrlReq::ZoomPane); }

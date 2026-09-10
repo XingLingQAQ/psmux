@@ -330,7 +330,7 @@ $interactiveTests = @(
 $perfTests = @(
     "test_stress", "test_stress_50", "test_stress_aggressive", "test_extreme_perf",
     "test_e2e_latency", "test_pane_startup_perf", "test_startup_perf", "test_perf",
-    "test_launch_to_prompt_gate"
+    "test_launch_to_prompt_gate", "test_keystroke_latency_gate"
 )
 
 # Results tracking

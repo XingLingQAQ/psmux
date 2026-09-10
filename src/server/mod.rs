@@ -1623,7 +1623,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // Also check if fresh PTY output arrived while we were
                 // waiting – mark state dirty so DumpState produces a full
                 // frame instead of "NC".
-                if crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                //
+                // PEEK, do not consume. The per data work at the top of the
+                // loop (`if data_ready`: mouse protocol attribution for the
+                // #548 wheel gate, the CPR drain, host colour capture) only
+                // runs when the swap at the top of the loop sees the flag.
+                // This arm used to swap it to false as well, and since
+                // CtrlReq::PtyWake now arrives on practically every pty
+                // publish while a client is attached, that swap consumed the
+                // flag on almost every batch and the data block was skipped:
+                // a child enabling mouse reporting was never attributed, so
+                // the wheel gate saw no mouse consumer and forwarded nothing
+                // (test_issue570_wheel_coordinates 29/0 -> 9/20 on the first
+                // sweep after the wake landed), and a CPR was answered one
+                // iteration late. Leaving the flag set costs one extra loop
+                // iteration, which is exactly the work that was owed.
+                if crate::types::PTY_DATA_READY.load(std::sync::atomic::Ordering::Acquire) {
                     state_dirty = true;
                 }
                 // Process key/command inputs BEFORE dump-state requests.

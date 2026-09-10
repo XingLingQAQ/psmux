@@ -1872,6 +1872,14 @@ pub enum WindowDumpFormat {
 }
 
 pub enum CtrlReq {
+    /// A pane parser thread published new screen state.
+    ///
+    /// Carries nothing: the data itself travels through `PTY_DATA_READY` and
+    /// the panes' own buffers. Its only job is to make the server loop's
+    /// `recv_timeout` return NOW instead of at the end of its poll interval,
+    /// so pty output reaches the render on the event rather than on a timer.
+    /// See `wake_server_loop`.
+    PtyWake,
     NewWindow(Option<String>, Option<String>, bool, Option<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, title (-T), empty (-E), env (-e, #489)
     NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, format, resp, title (-T), empty (-E), env (-e, #489)
     SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>, Vec<(String, String)>, bool),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T), env (-e, #489), zoom (-Z)
@@ -2426,6 +2434,65 @@ pub enum CtrlReq {
 /// keystroke-to-display latency for nested shells (e.g. WSL inside pwsh).
 pub static PTY_DATA_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Sender for the server loop's control channel, published once at server
+/// start so threads that have no `AppState` can wake the loop.
+///
+/// A `mpsc::Sender` is `Send` but not `Sync`, hence the mutex; it is taken only
+/// once per coalesced wake, so the lock is never contended in practice.
+static WAKE_TX: std::sync::OnceLock<std::sync::Mutex<mpsc::Sender<CtrlReq>>> =
+    std::sync::OnceLock::new();
+
+/// True while a `CtrlReq::PtyWake` is queued and not yet consumed.
+static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Publish the control sender. Called once, from the server loop's setup.
+pub fn set_wake_sender(tx: mpsc::Sender<CtrlReq>) {
+    let _ = WAKE_TX.set(std::sync::Mutex::new(tx));
+}
+
+/// Wake the server loop because a pane just published new screen state.
+///
+/// Without this the loop learns about pty output only when its `recv_timeout`
+/// expires, so every echoed keystroke waited out the poll interval on its way
+/// to the render, for a hop whose real work is tens of microseconds.
+///
+/// Measured with `pty_trace`, from the parser publishing a batch (`p`) to the
+/// loop having the frame built, 40 single keystrokes into a raw echo child:
+///
+///   before   1.06ms median, and the echo reached the client as a dump-state
+///            RESPONSE (47 of 50 frames) rather than as a push
+///   after    0.22ms median, and 49 of 50 frames went out as pushes
+///
+/// At most ONE wake is ever in flight (`WAKE_PENDING`), so a pane flooding the
+/// screen cannot flood the control channel: the first batch queues a wake, and
+/// every batch until the loop consumes it is free.
+pub fn wake_server_loop() {
+    // Nobody is watching: the frame this would produce has no destination, and
+    // the loop's own 16ms/50ms cadence still picks the data up for alerts and
+    // activity. Waking here would only spend CPU on a detached session.
+    if !has_frame_receivers() {
+        return;
+    }
+    if WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let sent = WAKE_TX
+        .get()
+        .and_then(|m| m.lock().ok().map(|tx| tx.send(CtrlReq::PtyWake).is_ok()))
+        .unwrap_or(false);
+    if !sent {
+        // No loop to wake (not the server process, or it is shutting down).
+        // Clear the latch so a later wake is not swallowed forever.
+        WAKE_PENDING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Called by the server loop when it takes the wake off the channel, which
+/// re-arms `wake_server_loop`.
+pub fn clear_wake_pending() {
+    WAKE_PENDING.store(false, std::sync::atomic::Ordering::Release);
+}
+
 /// Set by the parser thread when any pane's `cpr_pending` flag is raised.
 /// Lets the server loop skip the tree walk when no CPR response is needed.
 pub static CPR_DATA_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2664,7 +2731,7 @@ pub fn shutdown_client_stream(client_id: u64) {
         });
     }
     if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
-        v.retain(|(cid, _)| *cid != client_id);
+        v.retain(|(cid, _, _)| *cid != client_id);
     }
     remove_directive_channel(client_id);
 }
@@ -2697,15 +2764,38 @@ pub fn shutdown_client_stream(client_id: u64) {
 ///     for a path that is not measured-hot.
 pub type FrameSlot = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
-static FRAME_PUSH_SLOTS: std::sync::Mutex<Vec<(u64, FrameSlot)>> =
+/// What can wake a persistent connection's writer thread.
+///
+/// The writer has two producers, command responses and pushed frames, and an
+/// `mpsc::Receiver` can only block on one channel. Before this enum the frame
+/// slot was the producer it could NOT block on, so every pushed frame waited
+/// out the response channel's 5ms `recv_timeout`, for a hop whose work is one
+/// `write!`. Carrying both on one channel makes the writer wake on whichever
+/// arrives first.
+///
+/// Measured with `pty_trace`, from the push filling the slot (`f`) to the
+/// writer putting the frame on the socket (`t`): 3.20ms median before (n=3,
+/// because before this change almost nothing took the push path at all),
+/// 0.068ms median after (n=49).
+pub enum WriterWake {
+    /// A command response is coming; the receiver carries its text.
+    Resp(mpsc::Receiver<String>),
+    /// A frame was pushed into this client's slot. Carries nothing, because
+    /// the slot always holds the newest snapshot and the writer reads it.
+    Frame,
+}
+
+static FRAME_PUSH_SLOTS: std::sync::Mutex<Vec<(u64, FrameSlot, mpsc::Sender<WriterWake>)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Register a frame slot for a persistent connection's writer thread.
+///
+/// `poke` is the writer's own wake channel, used to tell it a frame landed.
 /// Returns the slot Arc for the writer thread to consume from.
-pub fn register_frame_channel(client_id: u64) -> FrameSlot {
+pub fn register_frame_channel(client_id: u64, poke: mpsc::Sender<WriterWake>) -> FrameSlot {
     let slot: FrameSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
     if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
-        v.push((client_id, slot.clone()));
+        v.push((client_id, slot.clone(), poke));
     }
     slot
 }
@@ -2717,9 +2807,22 @@ pub fn register_frame_channel(client_id: u64) -> FrameSlot {
 /// Dead slots (poisoned mutex) are pruned automatically.
 pub fn push_frame(frame: &str) {
     if let Ok(mut slots) = FRAME_PUSH_SLOTS.lock() {
-        slots.retain(|(_, slot)| {
+        slots.retain(|(_, slot, poke)| {
             match slot.lock() {
-                Ok(mut s) => { *s = Some(frame.to_string()); true }
+                Ok(mut s) => {
+                    // Only an empty->full transition needs a poke. If a frame
+                    // is already waiting the writer has not drained it yet, so
+                    // it is either running or already has a wake queued: this
+                    // is what keeps a flooding pane from queueing one message
+                    // per batch.
+                    let was_empty = s.is_none();
+                    *s = Some(frame.to_string());
+                    drop(s);
+                    if was_empty {
+                        let _ = poke.send(WriterWake::Frame);
+                    }
+                    true
+                }
                 Err(_) => false, // writer thread panicked; prune
             }
         });
@@ -2736,7 +2839,7 @@ pub fn has_frame_receivers() -> bool {
 /// returns false when no live clients remain.
 pub fn deregister_frame_channel(client_id: u64) {
     if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
-        v.retain(|(cid, _)| *cid != client_id);
+        v.retain(|(cid, _, _)| *cid != client_id);
     }
 }
 

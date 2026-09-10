@@ -3558,14 +3558,74 @@ pub mod process_info {
             // safe, and silently disabling the cache for the rest of the process
             // after some unrelated panic is the outcome worth avoiding. Matches
             // the recovery the tests use.
-            let guard = PROC_TABLE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, table)) = guard.as_ref() {
+            let cached = {
+                let guard = PROC_TABLE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                guard
+                    .as_ref()
+                    .map(|(at, table)| (*at, std::sync::Arc::clone(table)))
+            };
+            if let Some((at, table)) = cached {
                 if at.elapsed() < max_age {
-                    return Some(std::sync::Arc::clone(table));
+                    return Some(table);
                 }
+                // Expired, and a render-path caller must still not pay for the
+                // refresh. The walk takes a measured 9-11ms on this machine,
+                // and this function is reached from the server's event loop —
+                // the one thread that also writes keystrokes into ConPTY and
+                // builds frames. Walking here put that whole cost on the
+                // keystroke path once a second per pane, measured as a 9-11ms
+                // stall between a pane parser publishing an echo and the loop
+                // pushing the frame, and it was the entire remaining tail of
+                // keystroke-to-screen latency (p90 12ms against a 2ms median).
+                //
+                // So hand back the table we have and refresh behind it. The
+                // staleness this buys is bounded by the refresh, not by the
+                // age of the entry: one call is served the old table and every
+                // call after the walk lands is fresh. There is no age at which
+                // walking inline becomes the better answer, because the most
+                // expensive place to do it is exactly the one that looks
+                // cheapest — the first keystroke after a pause, where nothing
+                // has asked for a while so the entry is oldest AND the user is
+                // watching that character appear.
+                //
+                // Every render-path caller answers a window title or a status
+                // variable, so being one refresh behind is invisible. The
+                // callers that must not be stale (Ctrl+C routing, mouse
+                // transport selection) pass `Duration::ZERO` and never reach
+                // this branch.
+                if !PROC_TABLE_REFRESHING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    std::thread::spawn(|| {
+                        // Clear the flag on the way out even if the walk
+                        // panics: leaving it set would freeze the table for the
+                        // life of the process.
+                        struct Clear;
+                        impl Drop for Clear {
+                            fn drop(&mut self) {
+                                PROC_TABLE_REFRESHING
+                                    .store(false, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                        let _clear = Clear;
+                        let _ = walk_process_table();
+                    });
+                }
+                return Some(table);
             }
         }
 
+        // No entry at all: a cold cache, or a `Duration::ZERO` caller that must
+        // see the live tree. Walk inline.
+        walk_process_table()
+    }
+
+    /// True while the background refresh thread is inside a walk, so at most
+    /// one extra thread ever exists for this.
+    static PROC_TABLE_REFRESHING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Enumerate every process on the machine and publish the result to the
+    /// shared cache. Always a real `CreateToolhelp32Snapshot` walk.
+    fn walk_process_table() -> Option<ProcTable> {
         PROC_TABLE_WALKS.with(|c| c.set(c.get() + 1));
         let entries = unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);

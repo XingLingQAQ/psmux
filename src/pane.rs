@@ -2779,6 +2779,9 @@ pub fn spawn_reader_thread(
             dv_writer.fetch_add(1, Ordering::Release);
             crate::types::PTY_DATA_READY.store(true, Ordering::Release);
             crate::pty_trace::mark("p", pane_id, &bytes);
+            // Wake the server loop on the event instead of leaving it to notice
+            // the flag when its poll interval happens to expire.
+            crate::types::wake_server_loop();
         }
     });
 }

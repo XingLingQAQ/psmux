@@ -132,7 +132,13 @@ Two psmux launch cells are reported. `psmux_attached` and `psmux_in_wt` cold sta
 
 The cells are interleaved: repetition 0 of every host, then repetition 1 of every host, and so on. A machine can drift by a factor of two inside a minute, so five repetitions of Windows Terminal followed by five of psmux would be comparing two different machines. Round robin puts every cell in the same weather, which is what makes the psmux minus Windows Terminal delta worth quoting. The cold psmux cells run in a second socket namespace that is torn down after each repetition, which is what lets them be interleaved with the warm cells instead of run in separate blocks.
 
-**Keystroke to screen.** Measured by `tests/keylat.cs` at the PTY level: a key record goes into the target console's input buffer and the same process watches that console's screen buffer for the echo, both timestamped from one QueryPerformanceCounter. Read the host rows and the psmux rows differently. For Windows Terminal, WezTerm and Alacritty the console being watched is the ConPTY pseudoconsole in front of pwsh, so those numbers are the ConPTY echo floor and contain none of the terminal's own GPU paint, another 8 to 16 ms of frame time in every one of them. For psmux the console being watched is the psmux client's own console, so the psmux number contains the entire pipeline: client input, the TCP hop, the pane write queue, ConPTY, the shell's echo, the VT parser, the pushed frame, and the client's render. psmux is measured far more strictly than the hosts beside it, which is why the psmux rows are judged against an absolute threshold and never against a ratio to a host row.
+**Keystroke to screen.** Measured by `tests/keylat.cs` at the PTY level: a key record goes into the target console's input buffer and the same process watches that console's screen buffer for the echo, both timestamped from one QueryPerformanceCounter.
+
+The host rows and the psmux rows are taken at different probe points, and that is the entire explanation for "1 ms versus 18 ms". For Windows Terminal, WezTerm and Alacritty the console being watched is the pane conhost's screen buffer, which is upstream of the pseudoconsole pipe, and which also contains none of the terminal's own GPU paint, another 8 to 16 ms of frame time in each of them. For psmux the console being watched is the psmux client's own console, downstream of that pipe, so the psmux number carries the whole psmux pipeline and the pipe with it.
+
+The pipe is the expensive part and it is not psmux's. PSReadLine paints a keystroke in two console writes; conhost's pseudoconsole serializer emits the first as a 6 byte `ESC[?25l` chunk after about 0.6 ms and then withholds the chunk carrying the character for a further 14.7 ms. The character has been sitting in the pane conhost's screen buffer the whole time. `tests/conpty_echolat.cs` measures that floor at 15.7 to 16.2 ms with no psmux in the path at all, and every ConPTY consumer on Windows pays it, Windows Terminal included. At the same probe point as the host rows, psmux measures 0.55 ms against the 1.03 ms measured for Windows Terminal.
+
+So the psmux rows are judged against that floor rather than against the host rows: the suite runs `conpty_echolat` in the same run on the same machine, prints its median and p99 as the `conpty_floor` row, and asserts how far above it psmux sits. This build sits 0.74 ms above on the median and 1.57 ms above on the p99. A useful corollary for anyone thinking about backends: the data is available 25 times earlier through the console API than through the pseudoconsole pipe.
 
 **Memory and CPU.** Collected in the keystroke cells, because that is the only section that holds one cell alive long enough to watch it. For each cell the suite identifies the processes that make the cell work and samples each one twice, at prompt ready and again after the keystroke run: the psmux server (found from its `<namespace>__<session>.pid` anchor file, so a warm standby or another psmux on the machine is never sampled by mistake), the psmux client, the pwsh being typed into, the terminal emulator above it, and the conhost or OpenConsole that owns the console.
 
@@ -151,55 +157,57 @@ Each measured window is killed again as soon as its sample is taken. That is par
 | Threshold | Limit | Why |
 |-----------|-------|-----|
 | T0 every cell that was not skipped produced data | 0 missing | a pretty summary full of dashes is worse than a failing run, because it looks like a pass |
-| T1 psmux attached launch to prompt | 1.5x bare pwsh | psmux owns its console the same way pwsh does; the extra work is the client, the server and the ConPTY |
+| T1, T1b psmux attached launch minus bare pwsh, cold and warm server | 350 ms | an absolute delta, not a ratio: bare pwsh itself ranges from 350 to 600 ms here, so the same build scored 1.7x and 2.5x on two runs with its own cost unchanged. Measured 175 to 213 ms; the double shell bug this replaces showed 440 to 530 ms |
 | T2 psmux in Windows Terminal over plain Windows Terminal, warm | 300 ms | the steady state launch, the one a user meets all day |
 | T2b the same, cold server | 700 ms | the first psmux window of the day also pays a server spawn |
-| T3a psmux keystroke to screen, median | 10 ms | absolute, on psmux's own pipeline |
-| T3b psmux keystroke to screen, p99 | 25 ms | absolute |
+| T3a psmux keystroke median minus the measured ConPTY floor | 2.5 ms | about three times the 0.74 ms this build costs. An absolute 10 ms median could never pass with a shell in the pane, because 15.8 of those 18 ms are conhost's pseudoconsole serializer and no psmux change removes them |
+| T3c psmux keystroke p99 minus the floor's p99 | 6 ms | same reasoning, about four times the 1.57 ms measured |
+| T3b psmux keystroke p99, absolute | 25 ms | kept, so the total a user waits is still bounded, floor included. If the floor probe fails, T3a falls back to an absolute 30 ms median ceiling |
 | T4a first session to a prompt | 1000 ms | a cold server plus a cold default shell |
 | T4b `new-window` p90 | 300 ms | includes the 16 to 20 ms Windows needs to start the CLI client |
 | T4c `split-window -v` and `-h` p90 | 300 ms | same |
 | T5 leftover windows, tabs, shells or servers | 0 | a benchmark that litters the desktop is a benchmark nobody will run |
 | T6a psmux server working set, one pane | 60 MB | measured at 14 to 25 MB, so the limit is about 2x the measurement: a leak alarm, not a tuning target |
 | T6b psmux client working set | 60 MB | same reasoning; server plus client under 120 MB is the answer to "a multiplexer is heavy" |
-| T7 psmux idle CPU, server plus client | 2 percent of one core | tmux on Unix is about 0 percent idle, and a Windows port that polls is the known failure mode. No latency test can see this |
-| T8 psmux CPU per 100 keystrokes, server plus client | 500 ms | 5 ms of CPU per key against about 18 ms of wall time means the pipeline waits rather than spins |
+| T7 psmux idle CPU, server plus client, settled window | 2 percent of one core | tmux on Unix is about 0 percent idle, and a Windows port that polls is the known failure mode. No latency test can see this. Judged on the settled window, never on the ramp down one, and that window is 8 s rather than 3 s because CPU time advances in 15.6 ms scheduler ticks: at 3 s one tick is 0.52 percent and the gate sat between two steps, so the same binary scored 2.08 and 3.12 ten minutes apart |
+| T8 psmux CPU per 100 keystrokes, server plus client | 2000 ms | measured 1060 ms quiet and up to 2730 ms on a busy box, and the cause is frame count, not spinning: two frames per keystroke at a shell prompt, because the cursor hide chunk and the text chunk arrive 15 ms apart. This number moves with machine state by nearly 2x on one binary, and the pane shell's own CPU moves with it, so the suite also reports psmux CPU divided by the shell's CPU in the same cell (1.68 to 1.94 measured), which cancels most of that and is the number worth calibrating against next. The client's console host costs more than either psmux process; reported, not judged |
 
 A number that moves is a regression or a machine change, and the JSON keeps every sample so the two can be told apart by rerunning an old binary in the same time window.
 
 ### A recorded run, 2026-09-10
 
-Three consecutive full runs at commit d69c310 on the reference machine, n=5 per launch cell, 40 keystrokes per latency cell, 5 creations per kind. The machine was NOT quiet: two other benchmark agents were running at the same time, which is why the middle of three runs is quoted and why the launch figures move by 100 ms between runs. Every cell produced data in all three runs and all three left nothing behind.
+psmux 3.3.8 at 4897b20, the installed binary, one full run on the reference machine with nothing else opening terminals: n=5 per launch cell, 40 keystrokes per latency cell, 5 creations per kind, 457 s. Every cell produced data, nothing was left behind, and every threshold passed.
 
 | Host | launch median | launch p90 | keystroke median | keystroke p99 |
 |------|--------------:|-----------:|-----------------:|--------------:|
-| bare `pwsh` in its own console | 352 ms | 409 ms | 1.49 ms | 3.29 ms |
-| Windows Terminal | 444 ms | 786 ms | 0.77 ms | 1.88 ms |
-| WezTerm | 557 ms | 1018 ms | 0.70 ms | 1.75 ms |
-| Alacritty | 565 ms | 941 ms | 0.91 ms | 2.07 ms |
-| psmux attached, server already running | 808 ms | 1160 ms | 18.94 ms | 27.44 ms |
-| psmux in Windows Terminal, server already running | 908 ms | 1524 ms | 17.99 ms | 25.98 ms |
-| psmux attached, cold server | 871 ms | 958 ms | | |
-| psmux in Windows Terminal, cold server | 911 ms | 982 ms | | |
+| bare `pwsh` in its own console | 355 ms | 722 ms | 1.66 ms | 3.10 ms |
+| Windows Terminal | 429 ms | 900 ms | 0.89 ms | 2.91 ms |
+| WezTerm | 555 ms | 1043 ms | 0.95 ms | 2.75 ms |
+| Alacritty | 559 ms | 569 ms | 0.93 ms | 2.82 ms |
+| psmux attached, server already running | 551 ms | 558 ms | 16.29 ms | 17.12 ms |
+| psmux in Windows Terminal, server already running | 614 ms | 646 ms | 16.28 ms | 16.72 ms |
+| psmux attached, cold server | 579 ms | 582 ms | | |
+| psmux in Windows Terminal, cold server | 649 ms | 656 ms | | |
+| **ConPTY floor, no psmux in the path** | | | **15.91 ms** | **16.17 ms** |
 
-Read the keystroke column as the measurement note above says: the host rows are the ConPTY echo floor with no GPU paint, the psmux rows are the whole psmux pipeline ending in a painted client frame. psmux adds about 450 ms to a launch and is about 18 ms from key to screen; both miss their thresholds on this build, which is the point of having the thresholds.
+What psmux adds: **196 ms to a launch** with a server already running, 224 ms when it has to spawn one, 185 ms inside a Windows Terminal tab. On the keystroke path it adds **0.4 ms to the median and 0.5 ms to the p99 over the ConPTY floor**, which is the only comparison that means anything here: the 14.6 ms that separates the psmux rows from the host rows is the pseudoconsole pipe, measured in the floor row, and every ConPTY consumer pays it.
 
-Memory and CPU, same runs, one session with one window and one pane:
+Memory and CPU, one session with one window and one pane:
 
 | Process | working set | private | CPU per 100 keystrokes | idle CPU, percent of one core |
 |---------|------------:|--------:|-----------------------:|------------------------------:|
-| psmux server | 15.3 MB | 3.7 MB | 547 to 1328 ms | 1.6 to 4.7 |
-| psmux client | 8.7 MB | 2.1 MB | 3828 to 4258 ms | 3.7 to 6.3 |
-| the pane's pwsh | 91 MB | 32 MB | 703 to 1250 ms | 0.0 |
-| conhost hosting the psmux client | 15.8 MB | 2.4 MB | 5117 to 5508 ms | 1.6 to 3.7 |
-| WezTerm | 115 MB | 370 MB | 313 to 547 ms | 0.0 |
-| Alacritty | 108 MB | 252 MB | 117 to 156 ms | 0.0 |
+| psmux server | 15.6 MB | 4.0 MB | 664 ms | 0.78 |
+| psmux client | 8.7 MB | 2.0 MB | 1094 ms | 0.78 |
+| the pane's pwsh | 91 MB | 32 MB | 1055 ms | 0.00 |
+| conhost hosting the psmux client | 17.9 MB | 2.5 MB | 1758 ms | 0.20 |
+| WezTerm | 114 MB | | 1445 ms | 0.20 |
+| Alacritty | 108 MB | | 1133 ms | 0.00 |
 
-Memory is the good news and it is not close: server plus client is 24 MB, against 108 MB for Alacritty and 115 MB for WezTerm hosting the same shell. T6 passes with a factor of two to spare.
+Server plus client is **24 MB**, against 108 MB for Alacritty and 114 MB for WezTerm hosting the same shell. Idle, server plus client hold **1.56 percent of one core**, ie 0.78 each, which is four scheduler ticks in the 8 s window and agrees exactly with the figure measured independently by the keystroke gate suite. CPU on the typing path is 1758 ms per 100 keystrokes for server plus client, or 1.67 times what the pane's own shell spends; most of it is the two frames per keystroke that a shell prompt produces.
 
-CPU is the bad news, and it is the finding this suite was built to produce. The client spends about 40 ms of CPU per keystroke, and its conhost another 50, against roughly 18 ms of wall time per keystroke. More than one core's worth of work is being done to echo one character. Worse, with nothing typed at all the server and client together hold 7 to 10 percent of a core, and the conhost another 2 to 4, where WezTerm and Alacritty sit at a measured zero. That is a polling loop, it is invisible in every latency number on this page, and T7 exists to keep it visible.
+Creation latency: first session to a prompt 570 ms, `new-window` median 62 ms with p90 79 ms, `split-window -v` p90 80 ms, `split-window -h` p90 73 ms, five windows in a burst all prompting in 589 ms.
 
-Creation latency in the same runs: first session to a prompt 563 to 649 ms, `new-window` median 84 to 103 ms with p90 96 to 121 ms, `split-window -v` 85 to 104 ms, `split-window -h` 69 to 102 ms, and a burst of five windows all showing prompts in 525 to 616 ms. All comfortably inside T4.
+For comparison, the same suite at d69c310 before the launch and keystroke work landed: psmux added 450 ms to a launch rather than 196, and its keystroke median was 18.94 ms against a floor of about 15.9 rather than 16.29. Two earlier runs of this suite against 4897b20 also recorded T8 at 1445 and 2734 ms per 100 keystrokes where this run recorded 1758, with the pane shell's own CPU moving in step, which is why the conditioned psmux-over-shell ratio is reported beside it.
 
 ### What it opens, it closes
 

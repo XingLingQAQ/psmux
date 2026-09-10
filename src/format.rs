@@ -1960,6 +1960,19 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             }
             "0".into()
         }
+        // history_bytes is how much the active pane's scrollback actually
+        // occupies.  It used to be hardcoded to 0, which hid exactly the
+        // growth issue #641 was about; now that a row is compacted to its used
+        // width on the way into history, this number tracks retained text
+        // rather than pane width, so it is worth reporting honestly.
+        "history_bytes" => {
+            if let Some(p) = active_pane(&win.root, &win.active_path) {
+                if let Ok(parser) = p.term.lock() {
+                    return parser.screen().history_bytes().to_string();
+                }
+            }
+            "0".into()
+        }
         "alternate_on" => {
             if let Some(p) = active_pane(&win.root, &win.active_path) {
                 if let Ok(parser) = p.term.lock() {

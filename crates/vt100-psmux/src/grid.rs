@@ -220,6 +220,20 @@ impl Grid {
         self.scrollback.len()
     }
 
+    /// Approximate resident size of the scrollback in bytes: the cells the
+    /// history rows actually store plus the per-row bookkeeping.  Trailing
+    /// blank columns are not stored and so do not count, which is the whole
+    /// point of the compaction in `scroll_up` (issue #641).  This is what
+    /// `#{history_bytes}` reports, matching tmux's field of the same name.
+    pub fn history_bytes(&self) -> usize {
+        let cell = std::mem::size_of::<crate::Cell>();
+        let row = std::mem::size_of::<crate::row::Row>();
+        self.scrollback
+            .iter()
+            .map(|r| row + r.stored_cells() * cell)
+            .sum()
+    }
+
     /// Updates the scrollback buffer's maximum size.  When `new_len` is
     /// smaller than the current fill, the oldest rows are trimmed away.
     pub fn set_scrollback_len(&mut self, new_len: usize) {
@@ -236,10 +250,14 @@ impl Grid {
     /// the cap is reached.  Used by the alt-screen-to-scrollback copy
     /// path (psmux issue #88).  Honours `scrollback_len = 0` (no-op),
     /// matching how the normal in-flow scrolling treats that case.
-    pub fn push_row_to_scrollback(&mut self, row: crate::row::Row) {
+    pub fn push_row_to_scrollback(&mut self, mut row: crate::row::Row) {
         if self.scrollback_len == 0 {
             return;
         }
+        // Scrollback rows are never mutated again, so drop the trailing blank
+        // padding before it becomes resident for the life of the history
+        // (issue #641).
+        row.compact();
         self.scrollback.push_back(row);
         while self.scrollback.len() > self.scrollback_len {
             self.scrollback.pop_front();
@@ -618,8 +636,13 @@ impl Grid {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
-            let removed = self.rows.remove(usize::from(self.scroll_top));
+            let mut removed = self.rows.remove(usize::from(self.scroll_top));
             if self.scrollback_len > 0 && !self.scroll_region_active() {
+                // The row stops being mutable the moment it becomes history,
+                // so this is the point to give its trailing blank columns back
+                // to the allocator.  tmux does the same in
+                // `grid_scroll_history` (grid.c:508).
+                removed.compact();
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();

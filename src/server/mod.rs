@@ -863,6 +863,7 @@ fn rekey_session_guard(guard: &mut Option<crate::platform::SessionMutex>, new_ba
 }
 
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
+    crate::startup_trace::mark("srv.entry");
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
     let panic_session_name = session_name.clone();
@@ -1013,6 +1014,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
     }
 
+    crate::startup_trace::mark("srv.bound");
     let regpath = crate::paths::port_file(&app.port_file_base());
     let keypath = crate::paths::key_file(&app.port_file_base());
 
@@ -1096,8 +1098,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
     } else { None };
 
+    crate::startup_trace::mark("srv.prewarm");
     crate::config::populate_default_bindings(&mut app);
     load_config(&mut app);
+    crate::startup_trace::mark("srv.config");
     // Surface any non-fatal config parse warnings to the attaching client
     // (issue #370 follow-up) instead of silently dropping them.
     write_config_warnings_log(&app.config_warnings);
@@ -1206,6 +1210,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     } else {
         create_window(&*pty_system, &mut app, initial_command.as_deref(), None, false)
     };
+    crate::startup_trace::mark("srv.window");
     if let Err(e) = create_result {
         // Issue #167: when the server fails to spawn its initial pane the
         // detached process exits silently — the user sees only "flashes
@@ -1256,6 +1261,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     if should_spawn_warm_server(&app) {
         spawn_warm_server(&app);
     }
+    crate::startup_trace::mark("srv.loop");
     let mut state_dirty = true;
     let mut cached_dump_state = String::new();
     let mut cached_data_version: u64 = 0;

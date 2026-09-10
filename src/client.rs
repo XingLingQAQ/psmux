@@ -2080,6 +2080,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // this process, including the input poll below, rounds up to the default
     // 15.6ms tick. See src/timer_res.rs.
     crate::timer_res::set_high(true);
+    crate::startup_trace::mark("cli.attach");
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok())
@@ -2147,6 +2148,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 return Err(no_such_session(&name));
             }
         };
+    crate::startup_trace::mark("cli.connected");
     // Pending background reconnect: Some(rx) while a reconnect thread is running.
     // Kept as None in normal operation. When the channel yields Some(result),
     // the result replaces writer/frame_rx; if it yields None all attempts failed.

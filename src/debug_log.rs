@@ -16,6 +16,7 @@
 //! | `PSMUX_PANE_RAW=1`    | `~/.psmux/pane_raw.bin`           | Raw pre-parse pane byte stream        |
 //! | `PSMUX_AUTORENAME_DEBUG=1` | `~/.psmux/autorename.log`     | Process-tree walk for automatic-rename |
 //! | `PSMUX_PTY_TRACE=<path>` | `<path>.<pid>`                  | QPC-stamped keystroke path, see src/pty_trace.rs |
+//! | `PSMUX_STARTUP_TRACE=<path>` | `<path>.<pid>`              | QPC-stamped launch-to-prompt hops, see src/startup_trace.rs |
 //!
 //! All loggers are:
 //! - **Off by default** — zero overhead when disabled (one atomic load per call)

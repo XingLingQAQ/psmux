@@ -2034,10 +2034,33 @@ fn establish_connection_with_timeout(
             let line = std::mem::take(&mut buf);
             crate::pty_trace::mark_plain("c", line.len());
             buf = String::with_capacity(64 * 1024);
+            // Whether this line is worth interrupting the main loop's wait for,
+            // decided BEFORE the line is moved into the channel.
+            //
+            // "NC" means the server has nothing new. Waking for it is not just
+            // pointless, it is self-sustaining: the wake returns the input wait
+            // immediately, the loop goes round and sends another dump-state, the
+            // server answers "NC" again, and that NC wakes the loop again. The
+            // result is a request/reply spin at TCP round-trip rate between two
+            // processes that both have nothing to do.
+            //
+            // Measured over a 10s idle window with a silent pane, counting the
+            // client's socket reads: 0.1 lines/sec before this branch, 3935
+            // lines/sec with the wake firing on every line, and 0.1 again with
+            // this gate. It cost up to 92% of a core across the pair, and it is
+            // the same busy poll this branch removed from the "NC" handler,
+            // reintroduced from the other end.
+            //
+            // Everything else is worth a wake: a frame is the whole point, and
+            // directives like SWITCH want to be acted on now. Both are rare
+            // enough that they cannot spin.
+            let worth_waking = line.trim_end() != "NC";
             if frame_tx.send(line).is_err() { return; }
-            // Break the main loop out of its console wait NOW. Without this the
-            // frame sits in the channel until the poll interval expires.
-            crate::ssh_input::frame_wake::signal();
+            if worth_waking {
+                // Break the main loop out of its console wait NOW. Without this
+                // the frame sits in the channel until the poll interval expires.
+                crate::ssh_input::frame_wake::signal();
+            }
         }
     });
 

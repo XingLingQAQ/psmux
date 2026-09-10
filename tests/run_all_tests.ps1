@@ -330,7 +330,10 @@ $interactiveTests = @(
 $perfTests = @(
     "test_stress", "test_stress_50", "test_stress_aggressive", "test_extreme_perf",
     "test_e2e_latency", "test_pane_startup_perf", "test_startup_perf", "test_perf",
-    "test_launch_to_prompt_gate", "test_keystroke_latency_gate", "test_creation_latency_gate", "test_idle_socket_traffic"
+    # Launches real terminal emulators (Windows Terminal, WezTerm, Alacritty) and
+    # times psmux against them: launch to prompt, keystroke to screen, creation
+    # latency. Long by nature, and it opens GUI windows, so -SkipPerf skips it.
+    "test_launch_to_prompt_gate", "test_keystroke_latency_gate", "test_creation_latency_gate", "test_idle_socket_traffic", "test_perf_vs_terminals"
 )
 
 # Results tracking

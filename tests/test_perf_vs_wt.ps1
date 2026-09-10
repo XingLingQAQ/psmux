@@ -10,7 +10,19 @@
 #   7. TCP batching efficiency
 #   8. Adaptive polling transitions (idle→active→echo)
 #
-# Windows Terminal baseline (from source code analysis):
+# IMPORTANT, read this before quoting anything this file prints. The Windows
+# Terminal figures below were READ OUT OF WT'S SOURCE CODE. Nothing in this file
+# ever launches Windows Terminal, so they are design constants, not measurements,
+# and they say nothing about what WT does on your machine.
+#
+# For measured numbers, run tests\test_perf_vs_terminals.ps1. That suite launches
+# every terminal actually installed (Windows Terminal, WezTerm, Alacritty) plus
+# bare pwsh, runs the SAME shell in each, and reports launch to prompt, keystroke
+# to screen, memory, CPU and creation latency side by side with psmux, with every
+# sample written to %USERPROFILE%\.psmux-test-data\metrics\. docs\performance.md
+# explains how to read it. Quote that, not this.
+#
+# Windows Terminal design constants (from source code analysis, NOT measured):
 #   - Pipe buffer: 128 KB (CreateOverlappedPipe)
 #   - Mouse: NO throttling, direct pipe write, SGR encoding
 #   - Write serialization: ticket_lock (fair FIFO spinlock)
@@ -48,7 +60,8 @@ Write-Host "=" * 76
 Write-Host "     PSMUX vs WINDOWS TERMINAL — PERFORMANCE COMPARISON BENCHMARK"
 Write-Host "=" * 76
 Write-Host ""
-Write-Host "  Windows Terminal baselines from source code analysis (commit 2025)"
+Write-Host "  Windows Terminal baselines are DESIGN CONSTANTS read from WT source, not measurements."
+Write-Host "  For measured numbers against the terminals installed here, run tests\test_perf_vs_terminals.ps1"
 Write-Host "  psmux optimizations: 64KB pipe buf, echo-tracking scroll, stack SGR"
 Write-Host ""
 

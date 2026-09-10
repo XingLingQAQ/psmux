@@ -109,23 +109,58 @@ if ($firstRc -eq 0 -and $dupRc -ne 0) { Ok "second new-session -s dup exited $du
 else { Bad "first rc=$firstRc second rc=$dupRc out='$("$out".Trim())'" }
 
 # ---------------------------------------------------------------------------
-# 4: the readiness wait still bounds a server that never becomes usable. Point
-# the client at a namespace whose session cannot start (an unspawnable shell)
-# and require a non-zero exit in reasonable time rather than a hang.
+# 4: the readiness wait still bounds a server that never becomes usable, and a
+# genuine spawn failure is reported rather than raced past.
+#
+# The unspawnable condition is a `default-shell` that does not exist. That is
+# the one case where the SERVER's own CreateProcessW fails: it records the
+# reason in server-startup.log and exits, the .port file vanishes, and the
+# client's readiness wait turns that into rc 1 plus the reason (issue #370).
+#
+# It is NOT a bogus path given as the pane command. A string pane command is
+# handed to the default shell (`pwsh -Command "<cmd>"`), exactly as tmux hands
+# it to `sh -c`, so the spawn SUCCEEDS, the window exists when new-session
+# returns, and it is the shell that then reports the missing executable and
+# exits. tmux returns 0 there and so does psmux; the original version of this
+# arm asserted rc 1 for that case and was wrong from the day it was written
+# (2026-09-09 sweep, "exited 0 for a shell that cannot exist"). Both cases are
+# now pinned separately.
 # ---------------------------------------------------------------------------
 Cleanup
+$badConf = Join-Path ([IO.Path]::GetTempPath()) "psmux_rdypoll_badshell_$PID.conf"
+'set -g default-shell "C:\definitely\not\a\real\shell.exe"' | Set-Content -Path $badConf -Encoding ASCII
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $env:PSMUX_NO_WARM = "1"
-& $Psmux -L $NS new-session -d -s deadshell "C:\definitely\not\a\real\shell_$PID.exe" 2>&1 | Out-Null
+$env:PSMUX_CONFIG_FILE = $badConf
+$deadOut = & $Psmux -L $NS new-session -d -s deadshell 2>&1 | Out-String
 $deadRc = $LASTEXITCODE
+$env:PSMUX_CONFIG_FILE = $null
 $sw.Stop()
 $env:PSMUX_NO_WARM = $null
+Remove-Item $badConf -Force -ErrorAction SilentlyContinue
 Write-Host ""
-Write-Host "[TEST] an unspawnable pane command still fails, and is still bounded"
+Write-Host "[TEST] an unspawnable default-shell still fails, names the reason, and is still bounded"
 if ($deadRc -ne 0) { Ok "exited $deadRc after $([math]::Round($sw.Elapsed.TotalSeconds,1))s" }
-else { Bad "exited 0 for a shell that cannot exist (after $([math]::Round($sw.Elapsed.TotalSeconds,1))s)" }
+else { Bad "exited 0 for a default-shell that cannot exist (after $([math]::Round($sw.Elapsed.TotalSeconds,1))s)" }
+if ($deadOut -match "failed to create session" -and $deadOut -match "spawn shell error|cannot find the path") { Ok "the spawn failure and its reason were surfaced to the caller (#370)" }
+else { Bad "expected the spawn failure reason on stderr, got: '$($deadOut.Trim())'" }
 if ($sw.Elapsed.TotalSeconds -lt 20) { Ok "bounded: returned in $([math]::Round($sw.Elapsed.TotalSeconds,1))s, under the 15s readiness deadline plus slack" }
 else { Bad "took $([math]::Round($sw.Elapsed.TotalSeconds,1))s, past the readiness deadline" }
+$deadLs = & $Psmux -L $NS list-sessions 2>&1 | Out-String
+if ($deadLs -notmatch "deadshell") { Ok "no half-created deadshell session was left behind" }
+else { Bad "a deadshell session survived a failed spawn: '$($deadLs.Trim())'" }
+
+# The tmux parity half: a bogus PANE COMMAND goes through the shell, so the
+# session is created and new-session exits 0, the same as `tmux new -d nosuch`.
+Cleanup
+$env:PSMUX_NO_WARM = "1"
+& $Psmux -L $NS new-session -d -s bogus "C:\definitely\not\a\real\shell_$PID.exe" 2>&1 | Out-Null
+$bogusRc = $LASTEXITCODE
+$env:PSMUX_NO_WARM = $null
+Write-Host ""
+Write-Host "[TEST] a bogus pane COMMAND is the shell's problem, not a creation failure (tmux parity)"
+if ($bogusRc -eq 0) { Ok "new-session -d with a bogus pane command exited 0, like tmux" }
+else { Bad "new-session -d with a bogus pane command exited $bogusRc, tmux exits 0" }
 
 Cleanup
 Write-Host ""

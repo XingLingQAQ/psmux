@@ -1104,7 +1104,22 @@ impl VtParser {
             '\x1b' => {
                 self.state = PS::Escape;
             }
-            '\r' | '\n' => emit(make_key(KeyCode::Enter, KeyModifiers::empty())),
+            '\r' => emit(make_key(KeyCode::Enter, KeyModifiers::empty())),
+            // NOTE: 0x0a deliberately has NO arm here.  It falls through to the
+            // Ctrl+A..Ctrl+Z arm below, which turns it into C-j (issue #642).
+            //
+            // Ctrl+<letter> puts the letter's low five bits on the wire, so
+            // Ctrl+J IS the byte LF, the way Ctrl+I is Tab and Ctrl+M is CR.
+            // Those two collisions have a named key on the other side and tmux
+            // treats each pair as one key, which is why `'\t'` and `'\r'` keep
+            // their arms.  0x0a has no such name: Enter is 0x0d, so the only
+            // key 0x0a can be is C-j, and that is what tmux calls it (measured
+            // against tmux 3.6a: `bind -n C-j` fires on the byte, and a `C-j`
+            // prefix arms).  Sharing an arm with `'\r'` reported it as an
+            // unmodified Enter, so a `C-j` prefix was dead on every client
+            // where needs_vt_input() is true — WezTerm, the JetBrains
+            // terminals, and everything over SSH — while it worked under
+            // Windows Terminal, whose records take the native path.
             '\t' => emit(make_key(KeyCode::Tab, KeyModifiers::empty())),
             '\x7f' => emit(make_key(KeyCode::Backspace, KeyModifiers::empty())),
             // NOTE: 0x08 deliberately has NO arm here.  It falls through to the
@@ -1158,7 +1173,18 @@ impl VtParser {
                 // Windows Terminal sends ESC+CR for Shift+Enter; forwarding one
                 // \x1b\r (re-emitted by encode_key_event) lets TUI apps such as
                 // the Copilot and Claude CLIs insert a newline instead of
-                // submitting the prompt.
+                // submitting the prompt (issue #396).
+                //
+                // ESC+LF stays paired with ESC+CR here even though a BARE 0x0a
+                // is now C-j (see `on_ground`).  The asymmetry is deliberate:
+                // measured end to end, `\x1b\n` reaches a pane as `\x1b\r`
+                // today and would reach it as `0a` if this were decoded as
+                // M-C-j, because a named `C-M-<letter>` does not go through
+                // `encode_key_event` at all — `write_named_key_to_pane` injects
+                // a console record first and ConPTY drops the Alt from it.
+                // Neither is the `\x1b\n` the terminal sent, so making this
+                // right is a separate problem in the OUTPUT path and does not
+                // belong to #642.
                 emit(make_key(KeyCode::Enter, KeyModifiers::ALT));
                 self.state = PS::Ground;
             }
@@ -2239,6 +2265,10 @@ pub(crate) mod test_support {
 #[cfg(test)]
 #[path = "../tests-rs/test_ssh_vt_paste.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue642_vt_ctrl_j.rs"]
+mod tests_issue642_vt_ctrl_j;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue457_ssh_mouse_build_gate.rs"]

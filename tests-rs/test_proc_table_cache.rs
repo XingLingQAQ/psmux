@@ -352,3 +352,148 @@ fn foreground_is_shell_classifies_live_processes() {
         "ping must classify as a non-shell"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The other half of the policy: an EXPLICIT QUERY must not be one refresh
+// behind.
+//
+// `#{pane_current_command}` is expanded both on the render path and as the
+// whole answer to a one-shot `display-message -p` / `list-panes -F`. Serving
+// the one-shot route a stale table made it report the PREVIOUS foreground
+// process: `pwsh` two seconds after a command started, and the command two
+// seconds after it exited, with a second query 300ms later always correct.
+// tmux reads the tty's foreground process group at query time and is never
+// stale, so the query route walks inline when the entry has expired.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_explicit_query_walks_inline_when_the_entry_expired() {
+    let _g = lock();
+    {
+        let mut g = PROC_TABLE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let ancient = std::time::Instant::now() - Duration::from_secs(600);
+        let table = std::sync::Arc::new(vec![(1u32, 0u32, "ancient.exe".to_string())]);
+        *g = Some((ancient, table));
+    }
+    let before = walks();
+    let served = process_table_bounded(RENDER_PATH_TTL)
+        .expect("an explicit query must still get a table");
+    assert_eq!(
+        walks() - before,
+        1,
+        "an explicit query found an expired entry and did NOT walk; it would be \
+         served the previous foreground process, which is the whole bug"
+    );
+    assert!(
+        served.len() > 10,
+        "the query was handed the ancient placeholder ({} entries) instead of a \
+         fresh enumeration",
+        served.len()
+    );
+}
+
+#[test]
+fn an_explicit_query_reuses_an_entry_inside_the_ttl() {
+    // Freshness is bounded, not unconditional: a command reply may reuse a
+    // snapshot younger than the TTL. That bound is what keeps the worst case at
+    // one inline walk per TTL no matter how often the format is asked, so a
+    // `list-panes -F '#{pane_current_command}'` in a loop cannot turn into a
+    // walk per invocation.
+    let _g = lock();
+    let _ = process_table(Duration::ZERO); // seed a known-fresh entry
+    let before = walks();
+    let _ = process_table_bounded(RENDER_PATH_TTL).expect("a fresh entry is served");
+    assert_eq!(
+        walks() - before,
+        0,
+        "an entry younger than the TTL must be reused by the query route too"
+    );
+}
+
+#[test]
+fn the_render_path_still_never_walks_on_the_caller() {
+    // The companion assertion to the two above, stated against the pair so a
+    // future "just make them both fresh" simplification fails here: adding the
+    // inline walk back to the render path is the keystroke-latency regression
+    // this cache exists to prevent.
+    let _g = lock();
+    {
+        let mut g = PROC_TABLE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let ancient = std::time::Instant::now() - Duration::from_secs(600);
+        let table = std::sync::Arc::new(vec![(1u32, 0u32, "ancient.exe".to_string())]);
+        *g = Some((ancient, table));
+    }
+    let before = walks();
+    let served = process_table(RENDER_PATH_TTL).expect("a cached entry is always served");
+    assert_eq!(
+        walks() - before,
+        0,
+        "the render path walked inline on an expired entry; that is the 9-11ms \
+         stall on the keystroke path"
+    );
+    assert_eq!(
+        served.len(),
+        1,
+        "the render path should have been served the cached entry as is"
+    );
+}
+
+#[test]
+fn pane_current_command_query_route_sees_a_process_the_cache_does_not() {
+    // End-to-end on the real resolver that `#{pane_current_command}` calls,
+    // with the staleness made deterministic instead of timing-dependent: the
+    // cache is seeded with an ancient table that does NOT contain the live
+    // child, so the stale route cannot possibly name it and the fresh route
+    // must.
+    use std::process::{Command, Stdio};
+
+    let _g = lock();
+    let mut root = Command::new("cmd.exe")
+        .args(["/c", "ping.exe", "-n", "60", "127.0.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cmd");
+    let root_pid = root.id();
+
+    // Wait for the descendant to exist, off a fresh enumeration.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut have_child = false;
+    while std::time::Instant::now() < deadline {
+        let t = process_table(Duration::ZERO).expect("snapshot");
+        if t.iter().any(|(_, ppid, name)| *ppid == root_pid && name.starts_with("ping")) {
+            have_child = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(have_child, "cmd never spawned its ping child; cannot run the scenario");
+
+    // An ancient table that knows the root but none of its children.
+    {
+        let mut g = PROC_TABLE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let ancient = std::time::Instant::now() - Duration::from_secs(600);
+        let table = std::sync::Arc::new(vec![(root_pid, 0u32, "cmd.exe".to_string())]);
+        *g = Some((ancient, table));
+    }
+    let stale = get_deepest_foreground_process_name(root_pid);
+    let fresh = get_deepest_foreground_process_name_fresh(root_pid);
+
+    let _ = root.kill();
+    let _ = root.wait();
+
+    assert_eq!(
+        stale, None,
+        "the render path is defined to answer off the snapshot it has; it \
+         invented {stale:?} instead"
+    );
+    let fresh = fresh.expect(
+        "the query route returned nothing while a ping child was live — it was \
+         served the stale table, which is exactly the one-refresh-behind bug",
+    );
+    assert!(
+        fresh.to_ascii_lowercase().starts_with("ping"),
+        "the query route must name the live descendant; got {fresh:?}"
+    );
+}

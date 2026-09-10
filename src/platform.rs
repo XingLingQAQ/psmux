@@ -3323,7 +3323,33 @@ pub mod process_info {
     /// executable path unreadable) degrades quietly so the caller can fall back
     /// to the pane's own process name.
     pub fn get_deepest_foreground_process_name(pid: u32) -> Option<String> {
-        let entries = process_table(RENDER_PATH_TTL)?;
+        resolve_deepest_foreground(pid, process_table(RENDER_PATH_TTL)?)
+    }
+
+    /// `get_deepest_foreground_process_name` for a caller that answers ONE
+    /// question ONCE and is never asked again.
+    ///
+    /// Identical walk; the only difference is the freshness rule. The render
+    /// path may be served a table older than the TTL while a background walk
+    /// catches up (see `process_table`), because a window title or status
+    /// variable is re-expanded on the next frame anyway. A one-shot
+    /// `display-message -p '#{pane_current_command}'` has no next frame: the
+    /// stale table IS the answer the user gets, and the refresh it kicks off
+    /// only helps the query nobody is going to make. That is how
+    /// `#{pane_current_command}` came to be exactly one refresh behind — a
+    /// query two seconds after `ping` started still reported `pwsh`, and a
+    /// query two seconds after `ping` exited still reported `ping`.
+    ///
+    /// tmux has no equivalent staleness: it reads the tty's foreground process
+    /// group at query time, so the answer is current by construction. This
+    /// matches that by bounding the age at `RENDER_PATH_TTL` and walking
+    /// INLINE when the entry has expired.
+    pub fn get_deepest_foreground_process_name_fresh(pid: u32) -> Option<String> {
+        resolve_deepest_foreground(pid, process_table_bounded(RENDER_PATH_TTL)?)
+    }
+
+    /// Shared tail of both `get_deepest_foreground_process_name` variants.
+    fn resolve_deepest_foreground(pid: u32, entries: ProcTable) -> Option<String> {
         let (leaf_pid, snapshot_name) = deepest_descendant(&entries, pid)?;
         // The snapshot name is lowercased and carries `.exe`; the live query
         // gives the real casing. Fall back to the snapshot when the leaf is
@@ -3593,6 +3619,14 @@ pub mod process_info {
                 // callers that must not be stale (Ctrl+C routing, mouse
                 // transport selection) pass `Duration::ZERO` and never reach
                 // this branch.
+                //
+                // "Render path" is the load-bearing word, and it was briefly
+                // wrong: `#{pane_current_command}` reaches this code on the
+                // render path AND as the answer to a one-shot
+                // `display-message -p` / `list-panes -F`, where there is no
+                // next frame to correct the stale answer. That route now calls
+                // `process_table_bounded` instead — see its doc comment for the
+                // full policy split.
                 if !PROC_TABLE_REFRESHING.swap(true, std::sync::atomic::Ordering::AcqRel) {
                     std::thread::spawn(|| {
                         // Clear the flag on the way out even if the walk
@@ -3615,6 +3649,43 @@ pub mod process_info {
 
         // No entry at all: a cold cache, or a `Duration::ZERO` caller that must
         // see the live tree. Walk inline.
+        walk_process_table()
+    }
+
+    /// Like [`process_table`], but an entry older than `max_age` is never
+    /// SERVED: the refresh happens inline, on the calling thread, and the
+    /// caller gets the result of it.
+    ///
+    /// Who gets which function is the whole policy, so state it once here:
+    ///
+    /// - [`process_table`] — the RENDER path. Window titles, status variables,
+    ///   automatic-rename: everything that is re-expanded on the next frame and
+    ///   therefore may be one refresh behind. Never walks on the caller's
+    ///   thread once the cache is warm, which is what keeps a 9-11ms system
+    ///   enumeration off the server event loop that also delivers keystrokes to
+    ///   ConPTY.
+    /// - `process_table_bounded` — an explicit QUERY. A command reply
+    ///   (`display-message -p`, `list-panes -F`, `if-shell`, `run-shell`, a
+    ///   hook, control mode) is the only answer its caller will ever see, so it
+    ///   must not be stale. It still reuses an entry younger than `max_age`, so
+    ///   the worst case is one inline walk per TTL however often it is asked.
+    /// - `process_table(Duration::ZERO)` — Ctrl+C routing and mouse transport
+    ///   selection. Always a live walk; a stale process tree there misroutes a
+    ///   real keypress or click.
+    fn process_table_bounded(max_age: std::time::Duration) -> Option<ProcTable> {
+        if !max_age.is_zero() {
+            let cached = {
+                let guard = PROC_TABLE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                guard
+                    .as_ref()
+                    .map(|(at, table)| (*at, std::sync::Arc::clone(table)))
+            };
+            if let Some((at, table)) = cached {
+                if at.elapsed() < max_age {
+                    return Some(table);
+                }
+            }
+        }
         walk_process_table()
     }
 
@@ -4192,6 +4263,7 @@ pub mod process_info {
     pub fn get_process_cwd(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_process_name(_pid: u32) -> Option<String> { None }
     pub fn get_deepest_foreground_process_name(_pid: u32) -> Option<String> { None }
+    pub fn get_deepest_foreground_process_name_fresh(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
     pub fn tree_has_vt_bridge_cached(_root_pid: u32) -> bool { false }

@@ -894,7 +894,7 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let now = std::time::Instant::now();
     crate::warm_trace!("pool: spawned spare pane={} pid={:?} in {:.1}ms", pane_id, child_pid, t0.elapsed().as_micros() as f64 / 1000.0);
-    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring, spawned_at: now, ready: false, last_dv: 0, last_change: now, trace_settled: false })
+    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring, spawned_at: now, ready: false, last_dv: 0, last_change: now, trace_settled: false, host_colors: p.host_colors.clone() })
 }
 
 pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {

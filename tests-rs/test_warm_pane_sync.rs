@@ -140,6 +140,7 @@ fn resize_to_same_size_is_noop() {
         last_dv: 0,
         last_change: now,
         trace_settled: false,
+        host_colors: None,
     });
 
     assert!(matches!(for_resize(&app, 40, 120), WarmPaneSync::Noop));
@@ -154,6 +155,95 @@ fn resize_with_no_warm_pane_returns_respawn() {
     // and possibly spawn a fresh warm pane at the new size.
     let app = fresh_app();
     assert!(matches!(for_resize(&app, 30, 80), WarmPaneSync::Respawn(_)));
+}
+
+// ── for_host_colors_change: the palette is baked into the child ─────
+
+/// Push one spare carrying `planted` as the palette its shell was spawned with.
+fn push_spare_with_palette(app: &mut AppState, planted: Option<crate::types::HostColors>) {
+    let pty = portable_pty::native_pty_system();
+    let pair = pty
+        .openpty(portable_pty::PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
+    cmd.arg("/c");
+    cmd.arg("exit");
+    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
+    let writer = pair.master.take_writer().expect("writer");
+    let now = std::time::Instant::now();
+    app.warm_pane.push(crate::types::WarmPane {
+        master: pair.master,
+        writer,
+        child,
+        term: std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 100))),
+        data_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cursor_shape: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        bell_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cpr_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        color_query_pending: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        child_pid: None,
+        pane_id: 0,
+        rows: 40,
+        cols: 120,
+        output_ring: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        spawned_at: now,
+        ready: true,
+        last_dv: 0,
+        last_change: now,
+        trace_settled: false,
+        host_colors: planted,
+    });
+}
+
+fn palette(fg: (u8, u8, u8)) -> crate::types::HostColors {
+    let mut hc = crate::types::HostColors::empty();
+    hc.fg = Some(fg);
+    hc
+}
+
+#[test]
+fn host_colors_report_retires_a_spare_that_has_no_palette() {
+    // The real sequence: a server boots knowing nothing, fills its pool, then a
+    // client attaches and reports the terminal's colours. Those spares will
+    // hand an empty PSMUX_HOST_COLORS to whatever is transplanted into them.
+    let mut app = fresh_app();
+    app.host_colors = None;
+    push_spare_with_palette(&mut app, None);
+    app.host_colors = Some(palette((0x11, 0x22, 0x33)));
+    assert!(matches!(
+        crate::warm_pane_sync::for_host_colors_change(&app),
+        WarmPaneSync::Respawn(_)
+    ));
+    app.warm_pane.kill_all();
+}
+
+#[test]
+fn host_colors_report_matching_the_pool_is_noop() {
+    // A second client reporting the same colours must not throw away a pool
+    // that is already correct — that would cost a shell boot per attach.
+    let mut app = fresh_app();
+    let hc = palette((0x11, 0x22, 0x33));
+    push_spare_with_palette(&mut app, Some(hc.clone()));
+    app.host_colors = Some(hc);
+    assert!(matches!(
+        crate::warm_pane_sync::for_host_colors_change(&app),
+        WarmPaneSync::Noop
+    ));
+    app.warm_pane.kill_all();
+}
+
+#[test]
+fn host_colors_change_with_an_empty_pool_is_noop() {
+    // Nothing is holding a stale palette, and the refill the loop asks for next
+    // snapshots `app.host_colors` as it stands then (`pane::warm_spawn_params`),
+    // so there is nothing for this to do. Unlike `for_resize`, which respawns an
+    // empty pool defensively, there is no dimension here to get wrong.
+    let mut app = fresh_app();
+    app.host_colors = Some(palette((0x44, 0x55, 0x66)));
+    assert!(matches!(
+        crate::warm_pane_sync::for_host_colors_change(&app),
+        WarmPaneSync::Noop
+    ));
 }
 
 // ── for_post_config: priority order ────────────────────────────────

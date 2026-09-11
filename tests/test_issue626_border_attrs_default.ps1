@@ -99,15 +99,54 @@ function Border-Sgrs {
     return $out
 }
 
-# The border row is drawn as "<SGR><cursor move><glyphs>", so the style that
-# paints a given row is the last SGR run before that row's cursor move.
+# The SGR run in force on the outer terminal when the first cell of a given row
+# is written.
+#
+# This used to match the literal shape "<SGR><ESC[row;1H><glyph>", the style run
+# sitting immediately in front of an ABSOLUTE cursor move to the row. That shape
+# is not psmux's to control. These bytes are ConPTY's re-encoding of the console
+# the client drew, and ConPTY only reaches a row with an absolute move when it is
+# repainting a non contiguous region. Proven by capture: when the client paints
+# the whole screen in ONE pass, ConPTY walks down the screen with CR/LF and emits
+# no `ESC[15;1H` at all, even though the identical `ESC[90m` is in force when the
+# border row is written:
+#
+#   two passes:  ...f7><ESC>[90m<ESC>[15;1H<50 glyphs><ESC>[32m<50 glyphs>
+#   one pass:    ...<ESC>[K<CR><LF><ESC>[90m<CR><LF><50 glyphs><ESC>[32m<50 glyphs>
+#
+# So track the cursor and the live style and ask the terminal state, not one byte
+# pattern: walk the stream, follow CUP / CR / LF, and report the style that is
+# active the moment a box drawing glyph lands in column 1 of `$Row`.
 function Row-Sgr {
     param([string]$Text, [int]$Row)
     if (-not $Text) { return $null }
-    $rx = [regex]("((?:$ESC\[[0-9;:]*m)*)" + [regex]::Escape("$ESC[$Row;1H") + "[\u2500-\u257F]")
-    $last = $null
-    foreach ($m in $rx.Matches($Text)) { if ($m.Groups[1].Value) { $last = $m.Groups[1].Value } }
-    return $last
+    $rx = [regex]("(?<sgr>$ESC\[[0-9;:]*m)|(?<cup>$ESC\[(?<r>[0-9]*)(;(?<c>[0-9]*))?H)|(?<csi>$ESC\[[0-9;:?]*[A-Za-z@``])|(?<osc>$ESC\][^$ESC\a]*($ESC\\|\a))|(?<esc>$ESC.)|(?<cr>\r)|(?<lf>\n)|(?<ch>[^$ESC\r\n])")
+    $r = 1; $c = 1
+    $pending = ""   # SGRs emitted since the last cell was printed
+    $live = ""      # the last SGR run emitted, which is still in force
+    $found = $null
+    foreach ($m in $rx.Matches($Text)) {
+        if ($m.Groups['sgr'].Success) { $pending += $m.Value; $live = $pending; continue }
+        if ($m.Groups['cup'].Success) {
+            $rv = $m.Groups['r'].Value; $cv = $m.Groups['c'].Value
+            $r = if ($rv) { [int]$rv } else { 1 }
+            $c = if ($cv) { [int]$cv } else { 1 }
+            continue
+        }
+        if ($m.Groups['cr'].Success) { $c = 1; continue }
+        if ($m.Groups['lf'].Success) { $r++; continue }
+        if ($m.Groups['ch'].Success) {
+            if ($r -eq $Row -and $c -eq 1 -and $m.Value -match "[\u2500-\u257F]") {
+                # A style already in force needs no fresh SGR in front of the row.
+                $found = if ($pending) { $pending } else { $live }
+            }
+            $pending = ""
+            $c++
+            continue
+        }
+        # Every other escape sequence here leaves the cursor where it was.
+    }
+    return $found
 }
 
 function Vis([string]$s) { if ($null -eq $s) { return "<none>" }; return ($s -replace $ESC, '<ESC>') }

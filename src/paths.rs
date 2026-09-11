@@ -196,6 +196,24 @@ pub fn pid_file(session: impl AsRef<str>) -> String {
     format!("{}\\{}.pid", psmux_dir(), session.as_ref())
 }
 
+/// Path to the remembered host palette, shared by every server in this data
+/// root.
+///
+/// A server learns its terminal's colours only when a client attaches and
+/// reports them, and the palette is planted in every pane child's environment at
+/// spawn time. So the spares a fresh server pre spawned are holding the wrong
+/// palette the instant that first report arrives, and retiring them (#473
+/// follow up) costs the user's first split a whole shell startup: measured 18 ms
+/// without the report against 335 ms median and 807 ms worst with it.
+///
+/// The palette of a given terminal is the same every time, so remembering the
+/// last one and spawning spares with it makes that first report agree and the
+/// retirement never happen. A wrong guess is self correcting: the report differs,
+/// the spares are retired exactly as before, and the new value is remembered.
+pub fn host_colors_file() -> String {
+    format!("{}\\host_colors", psmux_dir())
+}
+
 /// Path to a session's `.spawnlock` file (the warm-pool spawn lock).
 pub fn spawnlock_file(session: impl AsRef<str>) -> String {
     format!("{}\\{}.spawnlock", psmux_dir(), session.as_ref())

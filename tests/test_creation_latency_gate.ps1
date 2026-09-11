@@ -12,7 +12,8 @@
 #
 # which averages to a forgettable 257ms and feels like a stutter every other
 # time you press the key. An average hides that completely, so this gate asserts
-# the SHAPE of the distribution: p90 and max, not the centre.
+# the SHAPE of the distribution, not its centre: HOW MANY of the ten creations
+# are slow (see $SlowBudget), with p90 and max as backstops.
 #
 # WHY IT IS MEASURED THIS WAY
 #
@@ -42,8 +43,28 @@ param(
     [string]$Binary = "",
     [int]$Count = 10,
     [int]$SettleMs = 2000,
-    # p90 is the assertion that matters: it says MOST creations are instant.
-    [int]$P90LimitMs = 150,
+    # What counts as a creation the user notices, and how many of ten are allowed
+    # to be one.
+    #
+    # Two, not one, and counted rather than read off p90. A run of ten rapid
+    # creations cannot all be instant: the pool holds `warm-pool-size` settled
+    # spares, and everything past them is served by shells that were all started
+    # at about the same moment and therefore mature in a staircase. Measured here,
+    # that is one creation waiting out most of a shell startup (~470 ms) and one
+    # waiting out part of another (~150 ms), with the remaining eight at 14 to
+    # 30 ms.
+    #
+    # p90 over ten samples is the SECOND WORST, so it fails on that second,
+    # partial wait and says nothing about the eight instant ones: it read 132 to
+    # 159 ms against a 150 ms budget on identical behaviour, passing or failing on
+    # noise. The count is the statistic that matches what a user feels, and it
+    # still rejects the defect this gate exists for: before the spare pool, ten
+    # new-windows were [27, 416, 15, 396, 14, 412, 15, 428, 15, 457], five slow of
+    # ten, and split-window was eight of ten.
+    [int]$SlowMs = 150,
+    [int]$SlowBudget = 2,
+    # Kept as a backstop on how bad that second wait may get.
+    [int]$P90LimitMs = 300,
     # max only catches a blow-up. The floor for one creation in a run of ten is
     # a whole shell startup, because no pool can produce a booted shell faster
     # than a shell boots, and a pwsh cold start measures 600 to 900ms on this
@@ -240,13 +261,21 @@ function Test-Cell {
     $median = $s[[int][Math]::Floor(($s.Count - 1) / 2)]
     $p90 = $s[[Math]::Min($s.Count - 1, [int][Math]::Ceiling(0.9 * $s.Count) - 1)]
     $max = $s[-1]
+    $slow = @($t | Where-Object { $_ -gt $SlowMs }).Count
     $list = (($t | ForEach-Object { [int]$_ }) -join ', ')
-    Write-Perf ("{0,-18} med={1,6:N0} p90={2,6:N0} max={3,6:N0} ms  [{4}]" -f $Label, $median, $p90, $max, $list)
+    Write-Perf ("{0,-18} med={1,6:N0} p90={2,6:N0} max={3,6:N0} ms  slow={4}/{5}  [{6}]" -f $Label, $median, $p90, $max, $slow, $t.Count, $list)
 
+    # HOW MANY creations are slow, which is the thing the user feels, and not the
+    # 2nd worst of ten. See $SlowBudget for why p90 alone was the wrong statistic.
+    if ($slow -le $SlowBudget) {
+        Write-Pass ("$Label {0} of {1} creations over {2}ms (budget {3})" -f $slow, $t.Count, $SlowMs, $SlowBudget)
+    } else {
+        Write-Fail ("$Label {0} of {1} creations over {2}ms, budget {3} - creations are waiting out a shell startup  [{4}]" -f $slow, $t.Count, $SlowMs, $SlowBudget, $list)
+    }
     if ($p90 -le $P90LimitMs) {
         Write-Pass ("$Label p90 {0:N0}ms is within {1}ms" -f $p90, $P90LimitMs)
     } else {
-        Write-Fail ("$Label p90 {0:N0}ms exceeds {1}ms - most creations are waiting out a shell startup  [{2}]" -f $p90, $P90LimitMs, $list)
+        Write-Fail ("$Label p90 {0:N0}ms exceeds {1}ms  [{2}]" -f $p90, $P90LimitMs, $list)
     }
     if ($max -le $MaxLimitMs) {
         Write-Pass ("$Label max {0:N0}ms is within {1}ms" -f $max, $MaxLimitMs)
@@ -258,7 +287,7 @@ function Test-Cell {
 Write-Host ""
 Write-Host ("=" * 76)
 Write-Host " Creation latency gate - time to a VISIBLE PROMPT, $Count back to back"
-Write-Host (" p90 budget {0}ms, max budget {1}ms" -f $P90LimitMs, $MaxLimitMs)
+Write-Host (" at most {0} of {1} creations over {2}ms; p90 budget {3}ms, max budget {4}ms" -f $SlowBudget, $Count, $SlowMs, $P90LimitMs, $MaxLimitMs)
 Write-Host ("=" * 76)
 
 Test-Cell -Label "new-window"      -Cmd "new-window"
@@ -276,6 +305,8 @@ try {
         when = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
         count = $Count
         settle_ms = $SettleMs
+        slow_ms = $SlowMs
+        slow_budget = $SlowBudget
         p90_limit_ms = $P90LimitMs
         max_limit_ms = $MaxLimitMs
         poll_ms = $PollMs

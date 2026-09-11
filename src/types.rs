@@ -493,6 +493,14 @@ pub struct WarmPool {
     surge_until: Option<std::time::Instant>,
     /// When the last claim happened, ready or not. Drives surplus trimming.
     last_claim: Option<std::time::Instant>,
+    /// No spare below this pane id may be handed out any more.
+    ///
+    /// A creation that finds the pool empty allocates a fresh id, which is above
+    /// every id the in flight refills already reserved. When those refills land,
+    /// their ids are in the past: handing one out would make the visible sequence
+    /// go backwards, which is what produced `%2 %3 %12 %4`. They are dropped on
+    /// arrival instead.
+    issued_floor: usize,
 }
 
 /// Default depth of the spare shell pool (`warm-pool-size`).
@@ -551,7 +559,7 @@ pub fn default_warm_pool_size() -> usize {
 
 impl WarmPool {
     pub fn new(target: usize) -> Self {
-        Self { spares: VecDeque::new(), target, inflight: 0, surge_until: None, last_claim: None }
+        Self { spares: VecDeque::new(), target, inflight: 0, surge_until: None, last_claim: None, issued_floor: 0 }
     }
     /// Claim the oldest spare whatever its state. Used by the shrink and
     /// teardown paths, which only want the process handle back.
@@ -571,14 +579,6 @@ impl WarmPool {
     /// it is the surge that turns a run of creations from "one shell startup
     /// each" into "one shell startup between them all".
     pub fn claim(&mut self) -> (Option<WarmPane>, bool) {
-        if let Some(wp) = self.take_ready() {
-            return (Some(wp), true);
-        }
-        (self.take(), false)
-    }
-    /// Claim the oldest spare whose shell has finished starting, or `None` when
-    /// none has. Reaps corpses on the way through (#450).
-    pub fn take_ready(&mut self) -> Option<WarmPane> {
         // #450: a spare's shell can die while it idles here. A corpse must
         // never be handed out, and must not sit in the pool occupying a slot
         // that would otherwise be refilled with a working shell.
@@ -587,8 +587,24 @@ impl WarmPool {
         for wp in self.spares.iter_mut() {
             wp.refresh_ready(now);
         }
-        let idx = self.spares.iter().position(|w| w.ready)?;
-        self.spares.remove(idx)
+        // ALWAYS the front, which `push` keeps as the lowest pane id. Two
+        // reasons, and they happen to agree:
+        //
+        //  - Pane ids must be handed out in creation order. A spare's id is
+        //    allocated when it is SPAWNED, because it is planted in the shell's
+        //    environment as TMUX_PANE and a child's environment cannot be
+        //    rewritten later. So the claim order IS the visible id order, and
+        //    anything other than lowest-id-first shows up as shuffled ids.
+        //  - The lowest id is also the earliest spawned, hence the furthest
+        //    through its shell startup, which is the one worth handing over.
+        //
+        // Picking the first READY spare instead looked equivalent and was not:
+        // spares are spawned concurrently, so they neither land nor become
+        // ready in id order. Ten splits in a row came out
+        // %2 %3 %4 %5 %12 %9 %11 %6 %7 %8.
+        let wp = self.spares.pop_front();
+        let was_ready = wp.as_ref().map(|w| w.ready).unwrap_or(false);
+        (wp, was_ready)
     }
     /// How many spares have finished starting. Does not recompute readiness;
     /// call after [`WarmPool::refresh_all`] or a [`WarmPool::claim`].
@@ -674,9 +690,54 @@ impl WarmPool {
         }
         killed
     }
-    /// Return a freshly spawned spare to the pool.
-    pub fn push(&mut self, wp: WarmPane) {
-        self.spares.push_back(wp);
+    /// Return a freshly spawned spare to the pool, keeping the pool sorted by
+    /// pane id.
+    ///
+    /// Sorted, not appended: refills are spawned concurrently, so they finish
+    /// and land in whatever order the OS gets round to them, which is not the
+    /// order their ids were allocated in. Appending would make the front of the
+    /// queue the first spare to LAND rather than the first to have been created,
+    /// and [`WarmPool::claim`] hands out the front. The pool is at most
+    /// [`WARM_POOL_SURGE_MAX`] deep, so the insert is a walk over a handful of
+    /// entries.
+    pub fn push(&mut self, mut wp: WarmPane) {
+        // Its id is already in the past: a creation that found the pool empty
+        // has since taken a higher one. Handing this out would walk the visible
+        // sequence backwards. See `issued_floor`.
+        if wp.pane_id < self.issued_floor {
+            wp.child.kill().ok();
+            return;
+        }
+        let at = self
+            .spares
+            .iter()
+            .position(|w| w.pane_id > wp.pane_id)
+            .unwrap_or(self.spares.len());
+        self.spares.insert(at, wp);
+    }
+    /// Refuse every spare below `id` from now on, and drop the pooled ones.
+    /// Called by a creation that is about to allocate `id` for itself because no
+    /// spare was available. Returns how many pooled spares were discarded.
+    pub fn set_issued_floor(&mut self, id: usize) -> usize {
+        if id <= self.issued_floor {
+            return 0;
+        }
+        self.issued_floor = id;
+        let before = self.spares.len();
+        let floor = id;
+        let mut dropped = VecDeque::new();
+        while let Some(mut wp) = self.spares.pop_front() {
+            if wp.pane_id < floor {
+                wp.child.kill().ok();
+            } else {
+                dropped.push_back(wp);
+            }
+        }
+        self.spares = dropped;
+        before - self.spares.len()
+    }
+    pub fn issued_floor(&self) -> usize {
+        self.issued_floor
     }
     pub fn len(&self) -> usize {
         self.spares.len()
@@ -1359,6 +1420,10 @@ pub struct AppState {
     /// spawn, which blocks the loop for a whole shell startup, and a refill
     /// scheduled after that is a refill scheduled far too late.
     pub warm_refill_tx: Option<std::sync::mpsc::Sender<Option<WarmPane>>>,
+    /// The matching receiver, so a claim that found nothing can wait for a spare
+    /// that is already on its way instead of spawning a further shell. Taken out
+    /// and put back around each use, as `control_rx` is.
+    pub warm_refill_rx: Option<std::sync::mpsc::Receiver<Option<WarmPane>>>,
     /// Plugin .ps1 scripts queued during config loading for post-startup execution.
     /// These need the server to be running (TCP listener) before they can apply.
     pub pending_plugin_scripts: Vec<String>,
@@ -2092,6 +2157,7 @@ impl AppState {
             allow_alternate_screen: true,
             warm_pane: WarmPool::new(default_warm_pool_size()),
             warm_refill_tx: None,
+            warm_refill_rx: None,
             pending_plugin_scripts: Vec::new(),
             control_clients: HashMap::new(),
             session_group: None,

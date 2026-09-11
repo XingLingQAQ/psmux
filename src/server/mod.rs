@@ -890,6 +890,30 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let pty_system = native_pty_system();
 
     let mut app = AppState::new(session_name);
+    // Adopt the palette the last attached client reported in this data root, so
+    // the spares this server is about to pre spawn are born holding it.
+    //
+    // Without this, the first `host-colors` report of every session disagrees
+    // with the pool and retires all of it (#473 follow up: a spare must not hand
+    // a pane a palette the server has disowned, and a child's environment cannot
+    // be rewritten). That lands precisely at attach time, so the user's first
+    // split pays a whole shell startup: measured 18 ms median without the report
+    // against 335 ms with it, worst case 807 ms.
+    //
+    // Only a guess, and deliberately a weak one: an explicit PSMUX_HOST_COLORS
+    // override (already read by `AppState::new`) wins, and a guess that turns out
+    // wrong is corrected by the real report, which retires the spares exactly as
+    // it does today. It is right whenever the user's terminal has not changed
+    // colours since the last session, which is nearly always.
+    if app.host_colors.is_none() {
+        if let Ok(spec) = std::fs::read_to_string(crate::paths::host_colors_file()) {
+            let hc = crate::types::HostColors::from_spec(spec.trim());
+            if hc.has_any() || hc.dark.is_some() {
+                app.host_colors = Some(hc);
+                crate::types::set_shared_host_colors(app.host_colors.clone());
+            }
+        }
+    }
     // Claim a scheduling class before anything else runs (#608). A windowless
     // server never receives the foreground boost Windows reserves for the
     // process owning the active window, so on an oversubscribed box its reader
@@ -1347,6 +1371,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // the pool would believe a spare is forever on its way and never refill.
     let (warm_done_tx, warm_done_rx) = std::sync::mpsc::channel::<Option<crate::types::WarmPane>>();
     app.warm_refill_tx = Some(warm_done_tx);
+    // The receiver lives on `app` too, so a claim that finds the pool empty can
+    // wait for a spare already being spawned instead of starting another shell
+    // (see `pane::await_inflight_spare`). The loop borrows it back each tick.
+    app.warm_refill_rx = Some(warm_done_rx);
     let mut last_warm_trim = Instant::now();
     // A frame this iteration owed to the next one: see `pty_batch_pending`.
     // While it is set the loop does not sleep before producing that frame, so
@@ -1359,28 +1387,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // the end of iteration push.
         let mut pty_batch_pending = false;
         // Land any spares the background spawner finished since the last tick.
-        while let Ok(slot) = warm_done_rx.try_recv() {
-            app.warm_pane.inflight = app.warm_pane.inflight.saturating_sub(1);
-            match slot {
-                Some(mut wp) => {
-                    // A spawn already in flight when the palette changed lands
-                    // here carrying the OLD one, so killing the pool at the
-                    // change is not enough on its own — this is the window the
-                    // background spawner opens. Drop it rather than let the
-                    // next window inherit a palette the server has already
-                    // disowned; the deficit check below asks for another.
-                    if wp.host_colors != app.host_colors {
-                        wp.child.kill().ok();
-                        crate::warm_trace!("pool: dropped a spare that landed with a stale palette, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
-                    } else {
-                        app.warm_pane.push(wp);
-                        crate::warm_trace!("pool: spare landed, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
-                    }
-                }
-                None => {
-                    crate::warm_trace!("pool: refill failed, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
-                }
+        // `pane::land_spare` holds the rules (release the reservation, refuse a
+        // stale palette) because a claim that waits for an in flight spare has
+        // to apply exactly the same ones.
+        if let Some(rx) = app.warm_refill_rx.take() {
+            while let Ok(slot) = rx.try_recv() {
+                crate::pane::land_spare(&mut app, slot);
             }
+            app.warm_refill_rx = Some(rx);
         }
         // Promote spares whose shell has finished starting. This is what makes
         // the pool's depth mean something: a spare lands ~25ms after it is
@@ -2680,6 +2694,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if changed {
                             let sync = crate::warm_pane_sync::for_host_colors_change(&app);
                             crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                            // Remember it for the next server in this data root,
+                            // so its spares are born with this palette and this
+                            // retirement does not happen again. See
+                            // `paths::host_colors_file`.
+                            if let Some(ref hc) = app.host_colors {
+                                let _ = std::fs::write(
+                                    crate::paths::host_colors_file(),
+                                    hc.to_spec(),
+                                );
+                            }
                         }
                     }
                 }

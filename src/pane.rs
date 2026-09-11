@@ -539,7 +539,13 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     let warm_eligible = command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell);
     // A ready spare if there is one, else the oldest warming spare, else
     // nothing and a cold spawn below. See `WarmPool::claim`.
-    let (claimed, was_ready) = if warm_eligible { app.warm_pane.claim() } else { (None, false) };
+    let (mut claimed, mut was_ready) = if warm_eligible { app.warm_pane.claim() } else { (None, false) };
+    if warm_eligible && claimed.is_none() {
+        // Empty, but refills are already on their way. See `await_inflight_spare`.
+        let (c, r) = await_inflight_spare(app, WARM_INFLIGHT_WAIT);
+        claimed = c;
+        was_ready = r;
+    }
     if warm_eligible {
         app.warm_pane.note_claim(was_ready);
         if !was_ready {
@@ -553,6 +559,22 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
         // about to wait out a shell startup either way, and the batch should be
         // booting during that wait rather than after it.
         schedule_warm_refill(app);
+    }
+    if claimed.is_none() {
+        // Nothing to hand over, so the cold path below is about to take
+        // `next_pane_id` for itself. Every id the in flight refills already
+        // reserved is lower than that, so those spares may no longer be handed
+        // out: doing so walked the visible sequence backwards (`%2 %3 %12 %4`).
+        // Retire them now and refuse them on arrival. Applies whether the pool
+        // was empty or the transplant was bypassed outright (a command, `-e`, a
+        // dynamic default-shell).
+        let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
+        if dropped > 0 {
+            crate::warm_trace!(
+                "pool: id floor raised to {}, discarded {} spare(s) whose ids are now in the past",
+                app.next_pane_id, dropped
+            );
+        }
     }
     if let Some(mut wp) = claimed {
         crate::warm_trace!(
@@ -728,6 +750,105 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     let params = warm_spawn_params(app)
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "warm panes disabled"))?;
     spawn_warm_pane_from(pty_system, &params)
+}
+
+/// Take one finished refill off the channel and put it in the pool, or drop it.
+///
+/// Shared by the server loop's drain and by [`await_inflight_spare`], because
+/// both have to apply the same two rules: release the reservation, and refuse a
+/// spare whose palette the server has already disowned. A spawn that was already
+/// in flight when the palette changed lands carrying the OLD palette, and the
+/// palette is planted in the child's environment, so letting it through would
+/// hand the next window colours the server no longer has (#473 follow up).
+pub fn land_spare(app: &mut AppState, slot: Option<crate::types::WarmPane>) {
+    app.warm_pane.inflight = app.warm_pane.inflight.saturating_sub(1);
+    match slot {
+        Some(mut wp) => {
+            if wp.host_colors != app.host_colors {
+                wp.child.kill().ok();
+                crate::warm_trace!(
+                    "pool: dropped a spare that landed with a stale palette, depth={} inflight={}",
+                    app.warm_pane.len(), app.warm_pane.inflight
+                );
+            } else {
+                app.warm_pane.push(wp);
+                crate::warm_trace!(
+                    "pool: spare landed, depth={} inflight={}",
+                    app.warm_pane.len(), app.warm_pane.inflight
+                );
+            }
+        }
+        None => {
+            crate::warm_trace!(
+                "pool: refill failed, depth={} inflight={}",
+                app.warm_pane.len(), app.warm_pane.inflight
+            );
+        }
+    }
+}
+
+/// How long a claim will wait for a spare that is already being spawned before
+/// giving up and spawning its own. A refill posts its spare back in 20 to 37 ms
+/// on this machine, so this is a little over two of those.
+pub const WARM_INFLIGHT_WAIT: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// A claim found nothing, but refills are already in flight. Wait briefly for
+/// the next one to land and use that, instead of spawning a further shell.
+///
+/// Two things make this the right answer rather than a cold spawn.
+///
+/// Ids. A spare's pane id is allocated when it is spawned, because it is planted
+/// in the shell as TMUX_PANE and a child's environment cannot be rewritten. A
+/// cold spawn takes an id above every id the in flight refills reserved, so those
+/// spares can never be handed out afterwards without the visible sequence going
+/// backwards, and retiring up to eight warming shells to keep it monotonic cost
+/// the next creations their spare too (split p90 327 ms, two slow in ten).
+/// Waiting keeps them.
+///
+/// Time. A refill thread posts its spare back as soon as `CreateProcess` returns,
+/// measured at 20 to 37 ms, and the shell inside it is already starting. A cold
+/// spawn costs that same call on the loop thread AND begins its shell startup
+/// from zero. So the wait is never the slower choice.
+///
+/// Bounded: past the budget, the caller cold spawns as before.
+pub fn await_inflight_spare(
+    app: &mut AppState,
+    budget: std::time::Duration,
+) -> (Option<crate::types::WarmPane>, bool) {
+    if app.warm_pane.inflight == 0 {
+        return (None, false);
+    }
+    // Taken out and put back, as the plugin drain does with `control_rx`: the
+    // receiver cannot be borrowed from `app` while `app` is also being mutated.
+    let Some(rx) = app.warm_refill_rx.take() else { return (None, false) };
+    let deadline = std::time::Instant::now() + budget;
+    let mut out = (None, false);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(left) {
+            Ok(slot) => {
+                land_spare(app, slot);
+                let got = app.warm_pane.claim();
+                if got.0.is_some() {
+                    crate::warm_trace!(
+                        "claim: waited {:.1}ms for an in flight spare instead of cold spawning",
+                        budget.saturating_sub(deadline.saturating_duration_since(std::time::Instant::now())).as_micros() as f64 / 1000.0
+                    );
+                    out = got;
+                    break;
+                }
+                if app.warm_pane.inflight == 0 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    app.warm_refill_rx = Some(rx);
+    out
 }
 
 /// Bring the spare pool up to its effective target, spawning each missing
@@ -1064,7 +1185,13 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     let warm_eligible = command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell);
     // A ready spare if there is one, else the oldest warming spare, else
     // nothing and a cold spawn below. See `WarmPool::claim`.
-    let (claimed, was_ready) = if warm_eligible { app.warm_pane.claim() } else { (None, false) };
+    let (mut claimed, mut was_ready) = if warm_eligible { app.warm_pane.claim() } else { (None, false) };
+    if warm_eligible && claimed.is_none() {
+        // Empty, but refills are already on their way. See `await_inflight_spare`.
+        let (c, r) = await_inflight_spare(app, WARM_INFLIGHT_WAIT);
+        claimed = c;
+        was_ready = r;
+    }
     if warm_eligible {
         app.warm_pane.note_claim(was_ready);
         if !was_ready {
@@ -1075,6 +1202,19 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
             );
         }
         schedule_warm_refill(app);
+    }
+    if claimed.is_none() {
+        // Cold path below: see the matching comment in `create_window_with_env`.
+        // Applies whether the pool was empty or the transplant was bypassed
+        // outright (a command, `-e`, a dynamic default-shell); either way this
+        // pane takes an id above every reserved one.
+        let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
+        if dropped > 0 {
+            crate::warm_trace!(
+                "pool: id floor raised to {}, discarded {} spare(s) whose ids are now in the past",
+                app.next_pane_id, dropped
+            );
+        }
     }
     if let Some(mut wp) = claimed {
         crate::warm_trace!(

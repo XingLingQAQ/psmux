@@ -12,7 +12,62 @@
 //! and refuses to leave part way through a sequence.  These tests cover the two
 //! pure helpers that decide when leaving is safe.
 
-use crate::platform::{ends_mid_sequence, find_csi_terminated};
+use crate::platform::{ends_mid_sequence, find_csi_terminated, settle_window};
+
+// ─── settle_window: only the VT input path waits ────────────────────────────
+
+#[test]
+fn the_vt_input_path_waits_for_the_replies_still_in_flight() {
+    // WezTerm, JediTerm, SSH: DA1 measured arriving before the colour replies.
+    assert_eq!(settle_window(true), std::time::Duration::from_millis(75));
+}
+
+#[test]
+fn hosts_that_answer_da1_last_do_not_wait_at_all() {
+    // conhost holds 36 bytes when it leaves, Windows Terminal 511, both with an
+    // empty queue: nothing is in flight, so the window would be pure startup
+    // cost on the two hosts that never had the bug.
+    assert_eq!(settle_window(false), std::time::Duration::ZERO);
+}
+
+#[test]
+fn a_zero_settle_still_demands_the_sentinel_and_a_clean_boundary() {
+    // The gate shortens the wait; it must not weaken either guard.  This is the
+    // condition the drain evaluates on every idle poll, with settle = 0.
+    let may_leave = |b: &[u8]| {
+        let settled = std::time::Duration::ZERO >= settle_window(false);
+        settled && find_csi_terminated(b, b'c') && !ends_mid_sequence(b)
+    };
+    // No sentinel yet: keep reading even with no window.
+    assert!(!may_leave(b"\x1b]4;0;rgb:5555/5555/5555\x1b\\"));
+    // Sentinel in and the buffer clean: leave at once, as before the fix.
+    assert!(may_leave(b"\x1b[?61;1;6;7;21;22;23;24;28;32;42;52c"));
+    // Sentinel in but a reply half read: the unconditional guard still holds.
+    assert!(!may_leave(b"\x1b[?61;1;6;7;21;22;23;24;28;32;42;52c\x1b]4;8;rgb:5555/5555/5"));
+}
+
+#[test]
+fn the_windows_terminal_shape_leaves_immediately_and_keeps_its_palette() {
+    // WT answers the colour replies first and DA1 last, so by the time the
+    // sentinel lands the buffer already holds everything and ends at a
+    // boundary: zero window, nothing dropped.
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(b"\x1b]10;rgb:f2f2/f2f2/f2f2\x1b\\");
+    buf.extend_from_slice(b"\x1b]11;rgb:0c0c/0c0c/0c0c\x1b\\");
+    for i in 0..16 {
+        buf.extend_from_slice(format!("\x1b]4;{};rgb:f2f2/f2f2/f2f2\x1b\\", i).as_bytes());
+    }
+    buf.extend_from_slice(b"\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c");
+
+    assert_eq!(settle_window(false), std::time::Duration::ZERO);
+    assert!(find_csi_terminated(&buf, b'c'));
+    assert!(!ends_mid_sequence(&buf));
+
+    let hc = crate::platform::parse_host_color_replies(&buf);
+    assert_eq!(hc.fg, Some((0xf2, 0xf2, 0xf2)));
+    assert_eq!(hc.bg, Some((0x0c, 0x0c, 0x0c)));
+    assert!(hc.palette.iter().all(|s| s.is_some()));
+}
 
 // ─── ends_mid_sequence: the "never leave holding half a reply" guard ─────────
 

@@ -558,7 +558,7 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         // and the fragment landed in that queue 26ms to 40ms later.
         //
         // So once the sentinel is in, keep reading until the console input has
-        // stayed quiet for QUIET_SETTLE, and keep what arrives rather than
+        // stayed quiet for the settle window, and keep what arrives rather than
         // discard it: a reply that was merely late is still a reply, and
         // parsing it can only make the palette more complete.  (Under WezTerm
         // it does not: conhost eats all eighteen replies and hands over only the
@@ -571,13 +571,10 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         // still bounds everything, so a host that chatters cannot hold startup
         // up.
         //
-        // 75ms, not the 30ms the report proposed: the DA1 reply lands within
-        // 2ms, so a 30ms window closes at ~31ms and still lost the race to the
-        // 26ms to 40ms arrivals about half the time (measured 2 of 5, then 3 of
-        // 8).  75ms clears the slowest arrival seen in 24 starts by 35ms, and is
-        // the whole added cost of the drain: it returned in 0ms before and
-        // returns in 75ms to 116ms now.
-        const QUIET_SETTLE: std::time::Duration = std::time::Duration::from_millis(75);
+        // `settle_window` decides how long, and only hosts on the VT input path
+        // wait at all.  `ends_mid_sequence` below is unconditional: refusing to
+        // hand back a half read reply costs nothing on any path.
+        let settle = settle_window(crate::ssh_input::needs_vt_input());
         let mut sentinel = false;
         let mut last_input = std::time::Instant::now();
         while std::time::Instant::now() < deadline {
@@ -586,8 +583,9 @@ fn query_host_terminal_colors_impl() -> Option<String> {
             if avail == 0 {
                 // Leave only from a settled queue, and never part way through a
                 // sequence: half a reply left behind is the exact tear this
-                // guards against.
-                if sentinel && last_input.elapsed() >= QUIET_SETTLE && !ends_mid_sequence(&buf) {
+                // guards against.  With a zero settle this is the first idle
+                // poll after the sentinel, which is where the old code stopped.
+                if sentinel && last_input.elapsed() >= settle && !ends_mid_sequence(&buf) {
                     break;
                 }
                 let idle = if sentinel { 2 } else { 5 };
@@ -620,6 +618,49 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         } else {
             None
         }
+    }
+}
+
+/// How long the colour drain keeps reading after the DA1 sentinel lands, for a
+/// client whose host terminal is (or is not) on the VT input path (issue #646).
+///
+/// The window exists because the sentinel proves the host *answered*, not that
+/// it has *finished* answering.  Only a host that answers DA1 FIRST leaves
+/// replies in flight behind it, and only those hosts should pay for the wait.
+/// Measured, 5 starts each: the drain's own duration, and `buf_len`, how much it
+/// was holding when it left.
+///
+/// ```text
+///   host              buf_len  no window   always    gated
+///   conhost                36       0ms      76ms      0ms
+///   Windows Terminal      511       5ms   76-82ms    5-6ms
+///   WezTerm                28       0ms  75-117ms  76-113ms
+/// ```
+///
+/// `buf_len` is the whole argument.  Windows Terminal hands over all 511 bytes
+/// with an empty queue behind them, ending
+/// `...f2/f2f2<ESC>\<ESC>[?61;4;...;52c`: its colour replies arrive FIRST and
+/// DA1 last, so nothing is in flight and waiting prevents nothing.  conhost
+/// answers DA1 and nothing else, ever.  Only WezTerm leaves holding 28 bytes,
+/// the sentinel alone, while sixteen replies are still coming.  So an
+/// unconditional window would add ~76ms to every attached start on the two
+/// hosts that never had the bug, and startup time is a first class metric here.
+///
+/// `needs_vt_input()` is exactly the population where DA1 was measured arriving
+/// first: WezTerm (via `TERM_PROGRAM` / `WEZTERM_PANE`), JediTerm, SSH.  Should
+/// another host turn out to answer DA1 first, widen this on a measurement of
+/// that host, not on a hunch.
+///
+/// 75ms, not the 30ms the report proposed: the DA1 reply lands within 2ms, so a
+/// 30ms window closes at ~31ms and still lost the race to the 26ms to 40ms
+/// arrivals about half the time (measured 2 of 5, then 3 of 8).  75ms clears the
+/// slowest arrival seen in 24 starts by 35ms.
+#[cfg(windows)]
+pub(crate) fn settle_window(vt_input_path: bool) -> std::time::Duration {
+    if vt_input_path {
+        std::time::Duration::from_millis(75)
+    } else {
+        std::time::Duration::ZERO
     }
 }
 

@@ -125,6 +125,24 @@ BEL characters (`\x07`) from programs are forwarded to your host terminal for au
 
 `select-pane -T ""` correctly clears a pane title. The default pane title is the hostname, matching tmux convention. Programs can update the pane title via OSC 0/2 escape sequences (controlled by the `allow-set-title` option). See [pane-titles.md](pane-titles.md) for details on how this interacts with PowerShell and other shells.
 
+### `pane_current_command` and Program Titles on Windows
+
+On Linux, tmux reads the controlling terminal's foreground process group, so a program that sets its own process title (Node's `process.title`, for instance) shows that title in `#{pane_current_command}`. Windows has no equivalent. ConPTY has no `tcgetpgrp`, `Win32_Process.Name` reports the image name, and a console process has no main window title, so a program modified title is invisible to every process enumeration API. psmux therefore reports the **executable of the pane's immediate child**, which is stable and cheap but is not a service identity (#647).
+
+The logical name is still reachable, through a different variable. A Windows program that names itself calls `SetConsoleTitleW`, which is what `process.title` does under the hood; ConPTY turns that into an OSC title on the pane's output stream, and psmux stores it as the pane title. Turn on `allow-set-title`, which is off by default:
+
+```powershell
+psmux set-option -g allow-set-title on
+psmux list-panes -t gateway -F '#{pane_id}|#{pane_current_command}|#{pane_title}'
+# %1|node|openclaw-gateway
+```
+
+That is the same string tmux would put in `pane_current_command` on Linux. It is valid only while the program that set it owns the console: an interactive shell rewrites the title on every prompt, so an idle PowerShell pane reports its working directory rather than any service name.
+
+`#{pane_start_command}` is the third piece: it records the command psmux was asked to run, so nothing the program does to itself can change it. It is empty for a pane that got the default shell, including the first pane of a plain `new-session`, so a supervisor relying on it must create its pane with an explicit command.
+
+To identify a service, combine a controller chosen window or pane name addressed by stable id, `#{pane_start_command}`, pane liveness (`#{pane_dead}` and `#{pane_pid}`), and a health check outside psmux such as a port probe. Treat `#{pane_title}` as a further signal once `allow-set-title` is on, and `#{pane_current_command}` as a coarse filter only. See [integration.md](integration.md#identifying-the-program-running-in-a-pane) for the full recipe.
+
 ### Multi-line Status Bar
 
 `set -g status 2` enables a multi-line status bar with `status-format[0]` and `status-format[1]` fully rendering style directives like `#[fg=red]`, `#[align=left]`, and `#[fill=blue]`. Mouse clicks are hit tested on every status row, not only the first, and `#[range=window|N]` regions on any row switch to window index `N` (#593), so a window list placed on the second line is clickable.

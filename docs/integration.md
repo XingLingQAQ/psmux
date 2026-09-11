@@ -399,7 +399,9 @@ row per object. The full catalogue, including the human facing status bar variab
 | `#{window_flags}` | `*` | Rendered window flag string |
 | `#{pane_pid}` | `32944` | PID of the pane's shell, for process tree work |
 | `#{pane_tty}` | `/dev/pty1` | Pseudo terminal name |
-| `#{pane_current_command}` | `pwsh` | Foreground process name |
+| `#{pane_current_command}` | `pwsh` | Executable name of the pane's immediate child. Never a program modified process title on Windows, see "Identifying the Program Running in a Pane" below |
+| `#{pane_title}` | `openclaw-gateway` | Console title of the pane, which is where a Windows program's logical name surfaces. Requires `allow-set-title on` |
+| `#{pane_start_command}` | `node server.mjs` | The command psmux was asked to run in the pane, empty when the pane got the default shell |
 | `#{pane_current_path}` | `C:\Projects\app` | Working directory, in native Windows form. Read from the foreground process. Inside `wsl` or `ssh` there is no Windows process that knows the answer, so it uses the directory the shell announced over `OSC 7` or `OSC 9;9` and keeps the last observed one when the shell announces nothing. See the WSL entry in [the FAQ](faq.md) |
 | `#{pane_path}` | `/mnt/c/Users` | Exactly what the shell announced over `OSC 7` or `OSC 9;9`, untranslated, or empty when it announced nothing |
 | `#{pane_dead}` | `0` | `1` when the process exited and `remain-on-exit` kept the pane |
@@ -439,6 +441,67 @@ psmux display-message -p "#{mouse}"            # on
 psmux display-message -p "#{history-limit}"    # 2000
 psmux display-message -p "#{@my-tool-state}"   # a bare @name is a user option
 ```
+
+### Identifying the Program Running in a Pane
+
+Three variables answer three different questions, and a supervisor that treats any one of them as
+a service identity will eventually be wrong. This came out of a gateway automation report
+([#647](https://github.com/psmux/psmux/issues/647)).
+
+**`#{pane_current_command}` is an executable name.** It reports the image of the pane's immediate
+child, so a pane running `node server.mjs` reports `node` and returns to `pwsh` the moment that
+process exits. It is stable and cheap to poll. It can never reflect a program modified process
+title on Windows: `process.title` in Node, or the equivalent in any runtime, changes nothing that
+the process tree exposes. `Win32_Process.Name` stays the image name, a console process has no
+main window title, and ConPTY has no `tcgetpgrp` equivalent that would identify a foreground
+process group. On Linux, tmux reads the controlling terminal's foreground process group and
+therefore does show the modified title there; that difference is a platform limit, not a psmux
+choice.
+
+**`#{pane_title}` is the console title, and this is where the logical name actually appears.** A
+Windows program that names itself calls `SetConsoleTitleW`, which is exactly what Node's
+`process.title` setter does. ConPTY turns that call into an OSC title on the pane's output
+stream, and psmux parses it into the pane title. The pane title is only updated when
+`allow-set-title` is on, which is not the default:
+
+```powershell
+psmux set-option -g allow-set-title on
+psmux list-panes -t gateway -F '#{pane_id}|#{pane_current_command}|#{pane_title}'
+# %1|node|openclaw-gateway
+```
+
+The value is valid only while the program that set it owns the console. An interactive shell
+rewrites the title constantly: PowerShell sets it to the working directory on every prompt, so
+the title of an idle shell pane tells you nothing about any service. It is trustworthy for a
+long running foreground process and not for a prompt. See [pane-titles.md](pane-titles.md) for
+the wider consequences of turning `allow-set-title` on, including its effect on the status bar.
+
+**`#{pane_start_command}` is the command psmux was asked to run.** It records what was passed at
+pane creation, so it survives the process exiting and is not affected by anything the program
+does to itself. It is **empty** for a pane that was given the default shell, which includes the
+first pane of a plain `new-session`, so a supervisor that relies on it must start its service
+pane with an explicit command:
+
+```powershell
+psmux new-window -d -t gateway: -n api -- node server.mjs --port 18789
+psmux display-message -p -t gateway:api '#{pane_start_command}'
+# node server.mjs --port 18789
+```
+
+**Recommended recipe for identifying a service.** No single variable is sufficient. Combine four
+signals, in roughly this order of reliability:
+
+1. A dedicated window or pane name that your controller chose, addressed by the stable
+   `#{window_id}` or `#{pane_id}` so a rename cannot break the link.
+2. `#{pane_start_command}`, which is what you asked for and cannot drift.
+3. Pane liveness, `#{pane_dead}` plus `#{pane_pid}`, to tell a running service from a pane that
+   `remain-on-exit` is holding open.
+4. A real health check that does not involve psmux at all, such as connecting to the port the
+   service is supposed to be listening on.
+
+`#{pane_title}` is a useful fifth signal once `allow-set-title` is on, and `#{pane_current_command}`
+is a reasonable coarse filter, for example to tell a `node` pane from a `pwsh` one. Neither
+should be the thing your controller keys on.
 
 ### Accepted but not yet meaningful
 

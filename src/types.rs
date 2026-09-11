@@ -410,6 +410,18 @@ pub struct WarmPane {
     /// Trace bookkeeping (`PSMUX_WARM_TRACE=1`): whether the "spare became
     /// ready" line has already been emitted for this spare.
     pub trace_settled: bool,
+    /// The host terminal palette this spare's shell was spawned with, planted
+    /// on it as `PSMUX_HOST_COLORS` (`pane::set_host_colors_env`).
+    ///
+    /// A child's environment block cannot be changed from outside once it is
+    /// running, so this is not bookkeeping — it is the palette this spare will
+    /// hand to whatever process it is transplanted into, for the rest of that
+    /// pane's life. The server usually learns its real palette only when a
+    /// client attaches and reports it, which is after the pool has been
+    /// filled, so a spare can easily be holding a palette the server no longer
+    /// believes. Recorded here so such a spare can be retired instead of
+    /// transplanted (see `warm_pane_sync::for_host_colors_change`).
+    pub host_colors: Option<HostColors>,
 }
 
 /// How long a spare's output has to stay unchanged before its shell counts as

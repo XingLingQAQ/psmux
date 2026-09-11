@@ -1353,9 +1353,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         while let Ok(slot) = warm_done_rx.try_recv() {
             app.warm_pane.inflight = app.warm_pane.inflight.saturating_sub(1);
             match slot {
-                Some(wp) => {
-                    app.warm_pane.push(wp);
-                    crate::warm_trace!("pool: spare landed, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
+                Some(mut wp) => {
+                    // A spawn already in flight when the palette changed lands
+                    // here carrying the OLD one, so killing the pool at the
+                    // change is not enough on its own — this is the window the
+                    // background spawner opens. Drop it rather than let the
+                    // next window inherit a palette the server has already
+                    // disowned; the deficit check below asks for another.
+                    if wp.host_colors != app.host_colors {
+                        wp.child.kill().ok();
+                        crate::warm_trace!("pool: dropped a spare that landed with a stale palette, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
+                    } else {
+                        app.warm_pane.push(wp);
+                        crate::warm_trace!("pool: spare landed, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
+                    }
                 }
                 None => {
                     crate::warm_trace!("pool: refill failed, depth={} inflight={}", app.warm_pane.len(), app.warm_pane.inflight);
@@ -2632,10 +2643,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // is what the user is actually looking at.
                     let hc = crate::types::HostColors::from_spec(&spec);
                     if hc.has_any() || hc.dark.is_some() {
+                        let changed = app.host_colors.as_ref() != Some(&hc);
                         app.host_colors = Some(hc);
                         // Issue #556: pane reader threads answer color queries
                         // synchronously; publish the update where they can see it.
                         crate::types::set_shared_host_colors(app.host_colors.clone());
+                        // The palette is also planted on every pane child as
+                        // PSMUX_HOST_COLORS at spawn time, so the spares already
+                        // sitting in the warm pool are now holding the wrong one
+                        // (usually none at all: this report is how the server
+                        // learns its colours in the first place). A child's
+                        // environment cannot be rewritten from outside, so the
+                        // only honest answer is to retire them.
+                        if changed {
+                            let sync = crate::warm_pane_sync::for_host_colors_change(&app);
+                            crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                        }
                     }
                 }
                 CtrlReq::FocusPaneCmd(pid) => {

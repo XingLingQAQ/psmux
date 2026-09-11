@@ -400,6 +400,7 @@ fn fake_spare(pane_id: usize) -> crate::types::WarmPane {
         last_dv: 0,
         last_change: now,
         trace_settled: false,
+        host_colors: None,
     }
 }
 

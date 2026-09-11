@@ -14,6 +14,10 @@
 //!   * `set-option default-terminal` updated `app.environment["TERM"]`
 //!     but the warm pane kept the old TERM forever.
 //!   * `set-option history-limit` was not propagated at all (#271).
+//!   * the host terminal palette (`PSMUX_HOST_COLORS`, planted on the child at
+//!     spawn time) was never registered here at all, so a spare spawned before
+//!     a client reported its colours kept an empty palette and handed it to the
+//!     first window created afterwards.
 //!
 //! This module is the only place that decides what to do, and the
 //! only place that mutates `app.warm_pane`.
@@ -122,6 +126,33 @@ pub fn for_resize(app: &AppState, new_rows: u16, new_cols: u16) -> WarmPaneSync 
         WarmPaneSync::Noop
     } else {
         WarmPaneSync::Respawn("client resized")
+    }
+}
+
+/// The host terminal's palette reached the server (a client attached and
+/// reported it, or the report changed), so every spare whose shell was spawned
+/// with a different palette is stale.
+///
+/// `PSMUX_HOST_COLORS` is planted into a pane child's environment at SPAWN time
+/// by `pane::set_host_colors_env`, and an environment block cannot be edited
+/// from outside a running process.  A spare therefore carries whatever the
+/// server knew when that spare was spawned, forever.  That is normally NOTHING:
+/// a server learns its palette from the first client's `CtrlReq::HostColors`,
+/// which arrives after the pool has already been filled — and for a claimed
+/// `__warm__` standby the pool was filled by the standby, before it had a
+/// session at all.  Transplanting one of those spares hands the new pane's
+/// shell an empty palette while the server is busy answering OSC 10/11 with the
+/// real one, which is how a nested psmux client in a fresh window lost its
+/// parent's fg/bg.
+///
+/// Same shape as [`for_resize`]: an already-correct pool needs nothing, and an
+/// empty pool still wants the refill to happen with the new palette, which
+/// `Respawn` arranges.
+pub fn for_host_colors_change(app: &AppState) -> WarmPaneSync {
+    if app.warm_pane.iter().all(|wp| wp.host_colors == app.host_colors) {
+        WarmPaneSync::Noop
+    } else {
+        WarmPaneSync::Respawn("host colors changed")
     }
 }
 

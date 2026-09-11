@@ -19,7 +19,11 @@
 #   E: Win32 TUI visual verification on a real visible window
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
+# PSMUX_TEST_EXE lets an A/B run point the whole suite at one specific build
+# (same contract as tests/test_issue626_border_attrs_default.ps1), which is the
+# only way to tell a real regression from a stale install.
+$PSMUX = $env:PSMUX_TEST_EXE
+if (-not $PSMUX) { $PSMUX = (Get-Command psmux -EA Stop).Source }
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $script:TestsPassed = 0
 $script:TestsFailed = 0

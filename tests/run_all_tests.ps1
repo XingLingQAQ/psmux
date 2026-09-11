@@ -1,4 +1,4 @@
-# psmux Comprehensive Test Runner
+﻿# psmux Comprehensive Test Runner
 # Runs ALL test suites sequentially with proper cleanup, captures results,
 # and produces a full report including performance metrics.
 #
@@ -292,6 +292,388 @@ public static class PsmuxTestJob {
 }
 '@ -ErrorAction SilentlyContinue
 
+# ── Desktop hygiene: console windows a suite leaves behind ───────────────────
+#
+# THE FAILURE THIS EXISTS FOR
+# After three full sweeps the desktop held about 33 Windows Terminal windows,
+# most with six dead tabs each, hosting 121 processes whose command line was
+# exactly `C:\WINDOWS\system32\cmd.exe /c pause`, every one of them parked at
+# "Press any key to continue", plus the launcher windows sitting at their own
+# final pause. On Windows 11 every new console is delegated to Windows Terminal,
+# so each of those is a visible tab or window a human has to click away.
+#
+# They are not descendants of any suite: the runner puts each suite in a Job
+# Object with KILL_ON_JOB_CLOSE, and the job kill had already run. Anything
+# created outside that job (a process that breaks away, or one whose PTY host
+# died and left the child orphaned on a real console) survives it. The root
+# cause of that particular batch was traced to a Rust test helper that spawned
+# `cmd.exe /c pause` dummies under a pseudoconsole and relied on the PTY master
+# drop to end them, which it does not, but the runner must not depend on knowing
+# the culprit: ANY suite that leaks a console window is a defect, and the run has
+# to say which suite did it rather than leaving a pile of anonymous dead tabs.
+#
+# SO THE RULE IS: a suite may open windows, but it must close them. After each
+# suite the runner diffs the desktop against a snapshot taken before it, logs
+# what is new with its parent chain, ends it, and closes the window.
+#
+# WHY A PROCESS SNAPSHOT *AND* A WINDOW SNAPSHOT
+# A Windows Terminal window hosts many tabs and exposes ONE window handle, so a
+# handle cannot be mapped back to the tab's process. The process snapshot is what
+# catches the carrier; the window snapshot is what catches a window whose process
+# is already gone (a dead tab) and proves the desktop is actually back to
+# baseline. Neither alone is sufficient.
+#
+# WHAT IS NEVER TOUCHED
+#   - every pid in this runner's own ancestry, and the pid that owns this
+#     console's window (killing that is how a sweep used to take down the
+#     terminal it was launched from),
+#   - every window handle that already existed when the run started,
+#   - any window whose title matches $script:AuditProtectTitles, and any handle
+#     listed in PSMUX_AUDIT_PROTECT_HWND (a comma separated list), which is how a
+#     caller pins the window its own session lives in,
+#   - WindowsTerminal.exe is never killed as a process. It hosts tabs that are
+#     not ours; its windows are closed politely instead.
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class PsmuxWinAudit {
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder sb, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder sb, int n);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+
+    const uint WM_CLOSE = 0x0010;
+
+    public class Win {
+        public long Handle;
+        public int  Pid;
+        public string Class;
+        public string Title;
+    }
+
+    // Visible top level console hosts only. CASCADIA_HOSTING_WINDOW_CLASS is a
+    // Windows Terminal window (what a delegated console becomes on Windows 11);
+    // ConsoleWindowClass is a classic conhost window (what you still get when
+    // defterm delegation does not apply, for example for an elevated child).
+    public static List<Win> List() {
+        var res = new List<Win>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) { return true; }
+            var cn = new StringBuilder(256);
+            GetClassNameW(h, cn, cn.Capacity);
+            string c = cn.ToString();
+            if (c != "CASCADIA_HOSTING_WINDOW_CLASS" && c != "ConsoleWindowClass") { return true; }
+            var tb = new StringBuilder(512);
+            GetWindowTextW(h, tb, tb.Capacity);
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            res.Add(new Win { Handle = h.ToInt64(), Pid = (int)pid, Class = c, Title = tb.ToString() });
+            return true;
+        }, IntPtr.Zero);
+        return res;
+    }
+
+    // PostMessage, not SendMessage: a window whose owning process is wedged (or
+    // already gone, leaving a zombie tab) would block a synchronous send for ever
+    // and hang the runner between suites.
+    public static bool Close(long handle) {
+        IntPtr h = new IntPtr(handle);
+        if (!IsWindow(h)) { return false; }
+        return PostMessageW(h, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    public static bool Alive(long handle) {
+        IntPtr h = new IntPtr(handle);
+        return IsWindow(h) && IsWindowVisible(h);
+    }
+
+    // NOT sufficient on its own to identify the runner's own window, see
+    // FindByTitle. Kept because it is the right answer for a classic conhost.
+    public static long OwnConsoleWindow() { return GetConsoleWindow().ToInt64(); }
+
+    public static int OwnerPid(long handle) {
+        uint pid;
+        GetWindowThreadProcessId(new IntPtr(handle), out pid);
+        return (int)pid;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetConsoleTitleW(string title);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetConsoleTitleW(StringBuilder buf, uint size);
+
+    public static bool SetTitle(string t) { return SetConsoleTitleW(t); }
+    public static string GetTitle() {
+        var sb = new StringBuilder(1024);
+        GetConsoleTitleW(sb, (uint)sb.Capacity);
+        return sb.ToString();
+    }
+
+    // Find the visible console host window(s) whose title carries a marker.
+    //
+    // WHY THIS EXISTS RATHER THAN JUST GetConsoleWindow()
+    // On Windows 11 a console is delegated to Windows Terminal, and
+    // GetConsoleWindow() then returns the handle of the INVISIBLE pseudoconsole
+    // host window, not the visible CASCADIA_HOSTING_WINDOW_CLASS window the human
+    // sees. Pinning that handle protects nothing. Pid does not help either: one
+    // WindowsTerminal.exe owns many windows, so the runner's own window and a
+    // window a suite leaked can share an owner pid (observed: both were pid
+    // 13928). The only thing that distinguishes them is the title, and the title
+    // is something the runner can set itself, which turns a guess into an
+    // identity: stamp a unique marker with SetConsoleTitle, then find the window
+    // that is showing it.
+    public static List<long> FindByTitle(string marker) {
+        var res = new List<long>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) { return true; }
+            var cn = new StringBuilder(256);
+            GetClassNameW(h, cn, cn.Capacity);
+            string c = cn.ToString();
+            if (c != "CASCADIA_HOSTING_WINDOW_CLASS" && c != "ConsoleWindowClass") { return true; }
+            var tb = new StringBuilder(512);
+            GetWindowTextW(h, tb, tb.Capacity);
+            if (tb.ToString().IndexOf(marker, StringComparison.Ordinal) >= 0) { res.Add(h.ToInt64()); }
+            return true;
+        }, IntPtr.Zero);
+        return res;
+    }
+}
+'@ -ErrorAction SilentlyContinue
+
+# Titles that are never closed no matter what. The first is the convention for
+# the window a human (or an agent session) is working in; the second is this
+# runner's own launcher window, which legitimately lives through the whole run.
+$script:AuditProtectTitles = @('Shell prompt loading performance', 'psmux FULL test suite')
+
+$script:AuditProtectHwnd = @{}
+if ($env:PSMUX_AUDIT_PROTECT_HWND) {
+    foreach ($tok in ($env:PSMUX_AUDIT_PROTECT_HWND -split '[,; ]+')) {
+        $v = 0L
+        if ([long]::TryParse($tok.Trim(), [ref]$v) -and $v -ne 0) { $script:AuditProtectHwnd[$v] = $true }
+    }
+}
+
+# Every pid from this process up to the session root, plus whoever owns this
+# console's window. An earlier cleanup in this repo killed the Windows Terminal
+# tab that was hosting the session doing the cleaning; walking our own ancestry
+# once, up front, is what makes that impossible here.
+$script:AuditOwnPids = @{}
+try {
+    $cur = $PID
+    for ($i = 0; $i -lt 16 -and $cur -gt 0; $i++) {
+        if ($script:AuditOwnPids.ContainsKey($cur)) { break }
+        $script:AuditOwnPids[$cur] = $true
+        $ci = Get-CimInstance -Query "SELECT ParentProcessId FROM Win32_Process WHERE ProcessId=$cur" -ErrorAction SilentlyContinue
+        if (-not $ci) { break }
+        $cur = [int]$ci.ParentProcessId
+    }
+} catch { }
+try {
+    $ownWin = [PsmuxWinAudit]::OwnConsoleWindow()
+    if ($ownWin -ne 0) {
+        $script:AuditProtectHwnd[$ownWin] = $true
+        $op = [PsmuxWinAudit]::OwnerPid($ownWin)
+        if ($op -gt 0) { $script:AuditOwnPids[$op] = $true }
+    }
+} catch { }
+
+# Images that can own a console window, or be the thing parked inside one.
+# WindowsTerminal.exe is in the snapshot so a NEW terminal window is noticed, but
+# it is on the never-kill list below.
+$script:AuditImageFilter = "Name='cmd.exe' OR Name='conhost.exe' OR Name='OpenConsole.exe' OR Name='pwsh.exe' OR Name='powershell.exe' OR Name='WindowsTerminal.exe'"
+$script:AuditNeverKill = @('WindowsTerminal.exe')
+
+$script:AuditBaselineWins = @{}
+$script:AuditTotalLeftovers = 0
+$script:AuditSuitesWithLeftovers = 0
+$script:AuditLog = Join-Path $script:RunDir "leftovers.log"
+
+function New-AuditSnapshot {
+    $procs = @{}
+    try {
+        foreach ($p in (Get-CimInstance -Query "SELECT ProcessId FROM Win32_Process WHERE $script:AuditImageFilter" -ErrorAction SilentlyContinue)) {
+            $procs[[int]$p.ProcessId] = $true
+        }
+    } catch { }
+    $wins = @{}
+    try { foreach ($w in [PsmuxWinAudit]::List()) { $wins[$w.Handle] = $w.Title } } catch { }
+    return @{ Procs = $procs; Wins = $wins }
+}
+
+function Test-AuditWindowProtected {
+    param($W)
+    if ($script:AuditProtectHwnd.ContainsKey([long]$W.Handle)) { return $true }
+    if ($script:AuditBaselineWins.ContainsKey([long]$W.Handle)) { return $true }
+    foreach ($t in $script:AuditProtectTitles) {
+        if ($W.Title -and $W.Title.Contains($t)) { return $true }
+    }
+    return $false
+}
+
+# Windows Terminal refuses to close a window with several tabs without asking
+# first ("Do you want to close all tabs?"). That dialog is a XAML popup with no
+# window handle of its own to post to, so the only way past it is the accessibility
+# tree: the confirm button has AutomationId PrimaryButton and Name "Close all".
+function Invoke-WtCloseAllDialog {
+    param([int]$OwnerPid)
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    } catch { return $false }
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::RootElement
+        $byPid = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $OwnerPid)
+        $wins = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $byPid)
+        foreach ($w in $wins) {
+            $byId = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PrimaryButton')
+            $btns = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byId)
+            foreach ($b in $btns) {
+                if ($b.Current.Name -match 'Close all') {
+                    $pat = $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                    $pat.Invoke()
+                    return $true
+                }
+            }
+        }
+    } catch { }
+    return $false
+}
+
+function Write-AuditLine {
+    param([string]$Line)
+    Write-Log $Line
+    [System.IO.File]::AppendAllText($script:AuditLog, "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')] $Line`r`n")
+}
+
+# Diff the desktop against $Before, attribute what is new to $Suite, end it and
+# close its window. Returns the number of leftovers found (0 when clean).
+#
+# Called AFTER the suite has exited and after its job object was torn down, which
+# is deliberately after the suite's own cleanup: suites such as
+# test_perf_vs_terminals legitimately open Windows Terminal, WezTerm and
+# Alacritty windows and audit/close them themselves, and this must only ever
+# report what is STILL there once they are done.
+function Invoke-LeftoverAudit {
+    param([string]$Suite, $Before, [datetime]$SuiteStart)
+
+    if (-not $Before) { return 0 }
+    # Let windows the suite itself closed finish going away, so its own cleanup is
+    # never miscounted as a leak.
+    Start-Sleep -Milliseconds 600
+
+    $found = 0
+
+    # Which handles are new? Their owning pids are the candidates that hold a
+    # visible console, including ones whose command line looks innocent.
+    $newWinPids = @{}
+    $newWins = @()
+    try {
+        foreach ($w in [PsmuxWinAudit]::List()) {
+            if ($Before.Wins.ContainsKey([long]$w.Handle)) { continue }
+            if (Test-AuditWindowProtected $w) { continue }
+            $newWins += $w
+            $newWinPids[[int]$w.Pid] = $true
+        }
+    } catch { }
+
+    # ── pass 1: new console processes ────────────────────────────────────────
+    $killed = @()
+    try {
+        $now = Get-CimInstance -Query "SELECT ProcessId,ParentProcessId,Name,CommandLine,CreationDate FROM Win32_Process WHERE $script:AuditImageFilter" -ErrorAction SilentlyContinue
+        foreach ($p in $now) {
+            $procId = [int]$p.ProcessId
+            if ($Before.Procs.ContainsKey($procId)) { continue }       # was already there
+            if ($script:AuditOwnPids.ContainsKey($procId)) { continue } # our own ancestry
+            # Belt and braces against pid reuse: a process that started before the
+            # suite did cannot be the suite's leftover.
+            try { if ($p.CreationDate -and $p.CreationDate -lt $SuiteStart.AddSeconds(-2)) { continue } } catch { }
+
+            $cl = (([string]$p.CommandLine) -replace '\s+', ' ').Trim()
+            $isParked = ($p.Name -eq 'cmd.exe') -and ($cl -match '/c\s+pause\b' -or $cl -match '/k(\s|$)')
+            $ownsWin  = $newWinPids.ContainsKey($procId)
+            if (-not ($isParked -or $ownsWin)) { continue }
+
+            # Parent chain for attribution. Usually already dead by now, which is
+            # exactly why spawn_trace.log (captured at spawn time) exists too.
+            $chain = @()
+            $cur = [int]$p.ParentProcessId
+            for ($i = 0; $i -lt 3 -and $cur -gt 0; $i++) {
+                $pf = Get-CimInstance -Query "SELECT ParentProcessId,Name FROM Win32_Process WHERE ProcessId=$cur" -ErrorAction SilentlyContinue
+                if (-not $pf) { $chain += "pid=$cur(<exited>)"; break }
+                $chain += ("pid={0}({1})" -f $cur, $pf.Name)
+                $cur = [int]$pf.ParentProcessId
+            }
+            $chainStr = if ($chain.Count) { $chain -join '<-' } else { '<none>' }
+            $why = if ($isParked) { 'parked-console' } else { 'owns-new-console-window' }
+
+            Write-AuditLine ("LEFTOVER {0} pid={1} image={2} why={3} parent={4} cmd=[{5}]" -f `
+                $Suite, $procId, $p.Name, $why, $chainStr, $cl)
+            $found++
+
+            if ($script:AuditNeverKill -contains $p.Name) {
+                Write-AuditLine ("  not killing {0} pid={1} by design; its window is closed instead" -f $p.Name, $procId)
+                continue
+            }
+            try {
+                Stop-Process -Id $procId -Force -ErrorAction Stop
+                $killed += $procId
+            } catch {
+                Write-AuditLine ("  could not end pid={0}: {1}" -f $procId, $_.Exception.Message)
+            }
+        }
+    } catch { }
+
+    if ($killed.Count -gt 0) {
+        Start-Sleep -Milliseconds 500
+        $still = @($killed | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        Write-AuditLine ("  ended {0} leftover process(es): {1}{2}" -f $killed.Count, ($killed -join ','),
+            $(if ($still.Count) { "  STILL ALIVE: $($still -join ',')" } else { '' }))
+    }
+
+    # ── pass 2: windows still standing (dead tabs, or hosts we refused to kill) ──
+    foreach ($w in $newWins) {
+        if (-not [PsmuxWinAudit]::Alive($w.Handle)) { continue }   # went with its process
+        Write-AuditLine ("LEFTOVER-WINDOW {0} hwnd={1} pid={2} class={3} title=[{4}]" -f `
+            $Suite, $w.Handle, $w.Pid, $w.Class, $w.Title)
+        $found++
+        [void][PsmuxWinAudit]::Close($w.Handle)
+        $gone = $false
+        for ($i = 0; $i -lt 10; $i++) {
+            Start-Sleep -Milliseconds 200
+            if (-not [PsmuxWinAudit]::Alive($w.Handle)) { $gone = $true; break }
+        }
+        if (-not $gone -and $w.Class -eq 'CASCADIA_HOSTING_WINDOW_CLASS') {
+            # Almost certainly the multi-tab confirmation prompt.
+            if (Invoke-WtCloseAllDialog -OwnerPid $w.Pid) {
+                Write-AuditLine ("  confirmed Windows Terminal 'Close all' for hwnd={0}" -f $w.Handle)
+                for ($i = 0; $i -lt 10; $i++) {
+                    Start-Sleep -Milliseconds 200
+                    if (-not [PsmuxWinAudit]::Alive($w.Handle)) { $gone = $true; break }
+                }
+            }
+        }
+        if ($gone) { Write-AuditLine ("  closed hwnd={0}" -f $w.Handle) }
+        else       { Write-AuditLine ("  STUCK-WINDOW hwnd={0} would not close; left on the desktop" -f $w.Handle) }
+    }
+
+    if ($found -gt 0) {
+        $script:AuditTotalLeftovers += $found
+        $script:AuditSuitesWithLeftovers++
+        Write-Host ("  [LEFTOVER] {0} left {1} console process(es)/window(s) behind; logged and cleaned" -f $Suite, $found) -ForegroundColor Magenta
+    }
+    return $found
+}
+
 function Get-SuiteTimeout {
     param([string]$Name)
     # Perf/stress/latency suites legitimately run long; everything else gets the default.
@@ -312,6 +694,96 @@ Write-Host "Binary: $PSMUX" -ForegroundColor Cyan
 Write-Host "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
 Write-Host "Logs:    $script:RunDir" -ForegroundColor Cyan
 Write-Host ""
+
+# ── Pin the runner's OWN window, by identity ─────────────────────────────────
+#
+# MEASURED DEFECT THIS FIXES (run 2026-09-12_00-54-17)
+# The audit reported the runner's own launcher window as a leftover:
+#     LEFTOVER-WINDOW test_perf_vs_terminals hwnd=17698570 pid=13928
+#                     class=CASCADIA_HOSTING_WINDOW_CLASS title=[Administrator: cmd]
+# and then politely closed the window the run was printing into. Three separate
+# protections all failed to catch it:
+#   - GetConsoleWindow() returns the INVISIBLE pseudoconsole host window for a
+#     console that Windows 11 delegated to Windows Terminal, so the handle it
+#     pinned (2031992) was not the visible window at all;
+#   - the owner pid is useless, because one WindowsTerminal.exe owns many windows:
+#     the runner's window and the user's own window were BOTH pid 13928;
+#   - the title filter did not match, because at the moment of the audit the
+#     window was showing "Administrator: cmd", not the launcher's title.
+#
+# So the runner stamps a unique marker into its own console title and finds the
+# window displaying it. That is identity rather than inference, and it works the
+# same for a classic conhost window and a delegated Terminal window. The title is
+# then restored to something a human can read which ALSO matches the protected
+# title list, so the window stays protected even if the marker is overwritten.
+$script:AuditOwnMarker = "psmux-runner-$PID-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+try {
+    if ([PsmuxWinAudit]::SetTitle($script:AuditOwnMarker)) {
+        Start-Sleep -Milliseconds 500   # the host has to repaint its title bar
+        $mine = @([PsmuxWinAudit]::FindByTitle($script:AuditOwnMarker))
+        foreach ($h in $mine) {
+            $script:AuditProtectHwnd[[long]$h] = $true
+            Write-Log "OWN-WINDOW pinned hwnd=$h (identified by console title marker)"
+        }
+        if ($mine.Count -eq 0) {
+            Write-Log "OWN-WINDOW no visible window carries the marker (headless or redirected host); baseline protection only"
+        }
+        [void][PsmuxWinAudit]::SetTitle("psmux FULL test suite - run $script:RunId")
+    }
+} catch { }
+
+# ── Desktop baseline + spawn attribution watcher ──────────────────────────────
+# The baseline is the set of console windows that existed BEFORE the run. Nothing
+# in it is ever closed, which is what makes the per suite cleanup safe to run on
+# a desktop that belongs to a human.
+#
+# Taken TWICE with a settle in between, and unioned. A console window that the
+# shell which launched this run had only just created can take a moment to become
+# visible to EnumWindows, and a single snapshot taken inside that gap declares the
+# runner's own window "new", which is half of how the defect above happened.
+$script:AuditBaselineWins = @{}
+foreach ($pass in 1, 2) {
+    try {
+        foreach ($w in [PsmuxWinAudit]::List()) {
+            if ($script:AuditBaselineWins.ContainsKey([long]$w.Handle)) { continue }
+            $script:AuditBaselineWins[[long]$w.Handle] = $w.Title
+            Write-Log ("BASELINE-WINDOW hwnd={0} pid={1} class={2} title=[{3}] (pass {4})" -f $w.Handle, $w.Pid, $w.Class, $w.Title, $pass)
+        }
+    } catch { }
+    if ($pass -eq 1) { Start-Sleep -Milliseconds 700 }
+}
+Write-Host ("  Desktop baseline: {0} console window(s) present; they are never touched." -f $script:AuditBaselineWins.Count) -ForegroundColor DarkGray
+if ($script:AuditProtectHwnd.Count -gt 0) {
+    Write-Host ("  Pinned window handles (never closed): {0}" -f (($script:AuditProtectHwnd.Keys | Sort-Object) -join ', ')) -ForegroundColor DarkGray
+}
+
+# Suites detect that they were started by this runner through this variable. It
+# lets a suite that deliberately leaks a console (the audit's own proof suite)
+# SKIP when a human runs it by hand, so running it standalone never strands a
+# window on the desktop.
+$env:PSMUX_TEST_RUNNER = '1'
+
+$script:CurrentSuiteFile = Join-Path $script:RunDir "current_suite.txt"
+[System.IO.File]::WriteAllText($script:CurrentSuiteFile, '<starting>')
+$script:SpawnTrace = Join-Path $script:RunDir "spawn_trace.log"
+$script:SpawnWatcher = $null
+$watcherScript = Join-Path $PSScriptRoot 'spawn_trace_watcher.ps1'
+if (Test-Path $watcherScript) {
+    try {
+        $script:SpawnWatcher = Start-Process -FilePath "pwsh" -PassThru -WindowStyle Hidden `
+            -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $watcherScript,
+                          "-OutFile", $script:SpawnTrace,
+                          "-SuiteFile", $script:CurrentSuiteFile,
+                          "-RunnerPid", $PID
+        # The watcher must never be mistaken for a leftover by its own audit.
+        if ($script:SpawnWatcher) { $script:AuditOwnPids[$script:SpawnWatcher.Id] = $true }
+        Write-Host ("  Spawn attribution watcher pid {0} -> {1}" -f $script:SpawnWatcher.Id, $script:SpawnTrace) -ForegroundColor DarkGray
+        Write-Log "Spawn watcher pid $($script:SpawnWatcher.Id) tracing to $script:SpawnTrace"
+    } catch {
+        Write-Host "  (spawn watcher did not start: $_)" -ForegroundColor DarkGray
+        Write-Log "Spawn watcher failed to start: $_"
+    }
+}
 
 # ── Categorize tests ──
 # Tests requiring WSL
@@ -475,15 +947,15 @@ function Run-TestFile {
     # Check skip categories
     if ($wslTests -contains $baseName -and -not $IncludeWSL) {
         Write-Log "SKIP  $baseName  (WSL required)"
-        return @{ Name = $baseName; Status = "SKIP"; Reason = "WSL required"; Passed = 0; Failed = 0; Duration = 0 }
+        return @{ Name = $baseName; Status = "SKIP"; Reason = "WSL required"; Passed = 0; Failed = 0; Leftovers = 0; Duration = 0 }
     }
     if ($interactiveTests -contains $baseName -and -not $IncludeInteractive) {
         Write-Log "SKIP  $baseName  (Interactive TUI required)"
-        return @{ Name = $baseName; Status = "SKIP"; Reason = "Interactive TUI required"; Passed = 0; Failed = 0; Duration = 0 }
+        return @{ Name = $baseName; Status = "SKIP"; Reason = "Interactive TUI required"; Passed = 0; Failed = 0; Leftovers = 0; Duration = 0 }
     }
     if ($perfTests -contains $baseName -and $SkipPerf) {
         Write-Log "SKIP  $baseName  (Perf test, -SkipPerf active)"
-        return @{ Name = $baseName; Status = "SKIP"; Reason = "Perf test (use -SkipPerf to skip)"; Passed = 0; Failed = 0; Duration = 0 }
+        return @{ Name = $baseName; Status = "SKIP"; Reason = "Perf test (use -SkipPerf to skip)"; Passed = 0; Failed = 0; Leftovers = 0; Duration = 0 }
     }
 
     Clean-Server
@@ -506,6 +978,13 @@ function Run-TestFile {
         $errFile = Join-Path $script:SuiteDir "$baseName.err.tmp"
         Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
 
+        # Desktop snapshot for the leftover audit, taken as late as possible so
+        # anything already on screen is this suite's problem only if IT created it.
+        $auditBefore = New-AuditSnapshot
+        $auditStart  = Get-Date
+        # Tell the spawn watcher which suite owns the next burst of console starts.
+        try { [System.IO.File]::WriteAllText($script:CurrentSuiteFile, $baseName) } catch { }
+
         $job = [PsmuxTestJob]::Create()
         # Pin the suite's working directory to the repo root: several suites
         # resolve `.\target\release\psmux.exe` relative to CWD, so inheriting
@@ -517,6 +996,17 @@ function Run-TestFile {
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         $inJob = $false
         if ($job -ne [IntPtr]::Zero) { $inJob = [PsmuxTestJob]::Assign($job, $proc.Id) }
+        # Say so when the job object could not take the suite. AssignProcessToJobObject
+        # fails with ERROR_ACCESS_DENIED when the runner itself already sits in a job
+        # that forbids nesting (an agent tool shell, a CI container, an sshd session),
+        # and in that case the normal completion path has NOTHING that reaps the
+        # suite's children: every orphan it leaves survives. That silence is half the
+        # reason a leaked console could not be attributed to a suite before, so it is
+        # logged, and the desktop audit below is what actually cleans up after it.
+        if (-not $inJob) {
+            Write-Log "WARN  $baseName is NOT in a job object (assignment failed); leaked children will only be caught by the desktop audit"
+            Write-Host "  (no job object for this suite: process-tree teardown is unavailable, audit only)" -ForegroundColor DarkYellow
+        }
 
         # Wait with a heartbeat so long/hung tests are visible while they run.
         # The same 1s tick polls the abort channel, so a stop request lands
@@ -569,11 +1059,15 @@ function Run-TestFile {
             try { $proc.WaitForExit(5000) | Out-Null } catch {}
             $sw.Stop()
             Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+            # An interrupted suite is the MOST likely one to strand a window, so
+            # the audit runs here too.
+            $leftovers = Invoke-LeftoverAudit -Suite $baseName -Before $auditBefore -SuiteStart $auditStart
             return @{
                 Name = $baseName
                 Status = "ABORT"
                 ExitCode = -3
                 Passed = 0; Failed = 0; Skipped = 0
+                Leftovers = $leftovers
                 Duration = [math]::Round($sw.Elapsed.TotalSeconds, 1)
                 Reason = "interrupted ($script:AbortReason)"
                 Output = ""
@@ -599,6 +1093,12 @@ function Run-TestFile {
             if ($inJob) { [PsmuxTestJob]::Kill($job) }
         }
         $sw.Stop()
+
+        # Desktop audit. Runs after the job teardown AND after the suite's own
+        # cleanup, so a suite that opens terminals and closes them itself (see
+        # test_perf_vs_terminals) is not double counted: only what is STILL on the
+        # desktop is reported.
+        $leftovers = Invoke-LeftoverAudit -Suite $baseName -Before $auditBefore -SuiteStart $auditStart
 
         # Collect output from the redirect files (out first, then err)
         $output = ""
@@ -638,7 +1138,7 @@ function Run-TestFile {
                   elseif ($exitCode -eq 0 -and $failCount -eq 0) { "PASS" }
                   else { "FAIL" }
 
-        Write-Log ("{0,-7} {1,-45} {2}P/{3}F  exit={4}  {5}s" -f $status, $baseName, $passCount, $failCount, $exitCode, [math]::Round($sw.Elapsed.TotalSeconds,1))
+        Write-Log ("{0,-7} {1,-45} {2}P/{3}F  exit={4}  {5}s{6}" -f $status, $baseName, $passCount, $failCount, $exitCode, [math]::Round($sw.Elapsed.TotalSeconds,1), $(if ($leftovers -gt 0) { "  LEFTOVERS=$leftovers" } else { '' }))
 
         return @{
             Name = $baseName
@@ -647,6 +1147,7 @@ function Run-TestFile {
             Passed = $passCount
             Failed = $failCount
             Skipped = $skipCount
+            Leftovers = $leftovers
             Duration = [math]::Round($sw.Elapsed.TotalSeconds, 1)
             Output = $output
         }
@@ -660,6 +1161,7 @@ function Run-TestFile {
             Status = "ERROR"
             Passed = 0
             Failed = 1
+            Leftovers = 0
             Duration = [math]::Round($sw.Elapsed.TotalSeconds, 1)
             Output = $_.ToString()
         }
@@ -714,6 +1216,7 @@ foreach ($testFile in $allTests) {
         $result = @{
             Name = $prev.Name; Status = $prev.Status
             Passed = [int]$prev.Passed; Failed = [int]$prev.Failed
+            Leftovers = $(if ($prev.PSObject.Properties['Leftovers']) { [int]$prev.Leftovers } else { 0 })
             Duration = [double]$prev.Duration; Reason = "already completed (resume)"
         }
         [void]$results.Add($result)
@@ -752,7 +1255,8 @@ foreach ($testFile in $allTests) {
 
     # Crash-safe per-suite result record (also powers -Resume)
     $rec = @{ Name=$result.Name; Status=$result.Status; Passed=$result.Passed;
-              Failed=$result.Failed; Duration=$result.Duration; ExitCode=$result.ExitCode } | ConvertTo-Json -Compress
+              Failed=$result.Failed; Duration=$result.Duration; ExitCode=$result.ExitCode;
+              Leftovers=$(if ($result.Leftovers) { [int]$result.Leftovers } else { 0 }) } | ConvertTo-Json -Compress
     [System.IO.File]::AppendAllText($script:ResultsJsonl, "$rec`r`n")
 
     # Update live counters
@@ -777,6 +1281,28 @@ Clean-Server
 # The flag has been consumed. Clear it so the next run is not aborted on its
 # first poll by a stale file.
 Remove-Item $script:StopFile -Force -ErrorAction SilentlyContinue
+
+# ── Stop the spawn watcher, then state the desktop outcome ───────────────────
+# Stopping it by the pid we started is the only kill here; it is never looked up
+# by image name, because another session's pwsh is not ours to end.
+if ($script:SpawnWatcher) {
+    try { [System.IO.File]::WriteAllText($script:CurrentSuiteFile, '<run finished>') } catch { }
+    try { Stop-Process -Id $script:SpawnWatcher.Id -Force -ErrorAction Stop } catch { }
+    Write-Log "Spawn watcher pid $($script:SpawnWatcher.Id) stopped"
+}
+
+# Final desktop reconciliation: anything left that was not in the baseline is
+# reported by handle, so a stuck window is visible in the summary rather than
+# discovered by a human the next morning.
+$script:AuditStrayWindows = @()
+try {
+    foreach ($w in [PsmuxWinAudit]::List()) {
+        if ($script:AuditBaselineWins.ContainsKey([long]$w.Handle)) { continue }
+        if (Test-AuditWindowProtected $w) { continue }
+        $script:AuditStrayWindows += $w
+        Write-AuditLine ("RUN-END-STRAY hwnd={0} pid={1} class={2} title=[{3}]" -f $w.Handle, $w.Pid, $w.Class, $w.Title)
+    }
+} catch { }
 
 # ── Generate Report ──
 $endTime = Get-Date
@@ -856,7 +1382,8 @@ if ($failed.Count -gt 0) {
     Write-Host ("  " + ("-" * 55)) -ForegroundColor Red
     Write-Host "  FAILED SUITES" -ForegroundColor Red
     foreach ($r in $failed) {
-        Write-Host ("    $bullet [{0}] {1,-42} {2,3}P/{3}F  ({4}s)" -f $r.Status, $r.Name, $r.Passed, $r.Failed, $r.Duration) -ForegroundColor Red
+        $lv = if ($r.Leftovers) { "  LEFT:$($r.Leftovers)" } else { "" }
+        Write-Host ("    $bullet [{0}] {1,-42} {2,3}P/{3}F  ({4}s){5}" -f $r.Status, $r.Name, $r.Passed, $r.Failed, $r.Duration, $lv) -ForegroundColor Red
     }
 }
 
@@ -864,7 +1391,8 @@ if ($passed.Count -gt 0) {
     Write-Host ""
     Write-Host "  PASSED SUITES" -ForegroundColor Green
     foreach ($r in $passed) {
-        Write-Host ("    $bullet [PASS] {0,-42} {1,3}P/{2}F  ({3}s)" -f $r.Name, $r.Passed, $r.Failed, $r.Duration) -ForegroundColor Green
+        $lv = if ($r.Leftovers) { "  LEFT:$($r.Leftovers)" } else { "" }
+        Write-Host ("    $bullet [PASS] {0,-42} {1,3}P/{2}F  ({3}s){4}" -f $r.Name, $r.Passed, $r.Failed, $r.Duration, $lv) -ForegroundColor $(if ($r.Leftovers) { "Magenta" } else { "Green" })
     }
 }
 
@@ -873,6 +1401,38 @@ if ($skipped.Count -gt 0) {
     Write-Host "  SKIPPED SUITES" -ForegroundColor Yellow
     foreach ($r in $skipped) {
         Write-Host ("    $bullet [SKIP] {0,-42} {1}" -f $r.Name, $r.Reason) -ForegroundColor Yellow
+    }
+}
+
+# ── Desktop hygiene ────────────────────────────────────────────────────────
+# A suite must leave the desktop as it found it. This block is the whole point of
+# the per suite audit: it names the suites that did not, so the next person does
+# not have to guess which of 650 suites produced the dead tabs.
+$leftoverSuites = @($results | Where-Object { $_.Leftovers -and $_.Leftovers -gt 0 })
+Write-Host ""
+Write-Host ("=" * 80) -ForegroundColor White
+Write-Host "  DESKTOP HYGIENE (console windows / parked consoles left behind)" -ForegroundColor White
+Write-Host ("=" * 80) -ForegroundColor White
+Write-Host ""
+if ($leftoverSuites.Count -eq 0) {
+    Write-Host "  No suite left a console process or window behind. Desktop is clean." -ForegroundColor Green
+} else {
+    Write-Host ("  {0,-48} {1,10} {2,8}" -f "Suite", "Leftovers", "Verdict") -ForegroundColor White
+    Write-Host ("  " + ("-" * 70)) -ForegroundColor DarkGray
+    foreach ($r in ($leftoverSuites | Sort-Object { -$_.Leftovers })) {
+        Write-Host ("  {0,-48} {1,10} {2,8}" -f $r.Name, $r.Leftovers, $r.Status) -ForegroundColor Magenta
+    }
+    Write-Host ""
+    Write-Host ("  {0} leftover process(es)/window(s) across {1} suite(s); all were logged and cleaned." -f `
+        $script:AuditTotalLeftovers, $script:AuditSuitesWithLeftovers) -ForegroundColor Magenta
+    Write-Host ("  Per leftover detail (pid, parent chain, command line): {0}" -f $script:AuditLog) -ForegroundColor DarkGray
+    Write-Host ("  Who spawned it, captured at spawn time:                {0}" -f $script:SpawnTrace) -ForegroundColor DarkGray
+}
+if ($script:AuditStrayWindows.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("  WARNING: {0} window(s) would not close and are STILL on the desktop:" -f $script:AuditStrayWindows.Count) -ForegroundColor Red
+    foreach ($w in $script:AuditStrayWindows) {
+        Write-Host ("    hwnd={0} pid={1} class={2} title=[{3}]" -f $w.Handle, $w.Pid, $w.Class, $w.Title) -ForegroundColor Red
     }
 }
 
@@ -925,10 +1485,19 @@ $summaryLines = [System.Collections.ArrayList]::new()
 [void]$summaryLines.Add("Suites SKIPPED: $($skipped.Count)")
 [void]$summaryLines.Add("Tests PASSED:   $totalPassed")
 [void]$summaryLines.Add("Tests FAILED:   $totalFailed")
+[void]$summaryLines.Add("Leftover console processes/windows: $script:AuditTotalLeftovers (across $script:AuditSuitesWithLeftovers suite(s))")
+if ($leftoverSuites.Count -gt 0) {
+    foreach ($r in ($leftoverSuites | Sort-Object { -$_.Leftovers })) {
+        [void]$summaryLines.Add("  LEFTOVERS $($r.Leftovers)  $($r.Name)  [$($r.Status)]")
+    }
+}
+if ($script:AuditStrayWindows.Count -gt 0) {
+    [void]$summaryLines.Add("STILL ON DESKTOP: $($script:AuditStrayWindows.Count) window(s) would not close")
+}
 [void]$summaryLines.Add("")
 [void]$summaryLines.Add("=" * 70)
 foreach ($r in $results) {
-    $line = "[{0,-5}] {1,-45} {2,3}P/{3}F  {4,7:F1}s" -f $r.Status, $r.Name, $r.Passed, $r.Failed, $r.Duration
+    $line = "[{0,-5}] {1,-45} {2,3}P/{3}F  {4,7:F1}s  LEFT:{5}" -f $r.Status, $r.Name, $r.Passed, $r.Failed, $r.Duration, $(if ($r.Leftovers) { [int]$r.Leftovers } else { 0 })
     if ($r.Reason) { $line += "  ($($r.Reason))" }
     [void]$summaryLines.Add($line)
 }

@@ -2308,8 +2308,12 @@ match cmd {
     "last-window" | "last" => { let _ = tx.send(CtrlReq::LastWindow); }
     "last-pane" | "lastp" => { let _ = tx.send(CtrlReq::LastPane); }
     "rotate-window" | "rotatew" => {
-        let reverse = args.iter().any(|a| *a == "-D");
-        let _ = tx.send(CtrlReq::RotateWindow(reverse));
+        // tmux tests for -D alone and falls through to the -U branch for
+        // everything else, so bare `rotate-window` is `-U`.  This arm used to
+        // send the flag through unnegated, which ran -U as a -D rotation and
+        // made the two routes disagree with each other (#645).
+        let upward = !args.iter().any(|a| *a == "-D");
+        let _ = tx.send(CtrlReq::RotateWindow(upward));
     }
     "display-panes" | "displayp" => { let _ = tx.send(CtrlReq::DisplayPanes); }
     "break-pane" | "breakp" => { let _ = tx.send(CtrlReq::BreakPane); }
@@ -4983,7 +4987,9 @@ fn dispatch_control_command(
             true
         }
         "rotate-window" | "rotatew" => {
-            let upward = args.iter().any(|a| *a == "-U");
+            // Bare `rotate-window` is -U in tmux (only -D takes the other
+            // branch); testing for -U made the default rotate the wrong way.
+            let upward = !args.iter().any(|a| *a == "-D");
             let _ = tx.send(CtrlReq::RotateWindow(upward));
             let _ = resp_tx.send(String::new());
             true

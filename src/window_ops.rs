@@ -2545,22 +2545,69 @@ pub fn resize_pane_absolute(app: &mut AppState, axis: &str, target: u16) {
     }
 }
 
-pub fn rotate_panes(app: &mut AppState, reverse: bool) {
-    let win = &mut app.windows[app.active_idx];
-    match &mut win.root {
-        Node::Split { children, .. } if children.len() >= 2 => {
-            if reverse {
-                // Rotate counter-clockwise: first element goes to end
-                let first = children.remove(0);
-                children.push(first);
+/// `rotate-window`: move every pane one slot along the window's pane order.
+///
+/// tmux (`cmd-rotate-window.c`) never touches the layout tree.  It re-points
+/// each pane at the NEXT pane's layout cell and then gives the pane that
+/// cell's geometry, PTY included:
+///
+/// ```text
+///     wp->layout_cell = wp2->layout_cell;
+///     wp->xoff = wp2->xoff; wp->yoff = wp2->yoff;
+///     window_pane_resize(wp, wp2->sx, wp2->sy);
+/// ```
+///
+/// Two things follow, and psmux used to get both wrong (#645):
+///
+///  1. Only the OCCUPANTS move.  Every cell keeps its position and its size,
+///     so the window's shape is identical before and after.  psmux rotated the
+///     root split's direct CHILDREN instead, which on a nested layout carried
+///     whole subtrees into slots sized for something else (a 34/4/10 column of
+///     three panes came back as 39/8/1).  Rotating the leaves, which is what a
+///     cell permutation is once the cells live in the tree, leaves every
+///     split's `sizes` and the tree shape alone.
+///
+///  2. Each moved pane is RESIZED to the cell it landed in.  psmux left every
+///     pane at the size of the cell it had just left, so `pane_height` and
+///     `pane_width` disagreed with `pane_top`/`pane_bottom`/`window_layout`,
+///     `split-window` refused a visually tall pane as "too small", and the
+///     child console kept the old row count.  `resize_all_panes` is the same
+///     path `resize-pane` takes, which is why `resize-pane -U 0` healed it.
+///
+/// `upward` is tmux's `-U`, which is also its default: the pane in the first
+/// cell moves to the last cell and everyone else moves up one.  `-D` is the
+/// reverse.  Focus stays on the same CELL, matching tmux, which re-points
+/// `w->active` at the pane that moved into the active pane's cell.
+pub fn rotate_panes(app: &mut AppState, upward: bool) {
+    if app.active_idx >= app.windows.len() { return; }
+    let rotated = {
+        let win = &mut app.windows[app.active_idx];
+        let mut leaves: Vec<(usize, Vec<usize>)> = Vec::new();
+        crate::tree::collect_leaf_paths_pub(&win.root, &mut Vec::new(), &mut leaves);
+        if leaves.len() < 2 {
+            false
+        } else {
+            // Swapping two LEAVES never changes the tree's shape, so the paths
+            // collected up front stay valid for the whole chain of swaps.
+            let paths: Vec<Vec<usize>> = leaves.into_iter().map(|(_, p)| p).collect();
+            let n = paths.len();
+            if upward {
+                // [A,B,C] -> [B,C,A]: cell 0 takes the second pane.
+                for i in 0..n - 1 {
+                    crate::tree::swap_nodes(&mut win.root, &paths[i], &paths[i + 1]);
+                }
             } else {
-                // Rotate clockwise: last element goes to front
-                let last = children.pop().unwrap();
-                children.insert(0, last);
+                // [A,B,C] -> [C,A,B]: cell 0 takes the last pane.
+                for i in (0..n - 1).rev() {
+                    crate::tree::swap_nodes(&mut win.root, &paths[i], &paths[i + 1]);
+                }
             }
+            true
         }
-        _ => {}
-    }
+    };
+    // tmux's window_pane_resize, deferred to one pass over the window: every
+    // pane takes the size of the cell it now occupies, and its PTY with it.
+    if rotated { crate::tree::resize_all_panes(app); }
 }
 
 pub fn break_pane_to_window(app: &mut AppState) {
@@ -2910,3 +2957,7 @@ mod test_issue629_ssh_vt_wheel;
 #[cfg(test)]
 #[path = "../tests-rs/test_respawn_pane_refusal_survives.rs"]
 mod test_respawn_pane_refusal_survives;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue645_rotate_geometry.rs"]
+mod test_issue645_rotate_geometry;

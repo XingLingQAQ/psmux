@@ -4088,8 +4088,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     });
                     meta_dirty = true;
                 }
-                CtrlReq::RotateWindow(reverse) => {
-                    rotate_panes(&mut app, reverse);
+                CtrlReq::RotateWindow(upward) => {
+                    rotate_panes(&mut app, upward);
+                    // The panes changed slots and sizes, so an attached client
+                    // has to be told (swap-pane does the same, #601).
+                    meta_dirty = true;
                     hook_event = Some("after-rotate-window");
                 }
                 CtrlReq::DisplayPanes => {

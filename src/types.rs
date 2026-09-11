@@ -2507,6 +2507,8 @@ pub enum CtrlReq {
     DisplayMessageById(mpsc::Sender<String>, String, usize, bool, Option<u64>),  // resp, format, pane_id, set_status_bar, duration_override_ms
     LastWindow,
     LastPane,
+    /// `rotate-window`. The flag is tmux's `-U` (its default): true moves the
+    /// first pane to the last cell, false is `-D`.
     RotateWindow(bool),
     DisplayPanes,
     DisplayPaneSelect(usize),

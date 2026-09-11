@@ -717,7 +717,9 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Esc => { app.mode = Mode::Passthrough; }
                 KeyCode::Enter => {
                     if let Mode::RenamePrompt { input } = &mut app.mode {
-                        let name = input.clone();
+                        // #647 (WIN-03): the rename prompt is another window
+                        // name entry point, so it gets tmux's clean_name too.
+                        let name = crate::util::clean_name(input);
                         app.mode = Mode::Passthrough;
                         // Update local state with bounds check
                         if app.active_idx < app.windows.len() {

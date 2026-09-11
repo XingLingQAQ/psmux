@@ -2295,6 +2295,14 @@ match cmd {
         }
         if let Ok(text) = rrx.recv() {
             if print_stdout {
+                // #647 (WIN-03): tmux prints `display-message -p` through
+                // server_client_print(tc, 0, evb) (cmd-display-message.c:152),
+                // whose parse == 0 arm always visually encodes the result with
+                // VIS_OCTAL|VIS_CSTYLE|VIS_NOSLASH (server-client.c:3089-3091).
+                // ESC, CR, BEL and friends become printable escapes; a tab or
+                // newline is left alone, because VIS_TAB and VIS_NL are not in
+                // that flag set.
+                let text = crate::util::visual_escape_message(&text);
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("display-message".to_string(), text));
                 } else {
@@ -4205,6 +4213,8 @@ fn dispatch_control_command(
                 let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode, None));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                // Same visual encoding as the one-shot route above (#647).
+                let text = if print_mode { crate::util::visual_escape_message(&text) } else { text };
                 let _ = resp_tx.send(text);
             }
             true

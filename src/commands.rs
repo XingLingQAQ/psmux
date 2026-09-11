@@ -1189,7 +1189,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 // against the window being renamed (cmd-rename-window.c uses
                 // format_single_from_target), so `rename-window
                 // '#{s/^XX //:window_name}'` transforms the current name.
-                let name = crate::format::expand_format(name, app);
+                // #647 (WIN-03): tmux runs every window name through
+                // clean_name (tmux.c:303), so a control byte can never reach
+                // #{window_name} and break a tab or newline separated record.
+                let name = crate::util::clean_name(&crate::format::expand_format(name, app));
                 if app.active_idx < app.windows.len() {
                     let win = &mut app.windows[app.active_idx];
                     win.name = name.clone();

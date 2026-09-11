@@ -26,8 +26,26 @@ fn main() {
 
     embed_windows_resources();
 
-    let short = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let full = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rerun-if-env-changed=PSMUX_GIT_SHA");
+
+    // `git` is the best source: it knows the short hash, the full hash, the
+    // commit date and whether the tree is dirty. It is also the one source
+    // that is regularly absent. `cargo install --git ...` uses libgit2, not
+    // the git binary, so a machine with no git on PATH installs happily and
+    // then reports `unknown commit` (#647 WIN-05); a container that refuses
+    // the checkout for dubious ownership lands in the same place. Fall back
+    // through every other place the revision is recorded before giving up.
+    let git_short = git(&["rev-parse", "--short", "HEAD"]);
+    let git_full = git(&["rev-parse", "HEAD"]);
+    let fallback = if git_short.is_none() { fallback_commit() } else { None };
+
+    let full = git_full
+        .or_else(|| fallback.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let short = git_short
+        .or_else(|| fallback.map(|sha| shorten(&sha)))
+        .unwrap_or_else(|| "unknown".to_string());
+    // Only git knows the commit date; a bare sha from a fallback carries none.
     let date = git(&["show", "-s", "--format=%cd", "--date=short", "HEAD"])
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -140,6 +158,65 @@ fn packed_version(version: &str) -> u64 {
     let minor = parts.next().unwrap_or(0);
     let patch = parts.next().unwrap_or(0);
     (major << 48) | (minor << 32) | (patch << 16)
+}
+
+/// Find the commit this source tree came from without asking git.
+///
+/// Tried in order:
+///
+///   1. `.cargo_vcs_info.json`, which `cargo package` writes into every
+///      crates.io tarball as `{"git": {"sha1": "..."}}`.
+///   2. The cargo git checkout directory name. `cargo install --git URL` checks
+///      the revision out into
+///      `~/.cargo/git/checkouts/<name>-<hash>/<short sha>/`, so the package
+///      root's own directory name IS the short hash. The marker file
+///      `.cargo-ok` that cargo drops beside the sources confirms this is such
+///      a checkout and not a directory that merely happens to be named in hex.
+///   3. `PSMUX_GIT_SHA`, so release tooling that builds from an exported tree
+///      can inject the revision it published.
+fn fallback_commit() -> Option<String> {
+    let root = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let root = std::path::Path::new(&root);
+
+    if let Some(sha) = vcs_info_sha(&root.join(".cargo_vcs_info.json")) {
+        return Some(sha);
+    }
+    if root.join(".cargo-ok").is_file() {
+        if let Some(name) = root.file_name().and_then(|n| n.to_str()) {
+            if is_hex_sha(name) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    std::env::var("PSMUX_GIT_SHA")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| is_hex_sha(s))
+}
+
+/// Pull `git.sha1` out of a `.cargo_vcs_info.json` without a JSON dependency.
+/// The file cargo writes is small and machine generated, so finding the key and
+/// reading the quoted hex value after it is enough, and a malformed file simply
+/// yields `None` rather than failing the build.
+fn vcs_info_sha(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let after = text.split("\"sha1\"").nth(1)?;
+    let after = after.split_once(':')?.1;
+    let start = after.find('"')? + 1;
+    let rest = &after[start..];
+    let end = rest.find('"')?;
+    let sha = &rest[..end];
+    if is_hex_sha(sha) { Some(sha.to_string()) } else { None }
+}
+
+fn is_hex_sha(s: &str) -> bool {
+    s.len() >= 7 && s.len() <= 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Cargo names its checkout directories with a 7 character short hash, and a
+/// tarball records the full 40. Report both the same way git would.
+fn shorten(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 /// Run `git <args>` and return trimmed stdout on success, or `None` if git is

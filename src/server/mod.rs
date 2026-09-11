@@ -1270,6 +1270,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // the initial window of a `new-session -n NAME`, matching tmux semantics
     // and the two later `-n` paths in this file (lines ~789, ~812).
     if let Some(n) = window_name {
+        let n = crate::util::clean_name(&n);
         app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; });
     }
     // The pool is filled by the background spawner from the server loop
@@ -1774,7 +1775,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         eprintln!("psmux: new-window error: {e}");
                     }
                     crate::resize_window::refresh_dynamic_window_sizes(&mut app);
-                    if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
+                    if let Some(n) = name { let n = crate::util::clean_name(&n); app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     // -T: set the new pane's title at creation (tmux new-window -T).
                     if let Some(t) = title {
                         if let Some(win) = app.windows.last_mut() {
@@ -1803,7 +1804,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         eprintln!("psmux: new-window error: {e}");
                     }
                     crate::resize_window::refresh_dynamic_window_sizes(&mut app);
-                    if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
+                    if let Some(n) = name { let n = crate::util::clean_name(&n); app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     if let Some(t) = title {
                         if let Some(win) = app.windows.last_mut() {
                             if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
@@ -2360,6 +2361,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     } else {
                                         continue;
                                     };
+                                    // #647 (WIN-03): an inferred name comes from a
+                                    // process or path and must be sanitized the same
+                                    // way an explicit rename is (tmux names.c:169).
+                                    let new_name = crate::util::clean_name(&new_name);
                                     if !new_name.is_empty() && win.name != new_name {
                                         win.name = new_name;
                                         meta_dirty = true;
@@ -2761,6 +2766,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // here, so #{window_name} etc. resolve against it —
                     // enabling idioms like `rename-window '#{b:pane_current_path}'`.
                     let name = expand_format(&name, &app);
+                    let name = crate::util::clean_name(&name);
                     let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window");
                 }
                 CtrlReq::ListWindows(resp) => { helpers::propagate_osc_titles(&mut app); let json = list_windows_json(&app)?; let _ = resp.send(json); }

@@ -786,6 +786,63 @@ pub(crate) fn apply_set_option(
     Ok(())
 }
 
+/// Pick one entry out of a pane option listing for `show-options -p <name>`.
+///
+/// `listing` is the server's `ShowPaneOptions` reply: one `name value` pair per
+/// line for every option the pane actually stores. tmux answers a named query
+/// from the pane's own store and prints nothing at all when the option is not
+/// set there, unless `-A` is given, in which case the inherited value is shown
+/// with a `*` marker (cmd-show-options.c:192-207). `-v` drops the name and
+/// prints the bare value, which is the contract automation compares against
+/// `on` / `off` (#647 WIN-02).
+///
+/// The returned string is ready to write, newline included, or empty when tmux
+/// would print nothing.
+pub(crate) fn select_pane_option_line<F>(
+    listing: &str,
+    name: &str,
+    values_only: bool,
+    include_inherited: bool,
+    mut inherited: F,
+) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    // A refusal from the server (unknown pane target) is not an option
+    // listing; hand it straight back so the caller still reports it.
+    if listing.starts_with("ERROR:") {
+        return format!("{}\n", listing);
+    }
+    for line in listing.lines() {
+        let (key, value) = match line.split_once(' ') {
+            Some((k, v)) => (k, v),
+            None => (line, ""),
+        };
+        if key != name {
+            continue;
+        }
+        return if values_only {
+            format!("{}\n", value)
+        } else {
+            format!("{} {}\n", key, value)
+        };
+    }
+    if include_inherited {
+        if let Some(value) = inherited(name) {
+            return if values_only {
+                format!("{}\n", value)
+            } else {
+                format!("{}* {}\n", name, value)
+            };
+        }
+    }
+    String::new()
+}
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue647_show_options_value.rs"]
+mod tests_issue647_show_options_value;
+
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue266_per_window_autorename.rs"]
 mod tests_issue266_per_window_autorename;

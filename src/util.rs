@@ -976,6 +976,102 @@ pub fn psmux_drawn_terminal() -> bool {
             .is_some()
 }
 
+/// tmux's `vis(3)` encoder, the `VIS_OCTAL|VIS_CSTYLE` subset tmux actually
+/// uses (compat/vis.c:57-120, driven from utf8.c utf8_strvis).
+///
+/// Valid UTF-8 passes through untouched, printable ASCII passes through, and
+/// anything else becomes a C escape (`\r`, `\a`, `\b`, `\f`, `\v`, `\0`, plus
+/// `\t` and `\n` when those are being escaped) or a three digit octal escape
+/// (`\033` for ESC, `\177` for DEL).
+///
+/// `escape_tab` / `escape_nl` are tmux's `VIS_TAB` / `VIS_NL`: unset, a tab or
+/// newline counts as visible and is copied through.
+///
+/// One deliberate deviation from tmux: a backslash is never doubled. tmux
+/// doubles it unless `VIS_NOSLASH` is set, which on Windows would rewrite
+/// every path shaped window name (`C:\src` becomes `C:\\src`, measured against
+/// tmux 3.4). Control characters, which is what #647 is about, are encoded
+/// identically.
+fn vis_encode(src: &str, escape_tab: bool, escape_nl: bool) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !c.is_ascii() {
+            // utf8.c:690-709: a complete, valid UTF-8 character is copied
+            // verbatim and never visually encoded. A Rust `&str` is UTF-8 by
+            // construction, so every non-ASCII char takes this branch.
+            out.push(c);
+            continue;
+        }
+        let b = c as u8;
+        let visible = b.is_ascii_graphic()
+            || b == b' '
+            || (b == b'\t' && !escape_tab)
+            || (b == b'\n' && !escape_nl);
+        if visible {
+            out.push(c);
+            continue;
+        }
+        match b {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            0x08 => out.push_str("\\b"),
+            0x07 => out.push_str("\\a"),
+            0x0b => out.push_str("\\v"),
+            b'\t' => out.push_str("\\t"),
+            0x0c => out.push_str("\\f"),
+            0x00 => {
+                out.push_str("\\0");
+                // compat/vis.c:104-107: a following octal digit would be read
+                // as part of the escape, so pad it out to three digits.
+                if matches!(chars.peek(), Some(n) if ('0'..='7').contains(n)) {
+                    out.push_str("00");
+                }
+            }
+            _ => out.push_str(&format!("\\{b:03o}")),
+        }
+    }
+    out
+}
+
+/// Encode a string the way tmux encodes the stdout of `display-message -p`.
+///
+/// `display-message` prints through `server_client_print(tc, 0, evb)`
+/// (cmd-display-message.c:152), and the `parse == 0` arm always runs
+/// `utf8_stravisx(&msg, data, size, VIS_OCTAL|VIS_CSTYLE|VIS_NOSLASH)`
+/// (server-client.c:3089-3091). `VIS_TAB` and `VIS_NL` are absent, so a tab or
+/// a newline in a format result still reaches stdout literally and a multi
+/// line `#{...}` value still prints as multiple lines; ESC, CR, BEL and every
+/// other control byte become printable escapes. Measured against tmux 3.4:
+///
+///   display-message -p "A<TAB>B"  => 41 09 42     (tab kept)
+///   display-message -p "A<CR>B"   => 41 5C 72 42  (`A\rB`)
+///   display-message -p "A<ESC>B"  => 41 5C 30 33 33 42  (`A\033B`)
+///   display-message -p "A<DEL>B"  => `A\177B`
+///   display-message -p "A<U+2713>B" => 41 E2 9C 93 42  (UTF-8 kept)
+pub fn visual_escape_message(src: &str) -> String {
+    vis_encode(src, false, false)
+}
+
+/// Sanitize a name the way tmux sanitizes window, session and buffer names.
+///
+/// tmux runs every externally supplied name through `clean_name`
+/// (tmux.c:303-317), which visually encodes it with
+/// `VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL`. A name therefore can never contain a
+/// raw control byte, so `#{window_name}` is always safe to drop into a tab or
+/// newline separated record, which is what #647 (WIN-03) asks for. Measured
+/// against tmux 3.4:
+///
+///   rename-window "w<TAB>x"  then #{window_name} => `w\tx`
+///   rename-window "w<ESC>y"  then #{window_name} => `w\033y`
+pub fn clean_name(src: &str) -> String {
+    vis_encode(src, true, true)
+}
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue647_format_sanitize.rs"]
+mod tests_issue647_format_sanitize;
+
 #[cfg(test)]
 #[path = "../tests-rs/test_run_shell_format_and_start_dir.rs"]
 mod tests_run_shell_format_and_start_dir;

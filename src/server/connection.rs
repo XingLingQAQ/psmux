@@ -2295,6 +2295,14 @@ match cmd {
         }
         if let Ok(text) = rrx.recv() {
             if print_stdout {
+                // #647 (WIN-03): tmux prints `display-message -p` through
+                // server_client_print(tc, 0, evb) (cmd-display-message.c:152),
+                // whose parse == 0 arm always visually encodes the result with
+                // VIS_OCTAL|VIS_CSTYLE|VIS_NOSLASH (server-client.c:3089-3091).
+                // ESC, CR, BEL and friends become printable escapes; a tab or
+                // newline is left alone, because VIS_TAB and VIS_NL are not in
+                // that flag set.
+                let text = crate::util::visual_escape_message(&text);
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("display-message".to_string(), text));
                 } else {
@@ -2827,11 +2835,37 @@ match cmd {
                     .map(|s| s.trim_matches('"').to_string())
                     .unwrap_or_default(),
             );
+            // #647 (WIN-02): a named query used to be ignored, so
+            // `show-options -p -v -t %0 remain-on-exit` printed the whole pane
+            // store as `name value` pairs where tmux prints just `on`. tmux
+            // resolves the single entry and then, with -v, prints only the
+            // value (cmd-show-options.c:193 `if (args_has(args, 'v'))
+            // cmdq_print(item, "%s", value);`), so scripts can compare stdout
+            // with on/off directly.
+            let name = args.iter()
+                .filter(|a| !a.starts_with('-'))
+                .copied()
+                .last();
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ShowPaneOptions(raw_target, rtx));
             if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
-                if !reply.is_empty() {
-                    let _ = write!(write_stream, "{}\n", reply);
+                let out = if let Some(name) = name {
+                    let inherited = |n: &str| -> Option<String> {
+                        let (frtx, frrx) = mpsc::channel::<String>();
+                        let _ = tx.send(CtrlReq::ShowOptionValue(frtx, n.to_string()));
+                        frrx.recv_timeout(Duration::from_millis(2000)).ok()
+                            .filter(|v| !v.is_empty())
+                    };
+                    crate::server::options::select_pane_option_line(
+                        &reply, name, has_v, has_a, inherited,
+                    )
+                } else if reply.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n", reply)
+                };
+                if !out.is_empty() {
+                    let _ = write_stream.write_all(out.as_bytes());
                     let _ = write_stream.flush();
                 }
             }
@@ -4183,6 +4217,8 @@ fn dispatch_control_command(
                 let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode, None));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                // Same visual encoding as the one-shot route above (#647).
+                let text = if print_mode { crate::util::visual_escape_message(&text) } else { text };
                 let _ = resp_tx.send(text);
             }
             true
@@ -4555,7 +4591,29 @@ fn dispatch_control_command(
                 );
                 let _ = tx.send(CtrlReq::ShowPaneOptions(raw, rtx));
                 let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
-                let _ = resp_tx.send(reply);
+                // #647 (WIN-02): a named query answers with that one option,
+                // and `-v` answers with the value alone, the same as every
+                // other scope. Without this the attached route repeated the
+                // whole pane store.
+                let name = args.iter()
+                    .filter(|a| !a.starts_with('-'))
+                    .copied()
+                    .last();
+                let out = match name {
+                    Some(name) => {
+                        let inherited = |n: &str| -> Option<String> {
+                            let (frtx, frrx) = mpsc::channel::<String>();
+                            let _ = tx.send(CtrlReq::ShowOptionValue(frtx, n.to_string()));
+                            frrx.recv_timeout(Duration::from_millis(2000)).ok()
+                                .filter(|v| !v.is_empty())
+                        };
+                        crate::server::options::select_pane_option_line(
+                            &reply, name, combined_has2('v'), combined_has2('A'), inherited,
+                        ).trim_end_matches('\n').to_string()
+                    }
+                    None => reply,
+                };
+                let _ = resp_tx.send(out);
                 return true;
             }
             let value_only = combined_has2('v');

@@ -206,6 +206,47 @@ A command with no `-t` reaches the session with the most recent activity, the sa
 
 Multi-byte UTF-8 characters (box-drawing, emoji, CJK text) render correctly in panes. Pasting CJK text no longer crashes the session. Japanese and Korean IME input is handled with minimal latency (the paste-detection heuristic was tuned to avoid misidentifying rapid IME bursts).
 
+### Value-only `show-options -v`
+
+`-v` prints the value and nothing else in every scope, so a script can compare stdout with `on` or `off` directly (#647):
+
+```text
+psmux set-option -p -t %0 remain-on-exit on
+psmux show-options -p -v -t %0 remain-on-exit    # on
+psmux show-options -pv  -t %0 remain-on-exit     # on
+psmux show-options -p   -t %0 remain-on-exit     # remain-on-exit on
+```
+
+A named query answers for that one option only. As in tmux, an option that is not set in the queried scope's own store prints nothing and exits 0; add `-A` to fall back to the inherited value, which is then marked with `*` when the name is printed. A bare `show-options -p` still lists the whole pane store.
+
+### Control Characters in Names and Messages
+
+Window and session names are sanitized when they are set, the way tmux does it in `clean_name`, so a name can never carry a raw control byte and `#{window_name}` is always safe to drop into a tab separated or newline separated record (#647):
+
+```text
+psmux rename-window "w<TAB>x"   # stored and printed as w\tx
+psmux rename-window "w<ESC>y"   # stored and printed as w\033y
+```
+
+`display-message -p` encodes its result the same way tmux does: `ESC` becomes `\033`, `CR` becomes `\r`, `BEL` becomes `\a`, any other control byte becomes a three digit octal escape, and valid UTF-8 passes through untouched. A tab and a newline are deliberately left alone, so a multi line `#{...}` result still prints as multiple lines.
+
+Two things follow tmux by not changing. `list-panes`, `list-windows` and `list-sessions` hand back the `-F` string byte for byte, so a literal tab you put in your own format stays a tab (tmux stopped visually encoding command output in 3.6). `capture-pane`, `show-buffer`, `save-buffer` and control mode are never touched, because they carry pane bytes rather than metadata.
+
+One deliberate deviation: a backslash is never doubled. tmux stores `C:\src` as `C:\\src`, which on Windows would corrupt every path shaped window name.
+
+### Git Revision in `psmux -V`
+
+`psmux -V` reports the commit the binary was built from. `git` is the preferred source, and when it is unavailable the build falls back, in order, to `.cargo_vcs_info.json` (present in every crates.io tarball), to the cargo git checkout directory name (`cargo install --git` checks a revision out into a directory named after its short hash), and finally to a `PSMUX_GIT_SHA` environment variable that release tooling can set (#647):
+
+```text
+psmux 3.3.8 (4d12898 2026-09-12)          # built in a git checkout
+psmux 3.3.8 (4d12898 2026-09-12, dirty)   # built from a modified tree
+psmux 3.3.8 (4d12898)                     # commit known, date not
+psmux 3.3.8 (unknown commit)              # no revision recorded anywhere
+```
+
+`cargo install --git` uses libgit2 and never needs the `git` binary, so a machine without git on PATH used to install happily and then report `unknown commit`. The commit date is only ever available from git, so a fallback build prints the hash without a date.
+
 ## Behavioral Differences from tmux
 
 A few commands intentionally behave differently from upstream tmux. These are deliberate choices, not bugs.

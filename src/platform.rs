@@ -3698,6 +3698,11 @@ pub mod process_info {
     /// shared cache. Always a real `CreateToolhelp32Snapshot` walk.
     fn walk_process_table() -> Option<ProcTable> {
         PROC_TABLE_WALKS.with(|c| c.set(c.get() + 1));
+        // `W` in PSMUX_PTY_TRACE: one line per real CreateToolhelp32Snapshot.
+        // The walk costs 9-11ms on a desktop, so "how often does an idle server
+        // do this" is a number worth being able to read off a trace instead of
+        // inferring. Off by default; one relaxed atomic load when unset.
+        crate::pty_trace::mark_plain("W", 0);
         let entries = unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snap == INVALID_HANDLE || snap == 0 {

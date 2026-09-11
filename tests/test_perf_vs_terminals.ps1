@@ -190,7 +190,7 @@
 #       tick), so this is the one number that catches a regression no latency
 #       test can see. Resolution: TotalProcessorTime moves in 15.6 ms ticks, so
 #       one tick in a 3 s window is 0.52 percent of a core; the gate is 4 ticks.
-#   T8  keystroke CPU cost <= 2000 ms of CPU per 100 keystrokes, server and
+#   T8  keystroke CPU cost <= 3000 ms of CPU per 100 keystrokes, server and
 #       client summed, ie 20 ms of CPU per key. Measured 1060 ms per 100 keys on
 #       a quiet machine and up to 1680 ms loaded, and the cause is FRAME COUNT,
 #       not spinning: because conhost emits the cursor hide chunk and the text
@@ -1371,14 +1371,23 @@ if (-not $SkipKeys -and $KeyLat) {
             Check "T7 psmux idle CPU, server plus client (settled window)" $idleSum 2 "% of one core" `
                 ("settled window, {0}s after the last keystroke, measured over {1}s with nothing typed, one scheduler tick being {2:F2}%. The ramp down window, not judged, was {3:F2}% of a core" -f $r.idle_settle_seconds, $r.idle_settled_window_seconds, (15.6 / ($r.idle_settled_window_seconds * 1000) * 100), (Sum-Roles $r.idle_cpu_pct_of_core_settling @("server","client")))
         } else { Warn "T7 not evaluated (no idle CPU samples)" }
-        # T8 at 2000 ms per 100 keystrokes, ie 20 ms of CPU per key.
+        # T8 at 3000 ms per 100 keystrokes, ie 30 ms of CPU per key.
+        # Recalibrated 2026-09-11 after the first two full sweeps: the same binary
+        # measured 1016, 1172, 1289, 2110, 2148 and 2422 ms within a few hours with
+        # the pane shell's own CPU moving in step (469 to 2032 ms), so 2000 flapped
+        # on machine state alone. 3000 still catches the class of regression this
+        # gate exists for (a busy poll or a frame per keystroke doubling lands
+        # well above it) without failing a healthy build on a loaded box. The
+        # deterministic form of this check is FRAMES per keystroke, which
+        # tests/test_idle_socket_traffic.ps1 now pins at idle; a typing frames
+        # per key gate is the next calibration step.
         # The measured cost is 1060 ms per 100 keys on a quiet machine and up to
         # 1680 ms loaded, and the cause is frame count, not spinning: at a shell
         # prompt conhost emits the cursor hide chunk and the text chunk 15 ms
         # apart, so psmux builds and pushes TWO frames per keystroke, the second
         # superseding the first, at roughly 4 to 5.7 ms of work per frame. With a
         # pane that writes one chunk per key it is one frame and about half the
-        # CPU. 2000 ms leaves room for the loaded case and still catches a doubling.
+        # CPU. 3000 ms leaves room for the loaded case and still catches a doubling.
         # The follow up, which is a change of its own and not a tuning tweak here,
         # is to defer a cursor-visibility-only frame by a short grace so the text
         # frame absorbs it; that would halve frames per keystroke on the typing
@@ -1388,7 +1397,7 @@ if (-not $SkipKeys -and $KeyLat) {
         # inside Windows Terminal that work belongs to someone else's GPU.
         $keySum = Sum-Roles $r.cpu_ms_per_100_keys @("server","client")
         if ($r.cpu_ms_per_100_keys.Count -gt 0) {
-            Check "T8 psmux CPU per 100 keystrokes, server plus client" $keySum 2000 "ms" `
+            Check "T8 psmux CPU per 100 keystrokes, server plus client" $keySum 3000 "ms" `
                 ("server {0:F0} plus client {1:F0}; two frames per keystroke at a shell prompt. The pane shell itself cost {2:F0} ms and the client's conhost {3:F0} ms, neither judged. psmux over shell, the machine state independent form, was {4}x" -f (Sum-Roles $r.cpu_ms_per_100_keys @("server")), (Sum-Roles $r.cpu_ms_per_100_keys @("client")), (Sum-Roles $r.cpu_ms_per_100_keys @("shell")), (Sum-Roles $r.cpu_ms_per_100_keys @("console_host")), $r.cpu_per_100_keys_psmux_over_shell)
         } else { Warn "T8 not evaluated (no keystroke CPU samples)" }
     } else { Warn "T6, T7 and T8 not evaluated (the psmux_attached cell produced nothing)" }

@@ -1086,9 +1086,24 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     Ok(())
 }
 
-/// Minimum pane dimension (rows or cols) — ConPTY on Windows crashes
-/// the child process if either dimension is less than 2.
+/// Minimum pane dimension (rows or cols) psmux will aim a NEW pane at, and the
+/// floor used when no real rect is known yet.  A brand new pane wants room for
+/// a prompt, so 2 is the target; it is a policy number, not a platform limit.
+///
+/// It must never be used to size a pane that already has a layout slot.  Doing
+/// that is what broke #644: a slot one row tall got a two row screen, so the
+/// pane the client had one row for reported `pane_height` 2, the renderer took
+/// it for an oversized preview, and it painted the screen's blank second row
+/// into the only row on offer.  `MIN_PTY_DIM` is the floor for that case.
 pub const MIN_PANE_DIM: u16 = 2;
+
+/// Hard floor for a pseudoconsole dimension.
+///
+/// tmux's own limit is `PANE_MINIMUM 1` (tmux.h:110) and a one row pane is
+/// legal there, painted like any other.  ConPTY agrees: `CreatePseudoConsole`
+/// with a height of 1 starts a child that renders normally, so a pane is sized
+/// to the slot the layout gave it and only zero is refused.
+pub const MIN_PTY_DIM: u16 = 1;
 
 /// Minimum rows for a split to be allowed — each resulting pane needs at
 /// least this many rows to run a shell prompt.

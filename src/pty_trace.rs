@@ -26,6 +26,11 @@
 //!   `c`  the client's socket reader thread read a whole frame line
 //!   `d`  the client's main loop picked that frame up and will draw it
 //!
+//! Off the keystroke path, one stage answers "what is this process doing when it
+//! should be doing nothing":
+//!   `W`  a real `CreateToolhelp32Snapshot` walk of every process on the machine
+//!        (9 to 11ms each). An idle server should produce none.
+//!
 //! What it was built to establish, and did: at an idle pwsh prompt the `w` to
 //! `r` gap is ~15ms of PSReadLine that psmux cannot touch, while `p` to `d` is
 //! psmux's own. See tests/conpty_echolat.cs for the same 15ms measured with no

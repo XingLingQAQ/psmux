@@ -32,8 +32,59 @@
 # The pane runs tests/echo_load_child.cs with no filler output, so the pane
 # produces nothing, and nothing is typed. Every line crossing the socket in the
 # measurement window is therefore the client and server talking among
-# themselves. A healthy session still polls at its refresh cadence, which is why
-# the threshold is a few hundred per second and not zero.
+# themselves.
+#
+# IDLE IS SILENT, NOT CHEAP: THE SECOND CEILING
+# ---------------------------------------------
+# The 600/sec ceiling above catches the wake spin and nothing smaller, and the
+# "0.1 to 192" spread quoted for the healthy build is the tell: 192 lines/sec is
+# not a refresh cadence, it is the SAME request/reply loop latching through a
+# different door. An idle client has no refresh cadence at all. It sends
+# dump-state when it has a reason to (a key went out, the terminal resized, the
+# server told it to) and otherwise waits, because the server pushes a frame
+# whenever pane state changes.
+#
+# The door was `force_dump`, the client's "send one dump-state now" flag. It was
+# cleared at the BOTTOM of the client loop, and every early `continue` in that
+# loop -- no frame this iteration, a frame identical to the last one, a frame
+# that failed to parse -- skips the bottom. So one latched flag re-sent
+# dump-state on every iteration, for ever, and the server answered "NC" in two
+# bytes, which is why nothing looked like traffic and why three CPU sampling
+# runs disagreed with each other. Measured on e49fd97 over an 8 s window with a
+# settled pwsh prompt and nothing typed: 2402 client socket reads, 2402 of them
+# the 3 byte "NC", 187 per second. It also drags the server's process table
+# walker in behind it, because every dump-state runs the automatic-rename check:
+# 7 CreateToolhelp32Snapshot walks in that same idle window, at 9 to 11 ms each,
+# none of which an idle server has any reason to do.
+#
+# So this suite asserts TWICE on one measurement: the loose ceiling keeps
+# catching the wake spin, and `QuietLinesPerSec` asserts what idle actually is.
+# With the flag cleared on the request that satisfies it, the same window
+# measures 0 to 2 lines in ten seconds. The two populations are 0.2/sec against
+# 187/sec, so the 5/sec gate sits two orders of magnitude below the bug and
+# still leaves room for a frame the server legitimately pushes while "idle"
+# (a status clock tick, an alert flag clearing).
+#
+# TWO CELLS, BECAUSE THE LATCH IS BISTABLE
+# ----------------------------------------
+# Cell 1 attaches and types nothing. Whether the latch catches there is a race
+# on the first dump-state reply, so the same unfixed build measured 0.1, 6.9 and
+# 183 lines/sec across three runs of cell 1. A gate that only fails half the time
+# is how this shipped twice already.
+#
+# Cell 2 arms it on purpose, and needs nothing but one keystroke and a pane that
+# does not answer:
+#   * the pane is `pwsh -Command "Start-Sleep -Seconds 600"`, which reads its
+#     input and writes NOTHING, so the key produces no pane output,
+#   * one key goes into the client's console (tests/keylat.cs, `--n 1`), which
+#     sets `force_dump`,
+#   * the server therefore has nothing new and answers "NC", so the client's
+#     loop takes the `!got_frame` continue and never reaches the bottom where
+#     the flag was being cleared.
+# From there an unfixed client re-sends for ever, with nothing on either side to
+# break the cycle. Measured: 148 to 190 lines/sec on the unfixed client in this
+# cell, every run, against 0.1 with the flag cleared on the request. Cell 2 is
+# asserted on the quiet gate only - the loose ceiling is cell 1's history.
 
 param(
     [string]$Binary = "",
@@ -41,7 +92,9 @@ param(
     # Generous on purpose: a healthy client was measured up to 192 lines/sec and
     # the spin starts at 3332. Anything in between is already a bug worth
     # looking at, and this will not fire on cadence noise.
-    [int]$MaxLinesPerSec = 600
+    [int]$MaxLinesPerSec = 600,
+    # The second, tight ceiling. See IDLE IS SILENT, NOT CHEAP above.
+    [int]$QuietLinesPerSec = 5
 )
 
 $ErrorActionPreference = "Continue"
@@ -67,92 +120,137 @@ $root = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $root "target\release"
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 $EchoChild = Join-Path $build "echo_load_child.exe"
+$KeyLat = Join-Path $build "keylat.exe"
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) { Write-Fail "csc.exe not found at $csc"; exit 1 }
-$src = Join-Path $PSScriptRoot "echo_load_child.cs"
-if ((-not (Test-Path $EchoChild)) -or ((Get-Item $src).LastWriteTime -gt (Get-Item $EchoChild).LastWriteTime)) {
-    & $csc /nologo /optimize "/out:$EchoChild" $src | Out-Null
+# keylat is only used to put ONE key into the client's console for cell 2.
+foreach ($pair in @(@("echo_load_child", $EchoChild), @("keylat", $KeyLat))) {
+    $src = Join-Path $PSScriptRoot "$($pair[0]).cs"
+    if ((-not (Test-Path $pair[1])) -or ((Get-Item $src).LastWriteTime -gt (Get-Item $pair[1]).LastWriteTime)) {
+        & $csc /nologo /optimize "/out:$($pair[1])" $src | Out-Null
+    }
+    if (-not (Test-Path $pair[1])) { Write-Fail "could not build $($pair[0]).exe"; exit 1 }
 }
-if (-not (Test-Path $EchoChild)) { Write-Fail "could not build echo_load_child.exe"; exit 1 }
 
 $work = Join-Path $env:TEMP "psmux_idle_traffic"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
-$tracePrefix = Join-Path $work "trace_$PID"
-Remove-Item "$tracePrefix.*" -Force -EA SilentlyContinue
 
-$ns = "idletraf$PID"
 $exeName = [IO.Path]::GetFileName($Binary)
 function OwnPids { @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -EA SilentlyContinue |
     Where-Object { $_.ExecutablePath -eq $Binary } | Select-Object -ExpandProperty ProcessId) }
-$before = OwnPids
 
-# Launch through a .cmd so PSMUX_PTY_TRACE reaches both the client and the
-# server it spawns, and so this shell's own session routing cannot leak in.
-$launcher = Join-Path $work "launch_$PID.cmd"
-Set-Content -Path $launcher -Encoding ASCII -Value @(
-    "@echo off",
-    "set PSMUX_SESSION=",
-    "set PSMUX_SESSION_NAME=",
-    "set PSMUX_PTY_TRACE=$tracePrefix",
-    "`"$Binary`" -L $ns new-session -s idle `"$EchoChild`""
-)
-$client = Start-Process -FilePath $launcher -PassThru
-
-$deadline = (Get-Date).AddSeconds(25)
-$up = $false
-while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 250
-    if ((& $Binary -L $ns ls 2>&1 | Out-String) -match 'idle:') { $up = $true; break }
-}
-
-$lines = -1
-if ($up) {
-    Start-Sleep -Seconds 5    # let startup traffic finish before the window opens
-
-    # Record each trace file's size so only the measurement window is counted.
-    $sizes0 = @{}
-    Get-ChildItem "$tracePrefix.*" -EA SilentlyContinue | ForEach-Object { $sizes0[$_.Name] = $_.Length }
-    $w = [Diagnostics.Stopwatch]::StartNew()
-    Start-Sleep -Seconds $Secs
-    $w.Stop()
-
-    $c = 0
-    Get-ChildItem "$tracePrefix.*" -EA SilentlyContinue | ForEach-Object {
-        $start = if ($sizes0.ContainsKey($_.Name)) { $sizes0[$_.Name] } else { 0 }
-        # Share write access: both psmux processes still hold these files open.
-        $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')
-        try {
-            $fs.Seek($start, 'Begin') | Out-Null
-            $sr = New-Object IO.StreamReader($fs)
-            while (-not $sr.EndOfStream) {
-                $ln = $sr.ReadLine()
-                if (-not $ln -or $ln.StartsWith('#')) { continue }
-                # Stage 'c' is "the client's socket reader read a whole line".
-                if (($ln -split ' ')[1] -eq 'c') { $c++ }
+# One cell: attach a client with `$PaneCmd` in the pane, optionally put ONE
+# keystroke into the client's console, wait for the screen to settle, then count
+# the lines the client's socket reader takes off the wire for `$Secs`.
+# Returns lines per second, or -1 if the session never came up.
+function Measure-IdleLines {
+    param([string]$Cell, [string[]]$PaneCmd, [switch]$InjectKey)
+    $ns = "idletraf$Cell$PID"
+    $tracePrefix = Join-Path $work "trace_${Cell}_$PID"
+    Remove-Item "$tracePrefix.*" -Force -EA SilentlyContinue
+    $before = OwnPids
+    # Launch through a .cmd so PSMUX_PTY_TRACE reaches both the client and the
+    # server it spawns, and so this shell's own session routing cannot leak in.
+    $launcher = Join-Path $work "launch_${Cell}_$PID.cmd"
+    $paneQuoted = ($PaneCmd | ForEach-Object { "`"$_`"" }) -join " "
+    Set-Content -Path $launcher -Encoding ASCII -Value @(
+        "@echo off",
+        "set PSMUX_SESSION=",
+        "set PSMUX_SESSION_NAME=",
+        "set PSMUX_PTY_TRACE=$tracePrefix",
+        "`"$Binary`" -L $ns new-session -s idle $paneQuoted"
+    )
+    $client = Start-Process -FilePath $launcher -PassThru
+    $deadline = (Get-Date).AddSeconds(25)
+    $up = $false
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        if ((& $Binary -L $ns ls 2>&1 | Out-String) -match 'idle:') { $up = $true; break }
+    }
+    $lines = -1
+    if ($up) {
+        Start-Sleep -Seconds 5    # let startup traffic finish before the window opens
+        if ($InjectKey) {
+            # The client's console is the one the launcher's cmd.exe owns, so the
+            # key goes to the psmux client process the launcher started, not to
+            # the launcher. Whether the echo ever appears is irrelevant here:
+            # sending the key is what arms `force_dump`.
+            $target = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($client.Id)" -EA SilentlyContinue |
+                Where-Object { $_.Name -eq $exeName } | Select-Object -ExpandProperty ProcessId)
+            if ($target.Count -ge 1) {
+                & $KeyLat --pid $target[0] --label "arm" --out (Join-Path $work "arm_$PID.txt") `
+                    --mode single --n 1 --warmup 0 --gap 0 --timeout 500 --oracle "cell:0,0" --noerase | Out-Null
+            } else {
+                Write-Info "could not find the client process under the launcher, so no key was injected"
             }
-        } finally { $fs.Close() }
-    }
-    $lines = [math]::Round($c / $w.Elapsed.TotalSeconds, 1)
-    Write-Info ("idle window {0:N1}s, {1} client socket reads, {2} per second" -f $w.Elapsed.TotalSeconds, $c, $lines)
-} else {
-    Write-Fail "the attached session never came up, so idle traffic was not measured"
-}
+            Start-Sleep -Seconds 3    # let the keystroke's frames finish
+        }
+        # Record each trace file's size so only the measurement window is counted.
+        $sizes0 = @{}
+        Get-ChildItem "$tracePrefix.*" -EA SilentlyContinue | ForEach-Object { $sizes0[$_.Name] = $_.Length }
+        $w = [Diagnostics.Stopwatch]::StartNew()
+        Start-Sleep -Seconds $Secs
+        $w.Stop()
 
-# Teardown
-& $Binary -L $ns kill-server 2>&1 | Out-Null
-Start-Sleep -Milliseconds 600
-try { if (-not $client.HasExited) { Stop-Process -Id $client.Id -Force -EA SilentlyContinue } } catch {}
-foreach ($p in (OwnPids)) { if ($before -notcontains $p) { try { Stop-Process -Id $p -Force -EA SilentlyContinue } catch {} } }
-Remove-Item $launcher -Force -EA SilentlyContinue
-Remove-Item "$tracePrefix.*" -Force -EA SilentlyContinue
-
-if ($lines -ge 0) {
-    if ($lines -lt $MaxLinesPerSec) {
-        Write-Pass ("an idle attached client reads {0} socket lines/sec, under the {1}/sec ceiling" -f $lines, $MaxLinesPerSec)
+        $c = 0
+        Get-ChildItem "$tracePrefix.*" -EA SilentlyContinue | ForEach-Object {
+            $start = if ($sizes0.ContainsKey($_.Name)) { $sizes0[$_.Name] } else { 0 }
+            # Share write access: both psmux processes still hold these files open.
+            $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')
+            try {
+                $fs.Seek($start, 'Begin') | Out-Null
+                $sr = New-Object IO.StreamReader($fs)
+                while (-not $sr.EndOfStream) {
+                    $ln = $sr.ReadLine()
+                    if (-not $ln -or $ln.StartsWith('#')) { continue }
+                    # Stage 'c' is "the client's socket reader read a whole line".
+                    if (($ln -split ' ')[1] -eq 'c') { $c++ }
+                }
+            } finally { $fs.Close() }
+        }
+        $lines = [math]::Round($c / $w.Elapsed.TotalSeconds, 1)
+        Write-Info ("{0}: idle window {1:N1}s, {2} client socket reads, {3} per second" -f $Cell, $w.Elapsed.TotalSeconds, $c, $lines)
     } else {
-        Write-Fail ("an idle attached client reads {0} socket lines/sec, over the {1}/sec ceiling - the client and server are in a request/reply loop with nothing to say; check what wakes the client's input wait" -f $lines, $MaxLinesPerSec)
+        Write-Fail "$Cell : the attached session never came up, so idle traffic was not measured"
+    }
+
+    # Teardown
+    & $Binary -L $ns kill-server 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 600
+    try { if (-not $client.HasExited) { Stop-Process -Id $client.Id -Force -EA SilentlyContinue } } catch {}
+    foreach ($p in (OwnPids)) { if ($before -notcontains $p) { try { Stop-Process -Id $p -Force -EA SilentlyContinue } catch {} } }
+    Remove-Item $launcher -Force -EA SilentlyContinue
+    Remove-Item "$tracePrefix.*" -Force -EA SilentlyContinue
+    Remove-Item (Join-Path $work "arm_$PID.txt") -Force -EA SilentlyContinue
+    return $lines
+}
+
+function Assert-Cell {
+    param([string]$Cell, [double]$Lines, [switch]$QuietOnly)
+    if ($Lines -lt 0) { return }
+    if (-not $QuietOnly) {
+        if ($Lines -lt $MaxLinesPerSec) {
+            Write-Pass ("{0}: an idle attached client reads {1} socket lines/sec, under the {2}/sec ceiling" -f $Cell, $Lines, $MaxLinesPerSec)
+        } else {
+            Write-Fail ("{0}: an idle attached client reads {1} socket lines/sec, over the {2}/sec ceiling - the client and server are in a request/reply loop with nothing to say; check what wakes the client's input wait" -f $Cell, $Lines, $MaxLinesPerSec)
+        }
+    }
+    # The same measurement, against what idle actually is. See IDLE IS SILENT,
+    # NOT CHEAP in the header.
+    if ($Lines -lt $QuietLinesPerSec) {
+        Write-Pass ("{0}: an idle attached client reads {1} socket lines/sec, under the {2}/sec quiet gate" -f $Cell, $Lines, $QuietLinesPerSec)
+    } else {
+        Write-Fail ("{0}: an idle attached client reads {1} socket lines/sec, over the {2}/sec quiet gate - an idle client should send nothing and read nothing: the server pushes frames, so a steady stream of 3 byte NC replies means a dump-state request is being re-sent with no reason to (check every early 'continue' in the client loop against what force_dump means)" -f $Cell, $Lines, $QuietLinesPerSec)
     }
 }
+
+Write-Host "--- cell 1: silent pane, nothing typed ---" -ForegroundColor DarkCyan
+$lines = Measure-IdleLines -Cell "silent" -PaneCmd @($EchoChild)
+Assert-Cell -Cell "silent pane" -Lines $lines
+
+Write-Host "--- cell 2: one keystroke into a pane that answers nothing ---" -ForegroundColor DarkCyan
+$lines2 = Measure-IdleLines -Cell "armed" -PaneCmd @("pwsh","-NoLogo","-NoProfile","-Command","Start-Sleep -Seconds 600") -InjectKey
+Assert-Cell -Cell "after one keystroke" -Lines $lines2 -QuietOnly
 
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green

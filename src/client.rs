@@ -5927,6 +5927,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             if writer.flush().is_err() { break; }
             dump_in_flight = true;
             dump_flight_start = Instant::now();
+            // The force is SPENT here, on the request it asked for, not at the
+            // bottom of the loop. Every early `continue` below (no frame this
+            // iteration, a frame identical to the last one, a frame that failed
+            // to parse) skips that bottom, so a latched `force_dump` made this
+            // block fire again on the very next iteration, and again, at socket
+            // round trip rate. The server answers "NC" in 2 bytes, which is why
+            // it never showed up as traffic, but it is a request/reply spin
+            // across two processes: measured at an idle pwsh prompt with a
+            // settled screen, 187 dump-state/NC pairs per second for a screen
+            // that had not changed in eight seconds, and it drags the server's
+            // process table walk along behind it because every dump-state runs
+            // the automatic-rename check. Clearing the flag on the request keeps
+            // its meaning ("send one dump-state now") and makes idle silent:
+            // tests/test_idle_socket_traffic.ps1 cell 2 pins it.
+            force_dump = false;
         }
 
         // ── STEP 3: Render if we have a frame ────────────────────────────

@@ -161,7 +161,9 @@ fn an_unready_spare_is_not_counted_as_ready() {
     pool.push(fake_spare(1));           // lands, but its shell is still starting
     assert_eq!(pool.len(), 1, "it is in the pool");
     assert_eq!(pool.ready_len(), 0, "but it is not ready");
-    assert!(pool.take_ready().is_none(), "so a readiness-only claim finds nothing");
+    let (got, was_ready) = pool.claim();
+    assert!(got.is_some(), "it is still the best thing available");
+    assert!(!was_ready, "and the claim is reported as a miss");
 }
 
 #[test]
@@ -178,13 +180,22 @@ fn a_claim_still_takes_a_warming_spare_over_nothing() {
 }
 
 #[test]
-fn a_claim_prefers_a_ready_spare_over_an_older_warming_one() {
+fn a_claim_takes_the_lowest_id_even_when_a_later_spare_is_ready_first() {
+    // Pane ids MUST come out in creation order, because a spare's id is
+    // allocated when it is spawned (it is planted in the shell as TMUX_PANE, and
+    // a child's environment cannot be rewritten afterwards). Preferring the
+    // first READY spare reordered them: spares are spawned concurrently, so
+    // they become ready in whatever order the OS finishes them, and ten splits
+    // came out %2 %3 %4 %5 %12 %9 %11 %6 %7 %8.
+    //
+    // Taking the lowest id costs nothing in latency: the lowest id is also the
+    // earliest spawned, so it is the spare furthest through its startup.
     let mut pool = WarmPool::new(3);
-    pool.push(fake_spare(1));           // older, still starting
+    pool.push(fake_spare(1));           // earliest, still starting
     pool.push(ready_spare(2));
     let (got, was_ready) = pool.claim();
-    assert_eq!(got.map(|w| w.pane_id), Some(2));
-    assert!(was_ready);
+    assert_eq!(got.map(|w| w.pane_id), Some(1), "creation order wins");
+    assert!(!was_ready, "and the miss is reported so the pool surges");
 }
 
 #[test]
@@ -199,22 +210,64 @@ fn a_claim_on_an_empty_pool_reports_a_miss() {
 fn a_ready_spare_is_handed_out() {
     let mut pool = WarmPool::new(2);
     pool.push(ready_spare(7));
-    assert_eq!(pool.take_ready().map(|w| w.pane_id), Some(7));
+    let (got, was_ready) = pool.claim();
+    assert_eq!(got.map(|w| w.pane_id), Some(7));
+    assert!(was_ready);
 }
 
 #[test]
-fn ready_spares_are_served_oldest_first_past_unready_ones() {
-    // Claim order has to skip the warming spares rather than stop at them,
-    // otherwise one newborn at the head of the queue blocks a settled spare
-    // sitting right behind it.
+fn consecutive_claims_hand_out_strictly_increasing_ids() {
+    // The contract scripts depend on: the Nth creation gets the Nth id. tmux
+    // allocates at creation and never goes backwards, and a pool of pre spawned
+    // spares has to present the same sequence.
+    let mut pool = WarmPool::new(8);
+    // Landing order deliberately scrambled: this is what concurrent refills do.
+    for id in [5usize, 2, 7, 3, 6, 4] {
+        pool.push(if id % 2 == 0 { ready_spare(id) } else { fake_spare(id) });
+    }
+    let mut out = Vec::new();
+    while let (Some(wp), _) = pool.claim() {
+        out.push(wp.pane_id);
+    }
+    assert_eq!(out, vec![2, 3, 4, 5, 6, 7], "claims must come out in id order");
+}
+
+#[test]
+fn a_spare_whose_id_is_already_in_the_past_is_refused() {
+    // The burst case: four creations drain the pool, the fifth finds it empty
+    // and takes a fresh id above every id the in flight refills reserved. Those
+    // refills must not then be handed out, or the sequence reads %2 %3 %12 %4.
+    let mut pool = WarmPool::new(8);
+    pool.push(ready_spare(6));
+    pool.push(ready_spare(7));
+    let discarded = pool.set_issued_floor(12);
+    assert_eq!(discarded, 2, "pooled spares below the floor are retired at once");
+    assert!(pool.is_empty());
+    // And one that was still in flight when the floor rose is refused on arrival.
+    pool.push(ready_spare(8));
+    assert!(pool.is_empty(), "a late spare below the floor is dropped, not pooled");
+    pool.push(ready_spare(13));
+    assert_eq!(pool.len(), 1, "ids above the floor are still welcome");
+    assert_eq!(pool.claim().0.map(|w| w.pane_id), Some(13));
+}
+
+#[test]
+fn the_id_floor_never_goes_backwards() {
     let mut pool = WarmPool::new(4);
-    pool.push(fake_spare(1));           // warming
-    pool.push(ready_spare(2));
+    pool.set_issued_floor(10);
+    assert_eq!(pool.set_issued_floor(4), 0, "a lower floor is ignored");
+    assert_eq!(pool.issued_floor(), 10);
+}
+
+#[test]
+fn a_spare_that_lands_late_still_keeps_its_place_in_the_sequence() {
+    // Refill for id 3 finishes after the refill for id 4. It must still be
+    // handed out first, or the visible ids go 4 then 3.
+    let mut pool = WarmPool::new(4);
+    pool.push(ready_spare(4));
     pool.push(ready_spare(3));
-    assert_eq!(pool.take_ready().map(|w| w.pane_id), Some(2));
-    assert_eq!(pool.take_ready().map(|w| w.pane_id), Some(3));
-    assert!(pool.take_ready().is_none());
-    assert_eq!(pool.len(), 1, "the warming spare is still there");
+    assert_eq!(pool.claim().0.map(|w| w.pane_id), Some(3));
+    assert_eq!(pool.claim().0.map(|w| w.pane_id), Some(4));
 }
 
 #[test]
@@ -352,8 +405,8 @@ fn trimming_keeps_the_oldest_spares() {
     }
     pool.end_surge_for_test();
     pool.trim_surplus();
-    assert_eq!(pool.take_ready().map(|w| w.pane_id), Some(1));
-    assert_eq!(pool.take_ready().map(|w| w.pane_id), Some(2));
+    assert_eq!(pool.claim().0.map(|w| w.pane_id), Some(1));
+    assert_eq!(pool.claim().0.map(|w| w.pane_id), Some(2));
 }
 
 // ── helper: a spare with no shell behind it ────────────────────────

@@ -459,6 +459,7 @@ A psmux extension that creates a pane floating above the tiled layout.
 - Boolean: `-A` (include inherited), `-g` (global), `-s` (server scope), `-w` (window scope), `-p` (pane scope, #580), `-v` (value only), `-q` (quiet)
 - Value: `-t` (window selector)
 - A bare `show-options -s` lists the server-scope options only, as tmux does (#618). Before that fix the flag was parsed and then ignored, so it printed the whole store, session options included. A named query such as `show-options -s escape-time` ignores `-s`, which is what tmux does for a table option too.
+- `-v` prints the value and nothing else in every scope, including `-p` (#647). A named `-p` query answers for that one option; before this fix it ignored both the name and `-v` and printed the whole pane store as `name value` pairs, so a script comparing stdout with `on` never matched. An option that is not set in the pane's own store prints nothing at exit 0, matching tmux; `-A` falls back to the inherited value and marks it with `*` when the name is printed. A bare `show-options -p` still lists the whole store (#580).
 - Combined tokens are handled the same way as for `set-option`.
 - The singular aliases `show-option` and `show-window-option` are accepted on every layer (#586), so a `.tmux.conf` or plugin that uses tmux's singular spelling works unchanged.
 - Not accepted: `-H`. `-g` is absorbed rather than acted on, psmux having one store. Since #553 flags outside `-A -g -p -q -s -v -w` (plus `-t <target>`) are rejected with `unknown flag -X` at exit 1.

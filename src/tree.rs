@@ -238,6 +238,31 @@ pub fn compute_rects(node: &Node, area: Rect, out: &mut Vec<(Vec<usize>, Rect)>)
     rec(node, area, &mut path, out);
 }
 
+/// The pseudoconsole size a pane gets for the layout slot it owns.
+///
+/// `border_rows` is the row `pane-border-status` takes out of the slot for the
+/// pane's label (#288).
+///
+/// The rule is tmux's: a pane is exactly as big as its cell.  tmux keeps no
+/// second opinion about a pane's size, it just calls `window_pane_resize` with
+/// the cell's `sx`/`sy` (tmux window.c:1564) and its floor is `PANE_MINIMUM 1`
+/// (tmux.h:110), so a one row cell holds a one row pane.
+///
+/// This used to clamp to `MIN_PANE_DIM` (2) instead, which is what #644 was: a
+/// slot one row tall got a two row screen, `pane_height` said 2 while
+/// `pane_top` and `pane_bottom` were both 0, and the client, seeing a source
+/// taller than the rect it had, went down its oversized preview path and
+/// painted the screen's blank second row into the only row on offer.  The
+/// program kept running and `capture-pane` kept showing live content, so the
+/// pane looked healthy from every server side check while the client drew
+/// nothing at all.
+#[must_use]
+pub fn pane_inner_size(rect: Rect, border_rows: u16) -> (u16, u16) {
+    let height = rect.height.saturating_sub(border_rows).max(crate::pane::MIN_PTY_DIM);
+    let width = rect.width.max(crate::pane::MIN_PTY_DIM);
+    (height, width)
+}
+
 /// Resize all panes in one window to match the supplied window area.
 pub fn resize_window_panes(app: &mut AppState, window_index: usize, area: Rect) {
     if window_index >= app.windows.len() || area.width == 0 || area.height == 0 { return; }
@@ -269,11 +294,11 @@ pub fn resize_window_panes(app: &mut AppState, window_index: usize, area: Rect) 
                     if rect.width == 0 || rect.height == 0 {
                         return;
                     }
-                    // Clamp to MIN_PANE_DIM so ConPTY never receives a
-                    // dimension small enough to crash the child process.
-                    let inner_height = rect.height.saturating_sub(border_rows).max(crate::pane::MIN_PANE_DIM);
-                    let inner_width = rect.width.max(crate::pane::MIN_PANE_DIM);
-                    
+                    // Size the pane to the slot the layout actually gave it
+                    // (#644).  See `pane_inner_size` for why nothing is
+                    // rounded up here.
+                    let (inner_height, inner_width) = pane_inner_size(*rect, border_rows);
+
                     if pane.last_rows != inner_height || pane.last_cols != inner_width {
                         let _ = pane.master.resize(portable_pty::PtySize {
                             rows: inner_height,
@@ -1006,3 +1031,7 @@ pub fn collect_leaves(node: Node) -> Vec<Node> {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue171_layout_bugs.rs"]
 mod test_issue171_layout_bugs;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue644_one_row_pane.rs"]
+mod test_issue644_one_row_pane;

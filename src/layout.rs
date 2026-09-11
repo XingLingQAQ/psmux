@@ -400,7 +400,13 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                 // ConPTY never passes through ESC[?1049h, so alternate_screen()
                 // is always false.  Use a heuristic instead: if the last row of
                 // the screen has non-blank content, this is a fullscreen TUI app.
-                let alternate_screen = screen.alternate_screen() || {
+                //
+                // #644: the heuristic needs a last row that is distinct from
+                // the rest of the screen.  A pane exactly one row tall has no
+                // such row, so any character at all in it would read as a
+                // fullscreen TUI and a right click there would stop pasting.
+                // Below two rows, believe only what the parser reports.
+                let alternate_screen = screen.alternate_screen() || p.last_rows >= 2 && {
                     let last_row = p.last_rows.saturating_sub(1);
                     let mut has_content = false;
                     for col in 0..p.last_cols {

@@ -546,11 +546,52 @@ fn query_host_terminal_colors_impl() -> Option<String> {
             event_type: 0, _padding: 0,
             event: KeyEventRecord { key_down: 0, repeat_count: 0, virtual_key_code: 0, virtual_scan_code: 0, u_char: 0, control_key_state: 0 },
         }; 64];
-        'read: while std::time::Instant::now() < deadline {
+        // Issue #646: the DA1 sentinel proves the host *answered*, not that it
+        // has *finished* answering.  WezTerm replies to DA1 before the sixteen
+        // OSC 4 colour reports, so leaving on the sentinel alone left those
+        // reports in flight.  conhost then swallowed most of them and passed a
+        // torn tail of one (`555\x1b\`) into the console input queue after the
+        // drain had already restored the original mode, and the client's input
+        // pump read that tail as the keystrokes `5 5 5 Alt+\` and typed them
+        // into the pane.  Measured on every WezTerm start: the drain returned
+        // in 0ms holding 28 bytes (the DA1 reply alone) with an empty queue,
+        // and the fragment landed in that queue 26ms to 40ms later.
+        //
+        // So once the sentinel is in, keep reading until the console input has
+        // stayed quiet for QUIET_SETTLE, and keep what arrives rather than
+        // discard it: a reply that was merely late is still a reply, and
+        // parsing it can only make the palette more complete.  (Under WezTerm
+        // it does not: conhost eats all eighteen replies and hands over only the
+        // torn tail, so the palette stays empty there either way.  The bug being
+        // fixed is the fragment reaching the pane, not the palette.)
+        //
+        // A settle window rather than a count of the replies received, because
+        // conhost never answers OSC 10/11 (29676f3), so waiting for all eighteen
+        // would burn the full deadline on every start there.  The 500ms deadline
+        // still bounds everything, so a host that chatters cannot hold startup
+        // up.
+        //
+        // 75ms, not the 30ms the report proposed: the DA1 reply lands within
+        // 2ms, so a 30ms window closes at ~31ms and still lost the race to the
+        // 26ms to 40ms arrivals about half the time (measured 2 of 5, then 3 of
+        // 8).  75ms clears the slowest arrival seen in 24 starts by 35ms, and is
+        // the whole added cost of the drain: it returned in 0ms before and
+        // returns in 75ms to 116ms now.
+        const QUIET_SETTLE: std::time::Duration = std::time::Duration::from_millis(75);
+        let mut sentinel = false;
+        let mut last_input = std::time::Instant::now();
+        while std::time::Instant::now() < deadline {
             let mut avail: u32 = 0;
             if GetNumberOfConsoleInputEvents(h_in, &mut avail) == 0 { break; }
             if avail == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                // Leave only from a settled queue, and never part way through a
+                // sequence: half a reply left behind is the exact tear this
+                // guards against.
+                if sentinel && last_input.elapsed() >= QUIET_SETTLE && !ends_mid_sequence(&buf) {
+                    break;
+                }
+                let idle = if sentinel { 2 } else { 5 };
+                std::thread::sleep(std::time::Duration::from_millis(idle));
                 continue;
             }
             let mut read: u32 = 0;
@@ -566,8 +607,10 @@ fn query_host_terminal_colors_impl() -> Option<String> {
                     buf.extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
                 }
             }
-            // Stop as soon as the DA1 reply (CSI ? ... c) is present.
-            if find_csi_terminated(&buf, b'c') { break 'read; }
+            last_input = std::time::Instant::now();
+            // The DA1 reply (CSI ? ... c) opens the settle window rather than
+            // ending the drain.
+            if !sentinel { sentinel = find_csi_terminated(&buf, b'c'); }
         }
         SetConsoleMode(h_in, orig_mode);
 
@@ -580,10 +623,76 @@ fn query_host_terminal_colors_impl() -> Option<String> {
     }
 }
 
+/// Where a run of terminal reply bytes has got to (issue #646).
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReplyScan {
+    /// Between sequences: safe to stop reading here.
+    Ground,
+    /// Saw ESC, waiting to learn what kind of sequence it introduces.
+    Esc,
+    /// ESC followed by intermediate bytes, waiting for the final byte.
+    EscIntermediate,
+    /// Inside `CSI ...`, waiting for the final byte.
+    Csi,
+    /// Inside a string sequence (OSC/DCS/SOS/PM/APC), waiting for BEL or ST.
+    Str,
+    /// Saw ESC inside a string sequence: `\` makes it the ST terminator.
+    StrEsc,
+}
+
+/// True when `buf` stops part way through an escape sequence, i.e. the host is
+/// still mid reply and more bytes belong to what is already buffered.
+///
+/// Issue #646: the colour drain must never hand the console back to the input
+/// pump holding half a reply, because the remaining half would be read as
+/// keystrokes and typed into the pane.  Costs nothing in the common case: with
+/// nothing in flight the buffer ends at a sequence boundary and the drain
+/// leaves exactly when it otherwise would.
+#[cfg(windows)]
+pub(crate) fn ends_mid_sequence(buf: &[u8]) -> bool {
+    let mut state = ReplyScan::Ground;
+    for &b in buf {
+        state = match state {
+            ReplyScan::Ground => if b == 0x1b { ReplyScan::Esc } else { ReplyScan::Ground },
+            ReplyScan::Esc => match b {
+                b'[' => ReplyScan::Csi,
+                // OSC, DCS, SOS, PM and APC all run until a string terminator.
+                b']' | b'P' | b'X' | b'^' | b'_' => ReplyScan::Str,
+                0x1b => ReplyScan::Esc,
+                0x20..=0x2f => ReplyScan::EscIntermediate,
+                // Any other byte is the final byte of a two byte escape.
+                _ => ReplyScan::Ground,
+            },
+            ReplyScan::EscIntermediate => match b {
+                0x20..=0x2f => ReplyScan::EscIntermediate,
+                0x1b => ReplyScan::Esc,
+                _ => ReplyScan::Ground,
+            },
+            ReplyScan::Csi => match b {
+                0x40..=0x7e => ReplyScan::Ground, // final byte
+                0x1b => ReplyScan::Esc,           // abandoned mid sequence
+                _ => ReplyScan::Csi,              // parameter / intermediate
+            },
+            ReplyScan::Str => match b {
+                0x07 => ReplyScan::Ground, // BEL terminator
+                0x1b => ReplyScan::StrEsc,
+                _ => ReplyScan::Str,
+            },
+            ReplyScan::StrEsc => match b {
+                b'\\' => ReplyScan::Ground, // ESC \ string terminator
+                0x07 => ReplyScan::Ground,
+                _ => ReplyScan::Str,
+            },
+        };
+    }
+    state != ReplyScan::Ground
+}
+
 /// True when `buf` contains a complete `CSI ? ... <final>` sequence with the
 /// given final byte (used to spot the DA1 `\x1b[?...c` sentinel reply).
 #[cfg(windows)]
-fn find_csi_terminated(buf: &[u8], final_byte: u8) -> bool {
+pub(crate) fn find_csi_terminated(buf: &[u8], final_byte: u8) -> bool {
     let mut i = 0;
     while i + 2 < buf.len() {
         if buf[i] == 0x1b && buf[i + 1] == b'[' && buf[i + 2] == b'?' {
@@ -5584,3 +5693,7 @@ mod tests_issue599_data_root_mutex;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue608_priority.rs"]
 mod tests_issue608_priority;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue646_osc_drain.rs"]
+mod tests_issue646_osc_drain;

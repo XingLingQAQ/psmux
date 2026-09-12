@@ -324,21 +324,36 @@ if ($windowTimes.Count -gt 0) {
         Write-Pass "psmux overhead per window is minimal (~${overhead}ms)"
     }
 
-    # At the shipped default pool depth the first `warm-pool-size` creations of
-    # a run come from settled spares and the one after that has to wait out a
-    # shell start. So this is a budget on how MANY creations are allowed to be
-    # slow, not on the worst one: with the depth-one pool it was every other
-    # creation.
+    # At the shipped default pool depth (2) the first two creations of a run
+    # come from settled spares and the third has to wait out a shell start. So
+    # this is a budget on how MANY creations are allowed to be slow, not on the
+    # worst one: with the depth-one pool it was every other creation.
+    #
+    # Two, not one. Measured 2026-09-12 on three builds (8708d12, 58aa34d,
+    # d493da1), six runs alternating between the pre and post batch binaries:
+    # the third creation is always the cold one (600 to 770 ms) and the FIFTH
+    # is slow about one run in three ([57,36,600,54,324] and [72,56,668,67,360]
+    # were two of them), on old and new code alike. The mechanism is the refill
+    # itself: the moment the third creation finds the pool empty, two
+    # replacement spares start booting on their own threads WHILE the cold
+    # spawn boots, so three pwsh starts race on the machine. Creation four takes
+    # the first replacement; creation five can land while the second is still
+    # booting and waits the remainder (330 to 360 ms). That is the pool doing
+    # exactly what it should at depth two, so the budget here is two slow
+    # creations. The depth five contract below (every creation fast, p90 150
+    # ms) is the real guarantee and stays strict.
     $slowWindows = @($windowTimes | Where-Object { $_ -gt 300 }).Count
-    if ($slowWindows -le 1) {
-        Write-Pass "new-window: $slowWindows of $($windowTimes.Count) creations over 300ms (at most 1 allowed at the default pool depth)"
+    if ($slowWindows -le 2) {
+        Write-Pass "new-window: $slowWindows of $($windowTimes.Count) creations over 300ms (at most 2 allowed at the default pool depth)"
     } else {
         Write-Fail "new-window: $slowWindows of $($windowTimes.Count) creations over 300ms - the spare pool is not being refilled ahead of demand  [$(($windowTimes | ForEach-Object { [int]$_ }) -join ', ')]"
     }
-    if ($winAvg -le 250) {
-        Write-Pass ("new-window average {0:N0}ms is within budget (250ms)" -f $winAvg)
+    # Same arithmetic for the mean: three fast (60 ms), one cold (770 ms) and
+    # one half wait (360 ms) is 262 ms, so 250 flapped with the count above.
+    if ($winAvg -le 300) {
+        Write-Pass ("new-window average {0:N0}ms is within budget (300ms)" -f $winAvg)
     } else {
-        Write-Fail ("new-window average {0:N0}ms exceeds 250ms" -f $winAvg)
+        Write-Fail ("new-window average {0:N0}ms exceeds 300ms" -f $winAvg)
     }
 }
 Write-Host ""

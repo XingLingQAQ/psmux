@@ -39,7 +39,7 @@ if (Test-Path $local) {
     if ($v -match 'psmux \d+\.\d+\.\d+ \(([0-9a-f]{7,40})') {
         Write-Pass "a repo build names its commit: $($Matches[1])"
     } elseif ($v -match 'unknown commit') {
-        Write-Fail "a repo build reports `unknown commit`: $v"
+        Write-Fail "a repo build reports unknown commit: $v"
     } else {
         Write-Fail "unexpected version line: $v"
     }
@@ -98,7 +98,7 @@ if (-not $cargo) {
                 $v = ((& $exe -V 2>&1) -join "`n")
                 Write-Host "  installed binary reports: $($v -replace "`n", ' | ')"
                 if ($v -match 'unknown commit') {
-                    Write-Fail "a git install still reports `unknown commit` with no git on PATH"
+                    Write-Fail "a git install still reports unknown commit with no git on PATH"
                 } elseif ($v -match 'psmux \d+\.\d+\.\d+ \(([0-9a-f]{7,40})') {
                     $sha = $Matches[1]
                     Write-Pass "a git install names its commit without git on PATH: $sha ($([int]$sw.Elapsed.TotalSeconds)s)"

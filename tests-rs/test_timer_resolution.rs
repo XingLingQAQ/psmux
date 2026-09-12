@@ -14,12 +14,24 @@
 
 use super::{is_high, set_high};
 
+/// `set_high` and `is_high` act on ONE process wide timer period (`HELD` in
+/// timer_res.rs), so these tests cannot run on parallel threads: one test's
+/// `set_high(true)` lands between another's `set_high(false)` and its
+/// `assert!(!is_high())`, and the release test fails about one run in thirty.
+/// Measured on 2026-09-12: 1 of 30 parallel runs failed, 0 of 30 serialised.
+static PERIOD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn hold() -> std::sync::MutexGuard<'static, ()> {
+    PERIOD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A sub-tick sleep must actually be sub-tick while the period is held. This is
 /// the whole point of the module: without the period, this sleep measures
 /// ~15.6ms on stock Windows.
 #[test]
 #[cfg(windows)]
 fn one_ms_sleep_is_not_quantised_to_the_default_tick() {
+    let _period = hold();
     let was = is_high();
     set_high(true);
     assert!(is_high(), "period should be held after set_high(true)");
@@ -52,6 +64,7 @@ fn one_ms_sleep_is_not_quantised_to_the_default_tick() {
 #[test]
 #[cfg(windows)]
 fn period_is_released_again() {
+    let _period = hold();
     set_high(true);
     assert!(is_high());
     set_high(false);
@@ -64,6 +77,7 @@ fn period_is_released_again() {
 #[test]
 #[cfg(windows)]
 fn set_high_is_idempotent() {
+    let _period = hold();
     set_high(false);
     for _ in 0..5 {
         set_high(true);

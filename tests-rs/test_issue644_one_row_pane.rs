@@ -23,7 +23,8 @@
 use ratatui::layout::Rect;
 
 use crate::layout::{CellRunJson, LayoutJson, RowRunsJson};
-use crate::pane::{MIN_PANE_DIM, MIN_PTY_DIM};
+use crate::pane::{MIN_PANE_DIM, MIN_PTY_COLS, MIN_PTY_DIM};
+use crate::tree::split_with_gaps;
 use crate::tree::pane_inner_size;
 
 // ── the sizing rule ─────────────────────────────────────────────────────────
@@ -38,11 +39,36 @@ fn a_one_row_slot_gets_a_one_row_pane() {
 }
 
 #[test]
-fn a_one_column_slot_gets_a_one_column_pane() {
-    // `split-window -h -l 9999` reaches the same place in the other direction.
+fn a_one_column_slot_is_widened_to_the_conpty_floor() {
+    // The column axis is the one place the pane is NOT exactly its slot: a one
+    // column pseudoconsole holding a wide glyph never echoes again after it is
+    // grown back (test_issue534_shrink_wide_erase caught it), so the width
+    // floor is two. The layout applies the same floor to the cell, see
+    // `a_horizontal_cell_is_never_one_column`, so in practice the two agree.
     let (h, w) = pane_inner_size(Rect::new(0, 0, 1, 30), 0);
-    assert_eq!(w, 1, "a one column slot must hold a one column pane, not {w}");
+    assert_eq!(w, MIN_PTY_COLS, "a one column slot is widened to the floor, got {w}");
+    assert_eq!(MIN_PTY_COLS, 2);
     assert_eq!(h, 30);
+}
+
+#[test]
+fn a_horizontal_cell_is_never_one_column() {
+    // Every route to a one column cell goes through split_with_gaps: the
+    // sizes below are what `resize-pane -x 1` and `split-window -h -l 9999`
+    // leave in the tree. With room for two columns per child, the narrow one
+    // is widened at the expense of the largest sibling.
+    for sizes in [vec![1u16, 79], vec![79, 1], vec![1, 1, 78], vec![0, 100]] {
+        let rects = split_with_gaps(true, &sizes, Rect::new(0, 0, 80, 24));
+        for (i, r) in rects.iter().enumerate() {
+            assert!(r.width >= MIN_PTY_COLS, "sizes {sizes:?}: child {i} is {} columns wide", r.width);
+        }
+        let used: u16 = rects.iter().map(|r| r.width).sum::<u16>() + (rects.len() as u16 - 1);
+        assert_eq!(used, 80, "sizes {sizes:?}: the widened cell must come out of a sibling, not thin air");
+    }
+    // A one ROW cell is still legal (tmux PANE_MINIMUM 1), so the vertical
+    // axis keeps handing out exactly what the sizes ask for.
+    let rects = split_with_gaps(false, &[1, 28], Rect::new(0, 0, 120, 30));
+    assert_eq!(rects[0].height, 1, "a one row cell must survive on the vertical axis");
 }
 
 #[test]
@@ -54,7 +80,9 @@ fn pane_size_equals_slot_size_for_every_height() {
         let (h, _) = pane_inner_size(Rect::new(0, 0, 80, height), 0);
         assert_eq!(h, height, "slot of {height} rows must give {height} rows, got {h}");
     }
-    for width in 1..=200u16 {
+    // Columns: exact from the floor upwards. Below it the ConPTY floor wins,
+    // and the layout never produces such a cell anyway.
+    for width in MIN_PTY_COLS..=200u16 {
         let (_, w) = pane_inner_size(Rect::new(0, 0, width, 24), 0);
         assert_eq!(w, width, "slot of {width} cols must give {width} cols, got {w}");
     }
@@ -74,7 +102,7 @@ fn a_slot_can_never_produce_a_zero_sized_pseudoconsole() {
     // zero columns is not a terminal. Everything at or above one is honoured.
     let (h, w) = pane_inner_size(Rect::new(0, 0, 1, 1), 1);
     assert_eq!(h, MIN_PTY_DIM);
-    assert_eq!(w, MIN_PTY_DIM);
+    assert_eq!(w, MIN_PTY_COLS, "columns floor at two, see MIN_PTY_COLS");
     assert_eq!(MIN_PTY_DIM, 1, "tmux's PANE_MINIMUM is 1 (tmux.h:110)");
     assert!(MIN_PANE_DIM > MIN_PTY_DIM, "the new pane target stays a policy number above the floor");
 }

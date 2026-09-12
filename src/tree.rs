@@ -35,26 +35,30 @@ pub fn split_with_gaps(is_horizontal: bool, sizes: &[u16], area: Rect) -> Vec<Re
         child_sizes.push(size);
     }
 
-    // If total space allows at least 1 cell per child, guarantee that minimum
-    // by stealing from the largest siblings. This prevents previews of windows
+    // If total space allows the minimum for every child, guarantee it by
+    // stealing from the largest siblings. This prevents previews of windows
     // with many nested splits from completely hiding deeply-nested panes when
-    // the preview area is small.
-    if total_available >= n as u16 {
+    // the preview area is small, and on the horizontal axis it is what keeps a
+    // cell from ever being one column wide: a pseudoconsole squeezed to one
+    // column with a wide glyph in it never echoes again after it grows back
+    // (see `crate::pane::MIN_PTY_COLS`). Rows keep tmux's minimum of one.
+    let min_cell: u16 = if is_horizontal { crate::pane::MIN_PTY_COLS } else { 1 };
+    if total_available >= n as u16 * min_cell {
         loop {
-            let mut zero_idx: Option<usize> = None;
+            let mut short_idx: Option<usize> = None;
             for (i, &s) in child_sizes.iter().enumerate() {
-                if s == 0 { zero_idx = Some(i); break; }
+                if s < min_cell { short_idx = Some(i); break; }
             }
-            let Some(zi) = zero_idx else { break };
-            // Find largest child with > 1 cell to steal from.
+            let Some(si) = short_idx else { break };
+            // Find the largest child that can spare a cell and stay at the minimum.
             let mut max_idx = 0usize;
             let mut max_val = 0u16;
             for (i, &s) in child_sizes.iter().enumerate() {
                 if s > max_val { max_val = s; max_idx = i; }
             }
-            if max_val <= 1 { break; }
+            if max_val <= min_cell { break; }
             child_sizes[max_idx] -= 1;
-            child_sizes[zi] += 1;
+            child_sizes[si] += 1;
         }
     }
 
@@ -256,10 +260,16 @@ pub fn compute_rects(node: &Node, area: Rect, out: &mut Vec<(Vec<usize>, Rect)>)
 /// program kept running and `capture-pane` kept showing live content, so the
 /// pane looked healthy from every server side check while the client drew
 /// nothing at all.
+///
+/// Width is the one axis with a floor above one: `MIN_PTY_COLS` (2), because a
+/// one column pseudoconsole holding a wide glyph never echoes again after it is
+/// grown back (issue #534's suite caught this the day the floor was dropped to
+/// one). `split_with_gaps` applies the same floor to the cell, so the slot and
+/// the pane still agree.
 #[must_use]
 pub fn pane_inner_size(rect: Rect, border_rows: u16) -> (u16, u16) {
     let height = rect.height.saturating_sub(border_rows).max(crate::pane::MIN_PTY_DIM);
-    let width = rect.width.max(crate::pane::MIN_PTY_DIM);
+    let width = rect.width.max(crate::pane::MIN_PTY_COLS);
     (height, width)
 }
 

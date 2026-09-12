@@ -1097,13 +1097,33 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
 /// into the only row on offer.  `MIN_PTY_DIM` is the floor for that case.
 pub const MIN_PANE_DIM: u16 = 2;
 
-/// Hard floor for a pseudoconsole dimension.
+/// Hard floor for a pseudoconsole HEIGHT.
 ///
 /// tmux's own limit is `PANE_MINIMUM 1` (tmux.h:110) and a one row pane is
-/// legal there, painted like any other.  ConPTY agrees: `CreatePseudoConsole`
-/// with a height of 1 starts a child that renders normally, so a pane is sized
-/// to the slot the layout gave it and only zero is refused.
+/// legal there, painted like any other.  ConPTY agrees for rows:
+/// `CreatePseudoConsole` with a height of 1 starts a child that renders
+/// normally, and a pane squeezed to one row and grown back keeps echoing
+/// (measured 2026-09-12 with wide glyphs in the buffer and erase sequences
+/// written at one row).  So a pane is sized to the slot the layout gave it and
+/// only zero rows is refused.
 pub const MIN_PTY_DIM: u16 = 1;
+
+/// Hard floor for a pseudoconsole WIDTH, and the narrowest cell the layout will
+/// hand out on the horizontal axis.
+///
+/// This one is NOT tmux's 1, and the difference is measured, not assumed.  A
+/// pseudoconsole resized to one column while its buffer holds a double width
+/// glyph (CJK, or a VS16 emoji) never recovers: after growing back to 31
+/// columns the child repaints its prompt and then stops echoing input for good,
+/// with the shell process still alive.  pwsh and cmd.exe behave the same, so it
+/// is conhost, not the shell.  Plain ASCII at one column survives the same
+/// sequence, and one ROW with the same glyphs survives too, which is why only
+/// the width has a floor of two.  `tests/test_issue534_shrink_wide_erase.ps1`
+/// is the end to end proof: it squeezes a wide glyph pane to the minimum, erases
+/// over it, grows it back and expects an echo.  The floor is applied in
+/// `split_with_gaps` so the CELL is never one column either, keeping
+/// `pane_width` equal to the slot width (#644's invariant).
+pub const MIN_PTY_COLS: u16 = 2;
 
 /// Minimum rows for a split to be allowed — each resulting pane needs at
 /// least this many rows to run a shell prompt.
